@@ -1,0 +1,25 @@
+<!-- @dsCard group="Cards" height=300 subtitle="Model with status and measurements" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><style>
+body{margin:0;padding:24px;background:var(--surface-000)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}</style></head><body>
+<div class="grid"><article class="cw-model-card" tabindex="0" aria-selected="true">
+  <div class="cw-model-card__head"><div><h3 class="cw-model-card__name">LTX-2.3</h3><div class="cw-model-card__vendor">Lightricks</div></div>
+  <span class="cw-status" data-state="ok"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="currentColor"/></svg>Runs</span></div>
+  <div class="cw-model-card__caps"><span class="cw-cap">t2v</span><span class="cw-cap">i2v</span><span class="cw-cap">audio</span></div>
+  <dl class="cw-model-card__stats"><div><dt>VRAM</dt><dd>11.8 GB</dd></div><div><dt>Quant</dt><dd>fp8</dd></div><div><dt>s/step</dt><dd>2.4</dd></div></dl>
+  <div class="cw-model-card__foot"><span class="cw-muted" style="font-size:12px">Apache 2.0 · 720p, 5 s</span><button class="cw-btn cw-btn--secondary cw-btn--sm">Details</button></div>
+</article><article class="cw-model-card" tabindex="0" aria-selected="false">
+  <div class="cw-model-card__head"><div><h3 class="cw-model-card__name">Wan 2.2 14B</h3><div class="cw-model-card__vendor">Wan-AI</div></div>
+  <span class="cw-status" data-state="slow"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 3a5 5 0 0 1 0 10z" fill="currentColor"/></svg>Slow</span></div>
+  <div class="cw-model-card__caps"><span class="cw-cap">t2v</span><span class="cw-cap">i2v</span></div>
+  <dl class="cw-model-card__stats"><div><dt>VRAM</dt><dd>15.6 GB</dd></div><div><dt>Quant</dt><dd>Q5_K_M</dd></div><div><dt>s/step</dt><dd>18.7</dd></div></dl>
+  <div class="cw-model-card__foot"><span class="cw-muted" style="font-size:12px">Apache 2.0 · offloading</span><button class="cw-btn cw-btn--secondary cw-btn--sm">Details</button></div>
+</article><article class="cw-model-card" tabindex="0" aria-selected="false">
+  <div class="cw-model-card__head"><div><h3 class="cw-model-card__name">Wan 2.2 14B</h3><div class="cw-model-card__vendor">Wan-AI</div></div>
+  <span class="cw-status" data-state="fail"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>Won't run</span></div>
+  <div class="cw-model-card__caps"><span class="cw-cap">t2v</span><span class="cw-cap">i2v</span></div>
+  <dl class="cw-model-card__stats"><div><dt>VRAM</dt><dd>56 GB</dd></div><div><dt>Quant</dt><dd>bf16</dd></div><div><dt>s/step</dt><dd>–</dd></div></dl>
+  <div class="cw-model-card__foot"><span class="cw-muted" style="font-size:12px">Apache 2.0 · full precision</span><button class="cw-btn cw-btn--secondary cw-btn--sm">Details</button></div>
+</article></div>
+</body></html>

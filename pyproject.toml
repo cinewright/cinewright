@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cinewright"
+version = "0.0.0"
+description = "Local image, video and audio generation with open-weight models."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Cinewright contributors" }]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Web Environment",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "pydantic>=2.9",
+    "pyyaml>=6.0.2",
+    "psutil>=6.1",
+    "httpx>=0.28",
+    "mcp>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.8", "pillow>=11", "build>=1.2"]
+
+[project.urls]
+Homepage = "https://github.com/cinewright/cinewright"
+Issues = "https://github.com/cinewright/cinewright/issues"
+
+[project.gui-scripts]
+cinewright = "cinewright.launcher:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cinewright", "src/cinewright_worker"]
+# The built web UI is not tracked in git; scripts/build.py produces it before the wheel.
+artifacts = ["src/cinewright/web_dist/**"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/web/node_modules", "/build", "/dist"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+"src/cinewright_worker/**" = ["UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

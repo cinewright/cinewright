@@ -1,0 +1,12 @@
+<!-- @dsCard group="Status" height=130 subtitle="Calibration status light" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><style>
+body{margin:0;padding:24px;background:var(--surface-000)}
+.col{display:flex;flex-direction:column;gap:12px}</style></head><body>
+
+<div class="col">
+  <span class="cw-status" data-state="ok"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="currentColor"/></svg>Runs <span class="cw-status__detail">· 4.1 s/step</span></span>
+  <span class="cw-status" data-state="slow"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 3a5 5 0 0 1 0 10z" fill="currentColor"/></svg>Runs slowly <span class="cw-status__detail">· offloading, 31 GB RAM</span></span>
+  <span class="cw-status" data-state="fail"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>Won't run <span class="cw-status__detail">· needs 52 GB VRAM</span></span>
+</div>
+</body></html>

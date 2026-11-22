@@ -1,0 +1,11 @@
+<!-- @dsCard group="Feedback" height=200 subtitle="Approval and error" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><style>
+body{margin:0;padding:24px;background:var(--surface-000)}
+.col{display:flex;flex-direction:column;gap:12px;max-width:720px}</style></head><body>
+
+<div class="col">
+  <div class="cw-banner" role="status"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3.5M9 13v.01" stroke-linecap="round"/></svg><div class="cw-banner__text"><p class="cw-banner__title">Approval needed: job on rented host</p><p class="cw-banner__body">Agent <span class="cw-mono">storyboard-bot</span> wants to render 3 clips on gpu-rent-a40. Estimated €0.84, data class Public.</p></div><div class="cw-banner__actions"><button class="cw-btn cw-btn--ghost cw-btn--sm">Decline</button><button class="cw-btn cw-btn--approve cw-btn--sm">Approve</button></div></div>
+  <div class="cw-banner" data-tone="fail" role="alert"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><div class="cw-banner__text"><p class="cw-banner__title">Host gpu-lan-01 is not responding</p><p class="cw-banner__body">Last contact 4 minutes ago. Two jobs are waiting; the queue is moving them to local.</p></div><div class="cw-banner__actions"><button class="cw-btn cw-btn--secondary cw-btn--sm">Check host</button></div></div>
+</div>
+</body></html>

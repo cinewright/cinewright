@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build output
+build/
+dist/
+src/cinewright/web_dist/
+
+# Web UI
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Local data and secrets
+.env
+*.pem
+*.key
+.cinewright-dev/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

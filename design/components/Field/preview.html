@@ -1,0 +1,13 @@
+<!-- @dsCard group="Forms" height=170 subtitle="Input, select, error state" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><style>
+body{margin:0;padding:24px;background:var(--surface-000)}
+.row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}</style></head><body>
+
+<div class="row">
+  <label class="cw-field"><span class="cw-field__label">Prompt</span><input class="cw-input" style="width:280px" placeholder="Harbour at night, fog, neon reflections"><span class="cw-field__hint">Translated into the model's prompt dialect.</span></label>
+  <label class="cw-field"><span class="cw-field__label">Seed</span><input class="cw-input cw-input--mono" style="width:120px" value="2814033"><span class="cw-field__hint">Empty = random</span></label>
+  <label class="cw-field" data-invalid="true"><span class="cw-field__label">Frames</span><input class="cw-input cw-input--mono" style="width:100px" value="241"><span class="cw-field__hint">Max. 121 at 720p</span></label>
+  <label class="cw-field"><span class="cw-field__label">Quantization</span><select class="cw-select"><option>Q5_K_M</option><option>Q8_0</option><option>fp8</option></select></label>
+</div>
+</body></html>
