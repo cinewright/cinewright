@@ -1,0 +1,101 @@
+# LTX-2 2.3 Distilled 1.0 22B. Source of truth: Wan2GP defaults/ltx2_22B_distilled.json and
+# defaults/ltx2_22B_distilled_gguf_{q4_k_m,q6_k,q8_0}.json at the pinned commit
+# (38758d3c73366422efcf609abb63cab8385f3552) and the headless probe of that commit.
+# Hashes and sizes: Hugging Face API (LFS oid = sha256) for DeepBeepMeep/LTX-2 at the revision below,
+# cross-checked against the X-Linked-Etag of the resolve/main URLs on 2026-11-22.
+#
+# Shared dependencies Wan2GP downloads for every LTX-2.3 22B model (not pinned here), all from DeepBeepMeep/LTX-2:
+# - preload file ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors (preload_URLs, inherited from ltx2_22B)
+# - ltx-2.3-22b_vae.safetensors, ltx-2.3-22b_audio_vae.safetensors, ltx-2.3-22b_vocoder.safetensors,
+#   ltx-2.3-22b_text_embedding_projection.safetensors, ltx-2.3-22b_embeddings_connector.safetensors
+#   (the GGUF "light" checkpoints rely on these separate connector weights)
+# - ltx-2.3-spatial-upscaler-x2-1.1.safetensors, ltx-2.3-temporal-upscaler-x2-1.0.safetensors
+# - text encoder gemma-3-12b-it-qat-q4_0-unquantized/gemma-3-12b-it-qat-q4_0-unquantized.safetensors or its
+#   _quanto_bf16_int8 variant (Wan2GP's text_encoder_quantization setting), plus tokenizer files
+# - IC-LoRAs (union control, outpaint, inpaint, ingredients, HDR, ID voice) are fetched on demand by Wan2GP
+id: ltx-2.3-distilled-22b
+name: LTX-2 2.3 Distilled 1.0 22B
+vendor: Lightricks
+family: LTX-2
+# Wan2GP capabilities: text_to_video, image_to_video, text_to_image, image_to_image, audio_output (soundtrack
+# generated with the video). Wan2GP also reports video_to_video / control video, not mapped yet.
+capabilities: [t2v, i2v, t2i, i2i, audio]
+limits:
+  # Wan2GP resolution choices for a 1920x1088 pixel budget, aligned to VAE block size 64, 4K presets off.
+  resolutions: [
+    1920x1088, 1088x1920, 1408x1408, 1536x1024, 1024x1536, 1920x832, 832x1920, 2048x768, 1024x1792, 1088x1088,
+    1024x1024, 1280x704, 704x1280, 1600x384, 1280x512, 512x1280, 1088x832, 832x1088, 960x960, 960x512,
+    512x960, 832x576, 576x832, 704x704, 832x448, 448x832, 640x384, 384x640, 512x512, 576x320,
+    320x576, 448x448, 448x256, 256x448, 320x320,
+  ]
+  # Wan2GP frame slider maximum for sliding-window models (737). Frame counts are 17 + 8n.
+  max_frames: 737
+  fps: [24]
+  # 737 frames / 24 fps, rounded down.
+  max_duration_s: 30.7
+license:
+  # Hugging Face card of Lightricks/LTX-2.3: license other, license_name ltx-2-community-license-agreement.
+  # Entities with annual revenue of USD 10 million or more need a paid commercial licence, so commercial use
+  # needs a case-by-case reading. Section 7 (export controls and sanctions) names no countries.
+  name: LTX-2 Community License Agreement
+  url: https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2
+  commercial_use: null
+  geo_exclusions: []
+quantizations:
+  # bf16 / int8: Wan2GP model type ltx2_22B_distilled, file picked by its transformer_quantization setting.
+  - id: bf16
+    format: safetensors
+    files:
+      - name: ltx-2.3-22b-distilled_diffusion_model.safetensors
+        url: https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.3-22b-distilled_diffusion_model.safetensors
+        sha256: 6529dc333aaf162cc69bfae38459a09b6c1e242fdba175ac032f80b7e70b44bf
+        size_bytes: 37987776440
+  - id: int8
+    format: safetensors
+    files:
+      - name: ltx-2.3-22b-distilled_diffusion_model_quanto_int8.safetensors
+        url: https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.3-22b-distilled_diffusion_model_quanto_int8.safetensors
+        sha256: e23d1171acabb8ee91ade5949b9297962e4b9b19924fd6a625839a8685305691
+        size_bytes: 19447662547
+  # GGUF variants: one Wan2GP model type each.
+  - id: Q4_K_M
+    format: gguf
+    files:
+      - name: ltx-2.3-22b-distilled-Q4_K_M_light.gguf
+        url: https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.3-22b-distilled-Q4_K_M_light.gguf
+        sha256: e324dbdacfc228e02e79e2f952c8274b16ba155d029db5f9abdd55a311325208
+        size_bytes: 12971904032
+  - id: Q6_K
+    format: gguf
+    files:
+      - name: ltx-2.3-22b-distilled-Q6_K_light.gguf
+        url: https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.3-22b-distilled-Q6_K_light.gguf
+        sha256: 15a3a483ab06999fb800d25956d7290e08b76974f04be5df6093bf7cdbf5ea79
+        size_bytes: 16116771872
+  - id: Q8_0
+    format: gguf
+    files:
+      - name: ltx-2.3-22b-distilled-Q8_0_light.gguf
+        url: https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/ltx-2.3-22b-distilled-Q8_0_light.gguf
+        sha256: 14881907d8e766f55cbe9d18e8514c893aad499a0638eb421a6194bef7cfee8f
+        size_bytes: 20609436704
+prompt_dialect:
+  style: natural
+  notes: Describe the scene in chronological order, including camera moves, spoken lines and sounds; the soundtrack follows the prompt.
+defaults:
+  # Wan2GP default settings for ltx2_22B_distilled. The distilled pipeline locks the 8-step schedule
+  # (lock_inference_steps); guidance is left to Wan2GP. Its default 1280x720 is aligned to 1280x704 (VAE block 64).
+  steps: 8
+  resolution: 1280x704
+  frames: 241
+  fps: 24
+source:
+  provider: huggingface
+  repo: DeepBeepMeep/LTX-2
+  revision: 1798f80b3340d2f87cffae42f9fa5367d0963d0c
+engines:
+  - {engine: wan2gp, model_type: ltx2_22B_distilled, quant: bf16}
+  - {engine: wan2gp, model_type: ltx2_22B_distilled, quant: int8}
+  - {engine: wan2gp, model_type: ltx2_22B_distilled_gguf_q4_k_m, quant: Q4_K_M}
+  - {engine: wan2gp, model_type: ltx2_22B_distilled_gguf_q6_k, quant: Q6_K}
+  - {engine: wan2gp, model_type: ltx2_22B_distilled_gguf_q8_0, quant: Q8_0}

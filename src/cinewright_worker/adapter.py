@@ -72,7 +72,7 @@ class EngineHealth:
 
 @runtime_checkable
 class EngineAdapter(Protocol):
-    """Spec: Engines und Hosts, Adapter-Interface. One adapter instance per worker process."""
+    """One adapter instance per worker process."""
 
     name: str
 

@@ -30,13 +30,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.8", "pillow>=11", "build>=1.2"]
+dev = ["pytest>=8.3", "ruff>=0.8", "pillow>=11", "build>=1.2", "uv>=0.9"]
 
 [project.urls]
 Homepage = "https://github.com/cinewright/cinewright"
 Issues = "https://github.com/cinewright/cinewright/issues"
 
-[project.gui-scripts]
+# Program entry point. End users start Cinewright from the Start menu shortcut
+# (pythonw.exe -m cinewright, no console window); this script exists for CI and development.
+[project.scripts]
 cinewright = "cinewright.launcher:main"
 
 [tool.hatch.build.targets.wheel]
@@ -62,3 +64,7 @@ ignore = ["S101", "B008"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.vulture]
+# Protocol parameter called positionally by the approvals routes (housekeeping dead_code prefilter).
+ignore_names = ["approve"]

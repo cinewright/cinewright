@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Path, Request, Response
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from cinewright.api.deps import BearerToken, Core, WorkerId, binary_body, read_upload
 from cinewright.api.problems import PROBLEM_RESPONSE
@@ -75,7 +76,8 @@ def post_events(job_id: str, events: WorkerEvents, core: Core, worker_id: Worker
 )
 async def upload_output(request: Request, job_id: str, core: Core, worker_id: WorkerId, name: str = OutputName) -> OutputUploaded:
     data, media_type = await read_upload(request)
-    return core.store_output(worker_id, job_id, name, media_type, data)
+    # Hashing and writing a large file must not block the event loop (SSE, leases, heartbeats).
+    return await run_in_threadpool(core.store_output, worker_id, job_id, name, media_type, data)
 
 
 @router.post("/jobs/{job_id}/complete", status_code=204, operation_id="completeJob")

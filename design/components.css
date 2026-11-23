@@ -40,7 +40,7 @@
 .cw-btn--sm { height: 26px; padding: 0 var(--space-2); font-size: 12px; }
 .cw-btn[disabled] { background: var(--surface-200); border-color: transparent; color: var(--ink-faint); cursor: not-allowed; }
 
-/* Status light (Ampel) */
+/* Status light */
 .cw-status { display: inline-flex; align-items: center; gap: var(--space-2); font: 500 13px/18px var(--font-sans); }
 .cw-status svg { width: 14px; height: 14px; flex: none; }
 .cw-status[data-state="ok"] { color: var(--status-ok); }

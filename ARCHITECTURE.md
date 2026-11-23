@@ -9,8 +9,9 @@ Product background, goals and the roadmap live in the specification ("Cinewright
 | --- | --- | --- |
 | Internal API | `src/cinewright/api/` | The only API. HTTP/JSON under `/api/v1`, contract in `api/schemas.py`, published as `openapi.json`. Web UI, MCP server and workers are clients. |
 | Capability registry | `src/cinewright/core/registry.py`, `registry/models/*.yaml` | One YAML descriptor per model (`ModelDescriptor`): capabilities, limits, licence, quantizations with pinned file hashes, engine bindings. |
-| Model store | `src/cinewright/core/modelstore.py` | Central model directory owned by the core: downloads with hash check, quota, LRU eviction. |
-| Calibration | `src/cinewright/core/calibration.py` | Hardware detection (GPU, VRAM, driver, RAM, disk) and per-model benchmarks; status runs / slow / wont_run. |
+| Hardware detection | `src/cinewright/core/hardware.py` | GPU, VRAM, driver, RAM and free disk of the data directory, through `nvidia-smi` and psutil. |
+| Model store (phase 1, #3) | planned `src/cinewright/core/modelstore.py` | Central model directory owned by the core: downloads with hash check, quota, LRU eviction. |
+| Calibration (phase 1, #4) | planned `src/cinewright/core/calibration.py`; results read in `core/core.py` | Per-model benchmarks; status runs / slow / wont_run. |
 | Router | `src/cinewright/core/router.py` | Maps a `JobRequest` to model, quantization and host. Check order: policy (data class, licence), feasibility (capability, limits, calibration), cost, runtime. |
 | Scheduler | `src/cinewright/core/scheduler.py` | Persistent queue in SQLite; interactive before batch; leases jobs to workers (pull). |
 | Asset store | `src/cinewright/core/assets.py` | Content-addressed by SHA-256, one provenance record per asset, sidecar JSON export. |
@@ -47,7 +48,9 @@ Internal API routes (scaffold status in brackets; `501` answers with problem typ
 ## Boundaries
 
 - The API binds to `127.0.0.1` by default. Binding to another address requires an access token (Phase 1); without one the core refuses to start.
-- Browser attacks on the local API: the core accepts only `Host` values `127.0.0.1:<port>` / `localhost:<port>`, rejects cross-origin `Origin` headers and requires `application/json` for request bodies, so a web page can neither post nor DNS-rebind to it. The same applies to `/mcp`.
+- Browser attacks on the local API: the core accepts only `Host` values `127.0.0.1:<port>` / `localhost:<port>`, rejects foreign `Origin` headers and cross-site `Sec-Fetch-Site` requests (except top-level navigation to the UI), refuses the body types a page can send without a CORS preflight (`multipart/form-data`, `application/x-www-form-urlencoded`, `text/plain`), and sends `Cross-Origin-Resource-Policy: same-origin`. A web page can therefore neither post to, embed from nor DNS-rebind to it. The same applies to `/mcp`.
+- Asset content is served only with the media type recorded at upload, from an allow-list; anything else is a download, never rendered in the UI's origin.
+- The worker loop runs locally with the user's rights; an installed core starts no worker until phase 1 (#2).
 - Workers authenticate with a per-worker bearer token issued at registration; registration needs the enrollment token the core hands to the worker processes it starts. Remote workers (Phase 3) add mTLS with certificates from Cinewright's own CA.
 - Engines run in their own process and environment and never receive the core's secrets. After provisioning, downloads go only through the core.
 - Model files: safetensors and GGUF only, no pickle, no `trust_remote_code`; every file is pinned by SHA-256 in the registry.
@@ -61,12 +64,15 @@ Internal API routes (scaffold status in brackets; `501` answers with problem typ
 - **Release channel**: stable releases from `main` as GitHub releases with the Windows installer as asset and build provenance attestation. Release candidates from `next` exist only as workflow artifacts of the candidate PR, so the in-app update channel is `stable` only. (2026-11-22)
 - **Distribution**: a real Windows installer for end users, no command line. No PyPI package. Linux follows later. (2026-11-22)
 - **Code signing**: installers are not Authenticode-signed yet (paid certificate = owner cost decision); provenance comes from GitHub attestations. (2026-11-22)
-- **Scope of the first build**: Phase 0 and the scaffold (contracts, structure, walking skeleton with a mock engine). Phase 1 to 4 are issues the owner releases with `po:ready`. (2026-11-22)
+- **Scope of the first build**: Phase 0 and the scaffold (contracts, structure, walking skeleton with a mock engine). Phase 1 to 4 are issues the owner releases with `po:ready`; tracking issues #24 (Phase 1, Gate 1) to #27 (Phase 4). (2026-11-22)
+- **Governance profile**: `cli`, `input-processing`, `web`. `cli` only because the package has a program entry point (`[project.scripts]`, used by CI); end users never see a command line. (2026-11-22)
 - **Wan2GP pin**: commit `38758d3` (2026-11-13), the newest one older than the spec's 7-day quarantine. Engine env: Python 3.11.14, torch 2.10.0 + CUDA 13.0 (Wan2GP's recommendation for RTX 20xx–50xx, needs driver R580+). Verified on the reference PC (RTX 5080): `init()` runs headless without loading models. (2026-11-22)
 - **MVP model ids in Wan2GP**: `ltx2_22B_distilled` ("LTX-2 2.3 Distilled 22B", also GGUF), `i2v_2_2` / `t2v_2_2` (Wan 2.2 14B), `z_image` (Z-Image Turbo 6B). (2026-11-22)
 - **Design**: the Cinewright design system (tokens, `cw-*` components, logos) overrides the spec's starting colour values. Fonts Geist and Geist Mono (SIL OFL) ship with the app instead of loading from Google Fonts, so the UI works offline and makes no third-party requests. (2026-11-22)
 - **Worker split**: `cinewright_worker` is a separate top-level package without third-party dependencies, so it can run inside engine environments (Wan2GP: Python 3.11) while the core needs Python 3.12. (2026-11-22)
 - **Public surface**: routes and MCP tools; `python -m cinewright.devtools surface` prints them for governance's classification check. `openapi.json` is generated and must match the code (test). (2026-11-22)
 - **Default data class** of a job is `private`, the stricter of the two non-biometric classes. (2026-11-22)
+- **Client attribution**: `POST /jobs` takes the optional headers `X-Cinewright-Client` (`ui`/`mcp`) and `X-Cinewright-Agent`; the MCP server sets them, so MCP jobs and their provenance name the agent. Self-declared until per-agent tokens arrive (#7). Neither header is CORS-safelisted. (2026-11-23)
+- **Installer dependencies**: the build generates a hash-locked requirements file for Windows with uv; the installer installs it with `--require-hashes` and the wheel with `--no-deps`, so every install of a release gets the same packages. (2026-11-23)
 - **Port** 8737 on 127.0.0.1; data in `%LOCALAPPDATA%\Cinewright` (Windows) or `$XDG_DATA_HOME/cinewright`, overridable with `CINEWRIGHT_HOME`. (2026-11-22)
 - **Language**: English for code, docs, UI and repository communication. (2026-11-22)

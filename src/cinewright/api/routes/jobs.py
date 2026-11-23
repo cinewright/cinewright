@@ -14,6 +14,9 @@ from cinewright.api.schemas import ClientKind, Estimate, Job, JobList, JobReques
 router = APIRouter(tags=["jobs"], responses={404: PROBLEM_RESPONSE, 409: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501: PROBLEM_RESPONSE})
 
 SSE_KEEPALIVE_SECONDS = 15
+CLIENT_HEADER = "X-Cinewright-Client"
+AGENT_HEADER = "X-Cinewright-Agent"
+AGENT_PATTERN = r"^[A-Za-z0-9 ._-]{1,64}$"
 
 
 @router.post("/estimate", response_model=Estimate, operation_id="estimate")
@@ -22,8 +25,18 @@ def estimate(request: JobRequest, core: Core) -> Estimate:
 
 
 @router.post("/jobs", response_model=Job, status_code=202, operation_id="submitJob")
-def submit_job(request: JobRequest, core: Core) -> Job:
-    return core.submit_job(request, ClientKind.UI, None)
+def submit_job(
+    request: JobRequest,
+    core: Core,
+    client: ClientKind = Header(default=ClientKind.UI, alias=CLIENT_HEADER, description="Client that submits the job"),
+    agent: str | None = Header(
+        default=None,
+        alias=AGENT_HEADER,
+        pattern=AGENT_PATTERN,
+        description="Name of the agent behind an MCP client; self-declared, recorded only for client `mcp`",
+    ),
+) -> Job:
+    return core.submit_job(request, client, agent if client == ClientKind.MCP else None)
 
 
 @router.get("/jobs", response_model=JobList, operation_id="listJobs")

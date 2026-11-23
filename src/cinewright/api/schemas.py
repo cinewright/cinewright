@@ -48,7 +48,7 @@ class Capability(StrEnum):
 
 
 class DataClass(StrEnum):
-    """Routing policy class of a job, asset or cast entry (spec: Sicherheit, Datenklassen)."""
+    """Routing policy class of a job, asset or cast entry."""
 
     PUBLIC = "public"
     PRIVATE = "private"
@@ -606,7 +606,7 @@ class LeaseRequest(Contract):
 class WorkerInput(Contract):
     sha256: Sha256
     media_type: str
-    url: str = Field(description="Core URL the worker downloads the input from")
+    url: str = Field(description="Path on the core, e.g. `/api/v1/worker/inputs/<sha256>`, resolved against the worker's core URL")
 
 
 class WorkerJob(Contract):

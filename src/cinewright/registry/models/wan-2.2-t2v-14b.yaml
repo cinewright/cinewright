@@ -1,0 +1,79 @@
+# Wan2.2 Text2video 14B (A14B, two experts). Source of truth: Wan2GP defaults/t2v_2_2.json at the pinned commit
+# (38758d3c73366422efcf609abb63cab8385f3552) and the headless probe of that commit.
+# Hashes and sizes: Hugging Face API (LFS oid = sha256) for DeepBeepMeep/Wan2.2 at the revision below,
+# cross-checked against the X-Linked-Etag of the resolve/main URLs on 2026-11-22.
+#
+# Each quantization has two files: the high-noise expert (URLs) and the low-noise expert (URLs2).
+# Not listed: the *_quanto_mfp16_int8 files, which Wan2GP picks for int8 only on GPUs without bf16 support.
+#
+# Shared dependencies Wan2GP downloads for every Wan 14B model (not pinned here), all from DeepBeepMeep/Wan2.1:
+# - text encoder umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors or umt5-xxl/models_t5_umt5-xxl-enc-quanto_int8.safetensors
+#   (Wan2GP's text_encoder_quantization setting), plus tokenizer files
+# - Wan2.1_VAE.safetensors, Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors
+# - xlm-roberta-large/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors, plus tokenizer files
+id: wan-2.2-t2v-14b
+name: Wan2.2 Text2video 14B
+vendor: Wan-AI
+family: Wan2.2
+# Wan2GP capabilities: text_to_video and text_to_image (its image mode). video_to_video / continuation is not mapped yet.
+capabilities: [t2v, t2i]
+limits:
+  # Wan2GP resolution choices for a 1920x1088 pixel budget, VAE block size 16, 4K presets off.
+  resolutions: [
+    1920x1088, 1088x1920, 1440x1440, 1536x1024, 1024x1536, 1920x832, 832x1920, 2048x768, 1024x1792, 1088x1088,
+    1024x1024, 1280x720, 720x1280, 1600x400, 1280x544, 544x1280, 1104x832, 832x1104, 960x960, 960x544,
+    544x960, 832x624, 624x832, 720x720, 832x480, 480x832, 672x384, 384x672, 512x512, 576x320,
+    320x576, 448x448, 448x256, 256x448, 320x320,
+  ]
+  # Wan2GP frame slider maximum for sliding-window models (737). Frame counts are 5 + 4n.
+  max_frames: 737
+  fps: [16]
+  # 737 frames / 16 fps, rounded down.
+  max_duration_s: 46.0
+license:
+  # Hugging Face card of Wan-AI/Wan2.2-T2V-A14B: license apache-2.0.
+  name: Apache-2.0
+  url: https://www.apache.org/licenses/LICENSE-2.0
+  commercial_use: true
+  geo_exclusions: []
+quantizations:
+  # Wan2GP picks the files by its transformer_quantization setting: bf16 = first URL, int8 = the quanto bf16 int8 file.
+  - id: bf16
+    format: safetensors
+    files:
+      - name: wan2.2_text2video_14B_high_mbf16.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Wan2.2/resolve/main/wan2.2_text2video_14B_high_mbf16.safetensors
+        sha256: 1489651bfbf7d312b6133b692034652d89b46368422a05b4ff7b093216390cf3
+        size_bytes: 28948971991
+      - name: wan2.2_text2video_14B_low_mbf16.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Wan2.2/resolve/main/wan2.2_text2video_14B_low_mbf16.safetensors
+        sha256: f90952807523b8cb37156e6874540b838966e9af0ab2a21d617a3ca9ee29549c
+        size_bytes: 28948971991
+  - id: int8
+    format: safetensors
+    files:
+      - name: wan2.2_text2video_14B_high_quanto_mbf16_int8.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Wan2.2/resolve/main/wan2.2_text2video_14B_high_quanto_mbf16_int8.safetensors
+        sha256: 84e863044fe98e8e380a9886e7fc762238c378e55f50b109bf6fd4dce78e3cd8
+        size_bytes: 14903022013
+      - name: wan2.2_text2video_14B_low_quanto_mbf16_int8.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Wan2.2/resolve/main/wan2.2_text2video_14B_low_quanto_mbf16_int8.safetensors
+        sha256: e2ab10059d3d2194db68c862858bf1f22b9347ca3ce0c1663ebcfa66c517d34c
+        size_bytes: 14903022013
+prompt_dialect:
+  style: natural
+  notes: Describe the subject, action, setting, framing, light and camera movement.
+defaults:
+  # Wan2GP default settings for t2v_2_2 (guidance_scale 4 for the high-noise phase; guidance2_scale 3 stays Wan2GP's default).
+  steps: 30
+  guidance: 4
+  resolution: 832x480
+  frames: 81
+  fps: 16
+source:
+  provider: huggingface
+  repo: DeepBeepMeep/Wan2.2
+  revision: c3308829fe5145559c1dbd48e5ef1f23c367d4bc
+engines:
+  - {engine: wan2gp, model_type: t2v_2_2, quant: bf16}
+  - {engine: wan2gp, model_type: t2v_2_2, quant: int8}
