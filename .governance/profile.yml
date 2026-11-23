@@ -1,0 +1,36 @@
+# Project parameters for nullthrone/governance. Owner-only file (protected).
+# Confirmed by the owner during onboarding on 2026-11-22.
+version: 1
+language: python
+runtime_version: "3.12"
+profiles:
+  - cli
+  - input-processing
+  - web
+package:
+  name: cinewright
+  import_name: cinewright
+  publish: none
+commands:
+  setup: python -m pip install -e ".[dev]"
+  build: python scripts/build.py
+  test: pytest -q
+  lint: ruff check . && ruff format --check src tests
+  version: python -m cinewright --version
+  set_version: python3 "$GOV/scripts/set_version.py" "$VERSION"
+classification:
+  api: none
+  surface:
+    - python -m cinewright.devtools surface
+artifacts: dist/CinewrightSetup-*.exe
+docs:
+  site: false
+  locales: []
+preview:
+  type: artifact
+housekeeping:
+  dead_code: "python -m pip install -q vulture && vulture src --min-confidence 80"
+  web_checks: []
+fuzz:
+  auto: true
+uncertain: []

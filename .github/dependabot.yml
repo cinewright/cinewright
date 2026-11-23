@@ -1,0 +1,14 @@
+# Managed by nullthrone/governance. Workflows are governance-managed, so github-actions is not updated here.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    labels:
+      - dependencies
