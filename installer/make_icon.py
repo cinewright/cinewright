@@ -14,7 +14,6 @@ from __future__ import annotations
 import math
 import re
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image
@@ -29,7 +28,8 @@ FAVICON_SIZES = (16,)
 MARK_SIZES = (24, 32, 48, 64, 128, 256)
 SUPERSAMPLE = 16
 
-_SVG_NS = "{http://www.w3.org/2000/svg}"
+_TAG = re.compile(r"<(svg|path)\b([^>]*)>", re.IGNORECASE)
+_ATTR = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
 _TOKEN = re.compile(r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _ARGS = {"M": 2, "L": 2, "H": 1, "V": 1, "A": 7, "Z": 0}
 
@@ -40,22 +40,34 @@ class Logo:
     """A single-path, single-colour SVG logo: view box, fill colour and subpath outlines."""
 
     def __init__(self, path: Path) -> None:
-        root = ET.parse(path).getroot()  # noqa: S314 - the repository's own logo files
-        min_x, min_y, width, height = (float(v) for v in root.attrib["viewBox"].split())
+        # The logo files are simple, generated SVGs; reading two tags needs no XML parser.
+        tags = [
+            (name.lower(), {key: double or single for key, double, single in _ATTR.findall(attrs)})
+            for name, attrs in _TAG.findall(path.read_text(encoding="utf-8"))
+        ]
+        svg = [attrs for name, attrs in tags if name == "svg"]
+        paths = [attrs for name, attrs in tags if name == "path"]
+        if len(svg) != 1:
+            raise ValueError(f"{path.name}: expected one <svg> element")
+        if "viewBox" not in svg[0]:
+            raise ValueError(f"{path.name}: missing attribute(s) viewBox")
+        min_x, min_y, width, height = (float(v) for v in svg[0]["viewBox"].split())
         if width != height:
             raise ValueError(f"{path.name}: view box must be square")
-        paths = root.findall(f"{_SVG_NS}path")
         if len(paths) != 1:
             raise ValueError(f"{path.name}: expected exactly one <path>")
         element = paths[0]
+        missing = [name for name in ("fill", "d") if name not in element]
+        if missing:
+            raise ValueError(f"{path.name}: missing attribute(s) {', '.join(missing)}")
         if element.get("fill-rule") != "evenodd":
             raise ValueError(f"{path.name}: expected fill-rule=evenodd")
         if element.get("transform"):
             raise ValueError(f"{path.name}: transforms are not supported")
         self.origin: Point = (min_x, min_y)
         self.size = width
-        self.color = element.attrib["fill"].upper()
-        self.d = element.attrib["d"]
+        self.color = element["fill"].upper()
+        self.d = element["d"]
 
 
 def parse_path(d: str) -> list[list[tuple]]:

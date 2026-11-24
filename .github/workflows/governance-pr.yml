@@ -9,39 +9,39 @@ concurrency:
   cancel-in-progress: true
 jobs:
   ci:
-    uses: nullthrone/governance/.github/workflows/ci.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/ci.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
   guard:
-    uses: nullthrone/governance/.github/workflows/governance-guard.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/governance-guard.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
   classification:
-    uses: nullthrone/governance/.github/workflows/classification-check.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/classification-check.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
       issues: read
   docs:
-    uses: nullthrone/governance/.github/workflows/docs-required.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/docs-required.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
   wip:
-    uses: nullthrone/governance/.github/workflows/wip-limit.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/wip-limit.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
   gate:
-    uses: nullthrone/governance/.github/workflows/external-contribution-gate.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/external-contribution-gate.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: read
   review:
     needs: ci
-    uses: nullthrone/governance/.github/workflows/review.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/review.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       pull-requests: write
