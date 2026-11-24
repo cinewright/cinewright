@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cinewright"
-version = "0.0.0"
+version = "0.0.1"
 description = "Local image, video and audio generation with open-weight models."
 readme = "README.md"
 license = "MIT"
