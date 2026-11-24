@@ -1,4 +1,5 @@
-"""Uploads stream to disk through a real server: bounded memory, a responsive core, no leftovers, upload slots.
+"""Uploads stream to disk through a real server: bounded memory, a responsive core, no leftovers, upload slots,
+stalled and refused uploads.
 
 Starlette's TestClient reads a whole request body before the app sees it, so these tests run the app on
 uvicorn in a thread (as `test_e2e_mock.py` does) with the test registry and fake hardware. The client
@@ -27,11 +28,14 @@ from conftest import API, PNG, fake_detect
 from cinewright.api import deps
 from cinewright.app import create_app
 from cinewright.config import Config
+from cinewright.core.assets import BlobWriter
 from cinewright.core.core import Core
 from cinewright.core.registry import Registry
+from cinewright_worker.client import ProtocolError, WorkerClient
 
 UPLOAD_BYTES = 128 * 1024**2
 CHUNK_BYTES = 1024**2
+REFUSED_OUTPUT_BYTES = 64 * 1024**2  # far more than the socket buffers hold, so an unread body resets the connection
 RESPONSE_LIMIT_S = 1.0
 WAIT_S = 30
 STARTUP_TIMEOUT_S = 30
@@ -149,6 +153,13 @@ class Upload(threading.Thread):
         return self.response
 
 
+def request_head(live: Live, method: str, path: str, auth: dict[str, str], *headers: str) -> bytes:
+    """The head of a raw HTTP/1.1 upload request, for tests that control every byte on the wire."""
+    lines = [f"{method} {path} HTTP/1.1", f"Host: 127.0.0.1:{live.port}", "Content-Type: video/mp4", *headers]
+    lines += [f"{name}: {value}" for name, value in auth.items()]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
 def timed(probe: Callable[[], None]) -> float:
     start = time.monotonic()
     probe()
@@ -213,8 +224,6 @@ def test_a_large_upload_streams_to_disk_in_bounded_memory_while_the_core_stays_r
 @pytest.mark.parametrize("route", ["asset", "output"])
 def test_an_upload_interrupted_by_the_client_leaves_no_temporary_file(live, route):
     method, path, auth = live.upload_target(route)
-    head = [f"{method} {path} HTTP/1.1", f"Host: 127.0.0.1:{live.port}", "Content-Type: video/mp4", f"Content-Length: {64 * 1024**2}"]
-    head += [f"{name}: {value}" for name, value in auth.items()]
 
     def written() -> bool:
         try:
@@ -223,7 +232,7 @@ def test_an_upload_interrupted_by_the_client_leaves_no_temporary_file(live, rout
             return False
 
     with socket.create_connection(("127.0.0.1", live.port)) as client:
-        client.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+        client.sendall(request_head(live, method, path, auth, f"Content-Length: {64 * CHUNK_BYTES}"))
         client.sendall(b"\x00" * (4 * CHUNK_BYTES))
         wait_for(written, "the core to write part of the upload")
     wait_for(lambda: not live.temporary_files(), "the core to remove the interrupted upload")
@@ -248,4 +257,80 @@ def test_further_uploads_wait_for_a_free_slot(live, monkeypatch):
     stored = second.result()
     assert stored.status_code == 201, stored.text
     assert stored.json()["sha256"] == hashlib.sha256(PNG).hexdigest()
+    assert not live.temporary_files()
+
+
+@pytest.mark.parametrize("route", ["asset", "output"])
+def test_an_upload_over_the_limit_is_refused_after_part_of_it_was_written_and_leaves_no_file(live, monkeypatch, route):
+    limit = 3 * CHUNK_BYTES
+    monkeypatch.setattr(deps, "MAX_UPLOAD_BYTES", limit)
+    written: list[int] = []
+    write = BlobWriter.write
+
+    def counted(writer: BlobWriter, data: bytes) -> None:
+        written.append(len(data))
+        write(writer, data)
+
+    monkeypatch.setattr(BlobWriter, "write", counted)
+    method, path, auth = live.upload_target(route)
+    piece = b"\x00" * (64 * 1024)
+    # Chunked, so no Content-Length refuses it up front. The byte over the limit comes last, so the client
+    # has sent everything when the core answers, and reads the answer.
+    with socket.create_connection(("127.0.0.1", live.port), timeout=WAIT_S) as client:
+        client.sendall(request_head(live, method, path, auth, "Transfer-Encoding: chunked"))
+        for _ in range(limit // len(piece)):
+            client.sendall(b"%x\r\n%b\r\n" % (len(piece), piece))
+        client.sendall(b"1\r\n\x00\r\n0\r\n\r\n")
+        answer = client.recv(65536)
+    assert answer.startswith(b"HTTP/1.1 422"), answer[:200]
+    assert sum(written) >= CHUNK_BYTES  # part of the body was already on disk when the limit tripped
+    wait_for(lambda: not live.temporary_files(), "the core to remove the oversized upload")
+    assert not [p for p in live.core.paths.assets_dir.rglob("*") if p.is_file()]
+
+
+def test_a_stalled_upload_gives_up_its_slot(live, monkeypatch):
+    monkeypatch.setattr(deps, "MAX_CONCURRENT_UPLOADS", 1)  # read when the first upload creates the app's slots
+    monkeypatch.setattr(deps, "UPLOAD_IDLE_SECONDS", 2.0)
+    with socket.create_connection(("127.0.0.1", live.port), timeout=WAIT_S) as stalled:
+        stalled.sendall(request_head(live, "POST", f"{API}/assets", {}, f"Content-Length: {4 * CHUNK_BYTES}") + b"\x00" * 1024)
+        wait_for(lambda: len(live.temporary_files()) == 1, "the stalled upload's temporary file")
+
+        waiting = Upload(live, "POST", f"{API}/assets", {}, PNG, "image/png")
+        waiting.start()
+        assert not waiting.done.wait(0.5), "the second upload did not wait for the slot"
+        stored = waiting.result()  # the stalled upload gives up its slot after the idle timeout
+        assert stored.status_code == 201, stored.text
+        assert stored.json()["sha256"] == hashlib.sha256(PNG).hexdigest()
+        answer = stalled.recv(65536)
+    assert answer.startswith(b"HTTP/1.1 422"), answer[:200]
+    assert b"stalled" in answer
+    assert not live.temporary_files()
+
+
+def test_a_refused_output_is_read_to_the_end_so_the_worker_gets_the_conflict(live, monkeypatch, tmp_path):
+    _, path, _ = live.upload_target("output")
+    job_id = path.split("/")[-3]
+    other = WorkerClient(live.url)
+    other.token = live.register_worker()["Authorization"].removeprefix("Bearer ")
+    output = tmp_path / "clip.mp4"
+    block = os.urandom(CHUNK_BYTES)
+    with output.open("wb") as handle:
+        for _ in range(REFUSED_OUTPUT_BYTES // CHUNK_BYTES):
+            handle.write(block)
+    staged: list[str] = []
+    stage_upload = live.core.stage_upload
+
+    def recorded() -> BlobWriter:
+        writer = stage_upload()
+        staged.append(writer.path.name)
+        return writer
+
+    monkeypatch.setattr(live.core, "stage_upload", recorded)
+
+    # Like urllib, the worker client sends the whole body before it reads the answer.
+    with pytest.raises(ProtocolError) as refused:
+        other.upload_output(job_id, "clip.mp4", str(output), "video/mp4")
+    assert refused.value.status == 409
+    assert refused.value.problem["type"] == "urn:cinewright:problem:conflict"
+    assert staged == []
     assert not live.temporary_files()

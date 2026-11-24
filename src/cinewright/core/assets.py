@@ -70,8 +70,12 @@ class BlobWriter:
         return StagedBlob(self.path, self._sha256.hexdigest(), self.size_bytes)
 
     def discard(self) -> None:
-        self._file.close()
-        self.path.unlink(missing_ok=True)
+        try:
+            self._file.close()
+        except OSError:
+            pass  # a buffered tail that cannot be flushed (disk full) goes with the file; the caller has the real error
+        finally:
+            self.path.unlink(missing_ok=True)  # close() releases the file even when its flush fails
 
 
 class BlobStore:

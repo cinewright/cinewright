@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import io
 import os
 from pathlib import Path
 
@@ -112,4 +114,23 @@ def test_a_discarded_upload_leaves_no_file(blobs):
     finished.write(b"complete but refused")
     finished.finish()
     finished.discard()
+    assert not temporary_files(blobs)
+
+
+class FullDisk(io.FileIO):
+    """A file on a disk that is full: no write reaches it."""
+
+    def write(self, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_an_upload_whose_buffered_tail_cannot_be_flushed_is_still_discarded(blobs, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(assets.os, "fdopen", lambda fd, mode: io.BufferedWriter(FullDisk(fd, "w")))
+        writer = blobs.writer()
+    writer.write(b"a tail smaller than the write buffer")  # buffered: nothing has reached the disk yet
+    with pytest.raises(OSError, match="No space"):
+        writer.finish()
+    writer.discard()  # the flush fails again; the API layer discards in a finally, where a raise would hide the real error
+    writer.discard()
     assert not temporary_files(blobs)
