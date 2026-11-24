@@ -1,6 +1,8 @@
 """Registry data: model descriptors and engine pins under src/cinewright/registry/."""
 
+import datetime as dt
 import re
+import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,6 +11,7 @@ import yaml
 
 import cinewright
 from cinewright.api.schemas import ModelDescriptor
+from cinewright.core.engines import load_engine_pins
 
 REGISTRY_DIR = Path(cinewright.__file__).parent / "registry"
 MODEL_FILES = sorted((REGISTRY_DIR / "models").glob("*.yaml"))
@@ -90,3 +93,163 @@ def test_every_binding_engine_is_pinned():
     engines = load(REGISTRY_DIR / "engines.yaml")
     for path in MODEL_FILES:
         assert {binding.engine for binding in descriptor(path).engines} <= set(engines)
+
+
+# --------------------------------------------------------------------------- engine environment lock
+
+PYPI_FILES = "files.pythonhosted.org"
+PYTORCH_HOSTS = {"download.pytorch.org", "download-r2.pytorch.org"}
+ONNXRUNTIME_FEED = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/"
+# Packages that come from somewhere other than PyPI, and from which hosts. Everything else comes from PyPI,
+# except the direct-URL wheels upstream names (GitHub release assets, listed in the lock input).
+SCOPED_HOSTS = {
+    "torch": PYTORCH_HOSTS,
+    "torchvision": PYTORCH_HOSTS,
+    "torchaudio": PYTORCH_HOSTS,
+    "onnxruntime-gpu": {urlparse(ONNXRUNTIME_FEED).hostname},
+}
+DIRECT_URL_HOST = "github.com"
+GLOBAL_INDEX_OPTIONS = ("--index-url", "--extra-index-url", "--find-links")
+# The lock follows the same supply-chain quarantine as the engine commit (ARCHITECTURE.md, "Wan2GP pin").
+QUARANTINE = dt.timedelta(days=7)
+FIXED_UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def wan2gp_pin():
+    return load_engine_pins()["wan2gp"]
+
+
+def engine_lock_path() -> Path:
+    return REGISTRY_DIR / wan2gp_pin().lock
+
+
+def engine_lock() -> dict:
+    return tomllib.loads(engine_lock_path().read_text(encoding="utf-8"))
+
+
+def lock_input() -> dict:
+    return tomllib.loads((engine_lock_path().parent / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def artifacts(package: dict) -> list[dict]:
+    """Every file a lock entry offers: its wheels, its sdist and a direct-URL archive."""
+    files = list(package.get("wheels", []))
+    files += [package[key] for key in ("sdist", "archive") if key in package]
+    return files
+
+
+def test_engine_lock_entries_are_pinned_and_hashed():
+    packages = engine_lock()["packages"]
+    assert len(packages) > 100
+    names = [package["name"] for package in packages]
+    assert len(names) == len(set(names)), "one entry per package"
+    for package in packages:
+        assert re.fullmatch(r"[0-9][0-9A-Za-z.+!_-]*", str(package.get("version", ""))), package["name"]
+        files = artifacts(package)
+        assert files, package["name"]
+        for file in files:
+            assert re.fullmatch(r"[0-9a-f]{64}", file.get("hashes", {}).get("sha256", "")), (package["name"], file["url"])
+            assert urlparse(file["url"]).scheme == "https", file["url"]
+
+
+def test_engine_lock_has_no_global_index_option():
+    text = engine_lock_path().read_text(encoding="utf-8")
+    assert [option for option in GLOBAL_INDEX_OPTIONS if option in text] == []
+    assert engine_lock()["lock-version"] == "1.0"
+
+
+def test_engine_lock_has_torch_at_the_pinned_versions():
+    versions = {package["name"]: package["version"] for package in engine_lock()["packages"]}
+    expected = wan2gp_pin().torch_versions
+    assert set(expected) == {"torch", "torchvision", "torchaudio"}
+    for name, version in expected.items():
+        # The local version label (+cu130) aside.
+        assert versions[name].split("+", 1)[0] == version, name
+
+
+def test_engine_lock_sources_are_scoped():
+    """PyTorch only from torch_index, onnxruntime-gpu only from its nightly feed, and nothing else from either."""
+    torch_path = urlparse(wan2gp_pin().torch_index).path.rstrip("/") + "/"
+    direct_urls = {
+        requirement.split(" @ ", 1)[1].split(";", 1)[0].strip()
+        for requirement in lock_input()["project"]["dependencies"]
+        if " @ " in requirement
+    }
+    for package in engine_lock()["packages"]:
+        for file in artifacts(package):
+            url = urlparse(file["url"])
+            if package["name"] in SCOPED_HOSTS:
+                assert url.hostname in SCOPED_HOSTS[package["name"]], file["url"]
+                if url.hostname in PYTORCH_HOSTS:
+                    assert url.path.startswith(torch_path), file["url"]
+            elif url.hostname == DIRECT_URL_HOST:
+                assert file is package.get("archive") and file["url"] in direct_urls, file["url"]
+            else:
+                assert url.hostname == PYPI_FILES, file["url"]
+
+
+def test_engine_lock_targets_windows_x64():
+    for package in engine_lock()["packages"]:
+        for wheel in package.get("wheels", []):
+            platform_tag = Path(urlparse(wheel["url"]).path).stem.rsplit("-", 1)[-1]
+            assert platform_tag in {"win_amd64", "any"}, wheel["url"]
+
+
+def test_engine_lock_input_scopes_the_extra_indexes():
+    """The lock input has no global extra index: each extra index is explicit and serves only the packages pinned to it."""
+    data = lock_input()
+    pin = wan2gp_pin()
+    uv = data["tool"]["uv"]
+    indexes = {index["name"]: index for index in uv["index"]}
+    assert all(index.get("explicit") is True for index in indexes.values())
+    assert not {"index-url", "extra-index-url", "find-links"} & set(uv)
+    sources = {name: indexes[source["index"]]["url"] for name, source in uv["sources"].items()}
+    assert sources == {
+        "torch": pin.torch_index,
+        "torchvision": pin.torch_index,
+        "torchaudio": pin.torch_index,
+        "onnxruntime-gpu": ONNXRUNTIME_FEED,
+    }
+    assert data["project"]["dependencies"][:3] == [f"{name}=={version}" for name, version in pin.torch_versions.items()]
+
+
+def lock_cutoff() -> dt.datetime:
+    """uv's `exclude-newer` from the lock input's [tool.uv]."""
+    return dt.datetime.fromisoformat(lock_input()["tool"]["uv"]["exclude-newer"])
+
+
+def test_engine_lock_input_keeps_the_quarantine():
+    """The lock input sets uv's exclude-newer to a fixed UTC time at least 7 days in the past, without exceptions.
+
+    A duration (such as `7 days`) would make a regeneration depend on the day it runs, and `exclude-newer-package`
+    would exempt packages. The 7-day check reads the clock, but it can only turn from failing to passing as time goes
+    on: it rejects a cutoff that is less than 7 days old when the change is tested.
+    """
+    uv = lock_input()["tool"]["uv"]
+    assert FIXED_UTC_TIMESTAMP.fullmatch(str(uv.get("exclude-newer", ""))), "[tool.uv] exclude-newer must be a fixed UTC time"
+    assert "exclude-newer-package" not in uv
+    assert lock_cutoff() <= dt.datetime.now(dt.UTC) - QUARANTINE
+
+
+def test_engine_lock_respects_the_quarantine():
+    """Every file the lock takes from an index was uploaded before the cutoff, so the lock was resolved with it.
+
+    The direct-URL wheels upstream names (`archive` entries) have no upload time; they are pinned by URL and hash.
+    """
+    cutoff = lock_cutoff()
+    for package in engine_lock()["packages"]:
+        for file in artifacts(package):
+            if file is package.get("archive"):
+                continue
+            uploaded = file.get("upload-time")
+            assert isinstance(uploaded, dt.datetime), (package["name"], file["url"])
+            assert uploaded < cutoff, (package["name"], file["url"], uploaded.isoformat())
+
+
+def test_optional_wheels_are_pinned_with_hashes():
+    wheels = wan2gp_pin().optional_wheels
+    assert set(wheels) == {"triton-windows", "sageattention"}
+    for wheel in wheels.values():
+        assert re.fullmatch(r"[0-9a-f]{64}", wheel.sha256)
+        url = urlparse(wheel.url)
+        assert url.scheme == "https" and url.path.endswith("-win_amd64.whl"), wheel.url
