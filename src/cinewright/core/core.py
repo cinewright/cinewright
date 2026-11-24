@@ -15,7 +15,7 @@ import logging
 import os
 import secrets
 import sqlite3
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -177,13 +177,22 @@ class Core:
 
     @contextmanager
     def _tx(self) -> Iterator[Tx]:
-        """Write transaction; its events are published and waiting workers woken after commit."""
+        """Write transaction; its events are published and waiting workers woken after commit.
+
+        The event log's lock spans the commit and the publish, so subscribers see events in commit order.
+        """
         published: list[Published] = []
         now = self.clock()
-        with self.db.transaction() as conn:
-            tx = Tx(conn, now, lambda job_id, kind, data: published.append(EventLog.append(conn, job_id, kind, data, now)))
-            yield tx
-        self.event_log.publish(published)
+        with self.event_log.lock:
+            with self.db.transaction() as conn:
+                tx = Tx(
+                    conn,
+                    now,
+                    emit=lambda job_id, kind, data: published.append(EventLog.append(conn, job_id, kind, data, now)),
+                    broadcast=lambda job_id, kind, data: published.append(EventLog.live(conn, job_id, kind, data, now)),
+                )
+                yield tx
+            self.event_log.publish(published)
         if tx.wake_workers:
             self.scheduler.wakeup.notify()
 
@@ -567,7 +576,7 @@ class Core:
                 raise Conflict(f"Job {job_id} already {state.value}, so it cannot be cancelled.")
         return self.get_job(job_id)
 
-    def events(self, job_id: str | None, after: str | None) -> AsyncIterator[JobEvent]:
+    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
         return self.event_log.stream(job_id, after)
 
     # ------------------------------------------------------------------ assets
@@ -805,7 +814,10 @@ class Core:
                         raise Invalid(f"A progress event does not match the contract: {exc.errors()[0]['msg']}.") from exc
                     tx.conn.execute("UPDATE jobs SET progress = ? WHERE id = ?", (progress.model_dump_json(), job_id))
                     data = progress.model_dump()
-                tx.emit(job_id, EventKind(event.kind), data)
+                if event.kind == "preview":
+                    tx.broadcast(job_id, EventKind.PREVIEW, data)  # live only; the event log keeps the latest one
+                else:
+                    tx.emit(job_id, EventKind(event.kind), data)
             self.scheduler.extend(tx, worker_id, job_id)
         return WorkerEventsAck(cancel_requested=bool(row["cancel_requested"]))
 

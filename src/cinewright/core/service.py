@@ -7,7 +7,7 @@ Methods raise `cinewright.core.errors.CoreError` subclasses, never HTTP exceptio
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Protocol
 
@@ -79,8 +79,11 @@ class CoreService(Protocol):
     def list_jobs(self, state: JobState | None, cursor: str | None, limit: int) -> JobList: ...
     def get_job(self, job_id: str) -> Job: ...
     def cancel_job(self, job_id: str) -> Job: ...
-    def events(self, job_id: str | None, after: str | None) -> AsyncIterator[JobEvent]:
-        """Replay events after `after` (`<job_id>:<seq>`, from Last-Event-ID), then follow live ones."""
+    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
+        """Replay events after `after` (`<job_id>:<seq>`, from Last-Event-ID), then the kept latest previews, then live ones.
+
+        Previews are live only: they carry the `seq` of the job's latest stored event and are never replayed.
+        """
         ...
 
     # assets

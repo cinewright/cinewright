@@ -70,11 +70,15 @@ JOB_COLUMNS = frozenset(
 
 @dataclass
 class Tx:
-    """A write transaction: the connection, its timestamp and the events to publish after commit."""
+    """A write transaction: the connection, its timestamp and the events to publish after commit.
+
+    `emit` stores an event in `job_events`; `broadcast` publishes one to live subscribers only.
+    """
 
     conn: sqlite3.Connection
     now: datetime
     emit: Emit
+    broadcast: Emit
     wake_workers: bool = False
 
 
