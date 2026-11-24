@@ -1,12 +1,9 @@
 # Z-Image Turbo 6B. Source of truth: Wan2GP defaults/z_image.json at the pinned commit
 # (38758d3c73366422efcf609abb63cab8385f3552) and the headless probe of that commit.
 # Hashes and sizes: Hugging Face API (LFS oid = sha256) for DeepBeepMeep/Z-Image at the revision below,
-# cross-checked against the X-Linked-Etag of the resolve/main URLs on 2026-11-22.
+# cross-checked on 2026-11-22 against the X-Linked-Etag of the download URLs (then on the main branch).
 #
-# Shared dependencies Wan2GP downloads for every Z-Image model (not pinned here):
-# - text encoder DeepBeepMeep/Z-Image Qwen3/qwen3_bf16.safetensors or Qwen3/qwen3_quanto_bf16_int8.safetensors,
-#   chosen by Wan2GP's own text_encoder_quantization setting, not by the quantization below
-# - VAE DeepBeepMeep/Z-Image ZImageTurbo_VAE_bf16.safetensors, plus tokenizer, VAE and scheduler config JSON files
+# The shared engine files (text encoder, VAE, tokenizer and config files) are in `requires`.
 id: z-image-turbo
 name: Z-Image Turbo 6B
 vendor: Tongyi-MAI
@@ -36,16 +33,19 @@ quantizations:
     format: safetensors
     files:
       - name: ZImageTurbo_bf16.safetensors
-        url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/main/ZImageTurbo_bf16.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/ZImageTurbo_bf16.safetensors
         sha256: 1ef8d2c0d15c5727c3e824d93e259669cdf292e9eb4f9deb9a8c56f7245a2fa0
         size_bytes: 12309879106
   - id: int8
     format: safetensors
     files:
       - name: ZImageTurbo_quanto_bf16_int8.safetensors
-        url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/main/ZImageTurbo_quanto_bf16_int8.safetensors
+        url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/ZImageTurbo_quanto_bf16_int8.safetensors
         sha256: dd4b9172c0c4d69aa6d03a61f5be56c5fee5a9bc4ce1fcca5fc8633cec78d850
         size_bytes: 6886911511
+# Shared engine files every quantization needs (registry/shared/). The text encoder file follows Wan2GP's
+# text_encoder_quantization setting, not the quantization above.
+requires: [z-image-shared]
 prompt_dialect:
   style: natural
   notes: Describe the finished image in plain sentences, including subject, composition, setting and lighting.

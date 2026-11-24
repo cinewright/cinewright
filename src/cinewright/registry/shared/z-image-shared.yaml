@@ -1,0 +1,63 @@
+# Engine files Wan2GP loads for every Z-Image model, besides the transformer of the chosen quantization.
+# Source of truth: Wan2GP models/z_image/z_image_handler.py (query_model_def: text encoder; query_model_files:
+# tokenizer, VAE and config files) at the pinned commit (38758d3c73366422efcf609abb63cab8385f3552).
+# Hashes and sizes: Hugging Face API for the repository at the revision below, read on 2026-11-24. Files in Git LFS:
+# lfs.oid (SHA-256) and lfs.size from POST https://huggingface.co/api/models/<repo>/paths-info/<revision>.
+# Files marked `content` are stored without LFS: SHA-256 and size of the content served at the resolve URL.
+id: z-image-shared
+source:
+  provider: huggingface
+  repo: DeepBeepMeep/Z-Image
+  revision: 86cb9e4af782847d992630c1f3a1e786a76df4fd
+files:
+  # Qwen3 text encoder, one file per text_encoder_quantization, plus its tokenizer and config.
+  - name: qwen3_bf16.safetensors
+    subfolder: Qwen3/
+    variant: bf16
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/qwen3_bf16.safetensors
+    sha256: d8d374a286525c8afc1854bdd80f45c6820720179b439c603f0b382ae85cc759
+    size_bytes: 8044986509
+  - name: qwen3_quanto_bf16_int8.safetensors
+    subfolder: Qwen3/
+    variant: int8
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/qwen3_quanto_bf16_int8.safetensors
+    sha256: 9cf81c0990491ba3cee10b5f57792bcb73b056deea13962f8137989e3eebf6de
+    size_bytes: 4414004409
+  - name: tokenizer.json
+    subfolder: Qwen3/
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/tokenizer.json
+    sha256: aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4
+    size_bytes: 11422654
+  - name: tokenizer_config.json
+    subfolder: Qwen3/
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/tokenizer_config.json
+    sha256: d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101  # content
+    size_bytes: 9732
+  - name: vocab.json
+    subfolder: Qwen3/
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/vocab.json
+    sha256: ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  # content
+    size_bytes: 2776833
+  - name: config.json
+    subfolder: Qwen3/
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/config.json
+    sha256: 8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a  # content
+    size_bytes: 726
+  - name: merges.txt
+    subfolder: Qwen3/
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/Qwen3/merges.txt
+    sha256: 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5  # content
+    size_bytes: 1671853
+  # VAE with its config, and the scheduler config.
+  - name: ZImageTurbo_VAE_bf16.safetensors
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/ZImageTurbo_VAE_bf16.safetensors
+    sha256: f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3
+    size_bytes: 167666902
+  - name: ZImageTurbo_VAE_bf16_config.json
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/ZImageTurbo_VAE_bf16_config.json
+    sha256: e80af1e64a71883a9d10c3159d2e493e5934508da57852f6a180ae6ae63b14bd  # content
+    size_bytes: 805
+  - name: ZImageTurbo_scheduler_config.json
+    url: https://huggingface.co/DeepBeepMeep/Z-Image/resolve/86cb9e4af782847d992630c1f3a1e786a76df4fd/ZImageTurbo_scheduler_config.json
+    sha256: 3b979ab0956e4f5e8d02ec409ac6a4ece1555191d15bd10788fdc85fea5d13fc  # content
+    size_bytes: 173

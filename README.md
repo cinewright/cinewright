@@ -14,7 +14,7 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Hardware detection.** At start, and on request from the Setup view, the core reads the NVIDIA GPUs (through `nvidia-smi`), the driver, RAM and free disk space.
 - **Web UI shell.** It has Setup, Generate, Queue, Library, Hosts, Models and Settings views, plus placeholders for Cast, Recipes and Presets. Fonts and icons ship with the UI, so it makes no third-party requests.
 - **MCP server.** It runs over streamable HTTP at `/mcp` and offers seven tools.
-- **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256.
+- **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256, including the text encoders, VAEs, upscalers, tokenizer and config files WanGP needs next to the model.
 - **Windows installer.** `scripts/build.py` builds it.
 - **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
 - **Worker supervision.** The core can start the local worker in the engine's own Python environment, restart it after a crash and stop it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
@@ -210,7 +210,7 @@ The core records jobs submitted over MCP as `ui` jobs until issue #7 adds MCP cl
 | --- | --- |
 | `src/cinewright/` | Core: API, router, scheduler, asset store, database, MCP server, launcher |
 | `src/cinewright_worker/` | Worker and engine adapters (`mock`, `wan2gp`) |
-| `src/cinewright/registry/` | Model descriptors and the WanGP pin |
+| `src/cinewright/registry/` | Model descriptors, shared engine files and the WanGP pin |
 | `web/` | Web UI (React, TypeScript, Vite), built into `src/cinewright/web_dist/` |
 | `installer/` | NSIS script, icon renderer, pins and notices of the Windows installer |
 | `scripts/build.py` | Build script |

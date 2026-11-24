@@ -37,13 +37,20 @@ TEST_IMAGE: dict[str, Any] = {
             "id": "bf16",
             "format": "safetensors",
             "files": [
-                {"name": "test-image-bf16.safetensors", "url": "https://example.invalid/bf16", "sha256": "a" * 64, "size_bytes": 1000}
+                {
+                    "name": "test-image-bf16.safetensors",
+                    "url": "https://huggingface.co/test/test-image/bf16",
+                    "sha256": "a" * 64,
+                    "size_bytes": 1000,
+                }
             ],
         },
         {
             "id": "Q8_0",
             "format": "gguf",
-            "files": [{"name": "test-image-q8.gguf", "url": "https://example.invalid/q8", "sha256": "b" * 64, "size_bytes": 500}],
+            "files": [
+                {"name": "test-image-q8.gguf", "url": "https://huggingface.co/test/test-image/q8", "sha256": "b" * 64, "size_bytes": 500}
+            ],
         },
     ],
     "defaults": {"steps": 4, "resolution": "512x512"},
@@ -66,7 +73,7 @@ TEST_VIDEO: dict[str, Any] = {
         {
             "id": "bf16",
             "format": "safetensors",
-            "files": [{"name": "v.safetensors", "url": "https://example.invalid/v", "sha256": "c" * 64}],
+            "files": [{"name": "v.safetensors", "url": "https://huggingface.co/test/test-video/v", "sha256": "c" * 64}],
         }
     ],
     "defaults": {"steps": 10, "frames": 81, "fps": 16, "resolution": "832x480"},

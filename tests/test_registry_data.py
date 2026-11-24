@@ -1,4 +1,4 @@
-"""Registry data: model descriptors and engine pins under src/cinewright/registry/."""
+"""Registry data: model descriptors, shared components and engine pins under src/cinewright/registry/."""
 
 import datetime as dt
 import re
@@ -12,9 +12,11 @@ import yaml
 import cinewright
 from cinewright.api.schemas import ModelDescriptor
 from cinewright.core.engines import load_engine_pins
+from cinewright.core.registry import Registry
 
 REGISTRY_DIR = Path(cinewright.__file__).parent / "registry"
 MODEL_FILES = sorted((REGISTRY_DIR / "models").glob("*.yaml"))
+SHARED_FILES = sorted((REGISTRY_DIR / "shared").glob("*.yaml"))
 MVP_MODEL_IDS = {"z-image-turbo", "ltx-2.3-distilled-22b", "wan-2.2-i2v-14b", "wan-2.2-t2v-14b"}
 FILE_HOSTS = {"huggingface.co", "civitai.com"}
 EXTENSIONS = {".safetensors": "safetensors", ".gguf": "gguf"}
@@ -253,3 +255,148 @@ def test_optional_wheels_are_pinned_with_hashes():
         assert re.fullmatch(r"[0-9a-f]{64}", wheel.sha256)
         url = urlparse(wheel.url)
         assert url.scheme == "https" and url.path.endswith("-win_amd64.whl"), wheel.url
+
+
+# --------------------------------------------------------------------------- shared engine files
+
+# What Wan2GP loads for each MVP model type at the pinned commit 38758d3c73366422efcf609abb63cab8385f3552,
+# besides the transformer files of the quantization: the text encoder for its text_encoder_quantization
+# (query_model_def), the files query_model_files lists (tokenizer, VAE, upscaler and config files) and the
+# preload_URLs of the model definition. Paths are relative to the checkpoint root. Transcribed by hand from the
+# family handlers (models/z_image/z_image_handler.py, models/ltx2/ltx2_handler.py, models/wan/wan_handler.py) and
+# defaults/ltx2_22B.json (issue #41). Never derive this list from the registry, or the test proves nothing.
+GEMMA = "gemma-3-12b-it-qat-q4_0-unquantized/"
+Z_IMAGE = {
+    "repo": "DeepBeepMeep/Z-Image",
+    "text_encoder": {"bf16": "Qwen3/qwen3_bf16.safetensors", "int8": "Qwen3/qwen3_quanto_bf16_int8.safetensors"},
+    "files": [
+        "Qwen3/tokenizer.json",
+        "Qwen3/tokenizer_config.json",
+        "Qwen3/vocab.json",
+        "Qwen3/config.json",
+        "Qwen3/merges.txt",
+        "ZImageTurbo_VAE_bf16.safetensors",
+        "ZImageTurbo_VAE_bf16_config.json",
+        "ZImageTurbo_scheduler_config.json",
+    ],
+}
+LTX_2_3 = {
+    "repo": "DeepBeepMeep/LTX-2",
+    "text_encoder": {
+        "bf16": GEMMA + "gemma-3-12b-it-qat-q4_0-unquantized.safetensors",
+        "int8": GEMMA + "gemma-3-12b-it-qat-q4_0-unquantized_quanto_bf16_int8.safetensors",
+    },
+    "files": [
+        GEMMA + "added_tokens.json",
+        GEMMA + "chat_template.json",
+        GEMMA + "config_light.json",
+        GEMMA + "generation_config.json",
+        GEMMA + "preprocessor_config.json",
+        GEMMA + "processor_config.json",
+        GEMMA + "special_tokens_map.json",
+        GEMMA + "tokenizer.json",
+        GEMMA + "tokenizer.model",
+        GEMMA + "tokenizer_config.json",
+        "ltx-2.3-22b_vae.safetensors",
+        "ltx-2.3-22b_audio_vae.safetensors",
+        "ltx-2.3-22b_vocoder.safetensors",
+        "ltx-2.3-22b_text_embedding_projection.safetensors",
+        "ltx-2.3-22b_embeddings_connector.safetensors",
+        "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
+        "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors",
+    ],
+}
+WAN_14B = {
+    "repo": "DeepBeepMeep/Wan2.1",
+    "text_encoder": {
+        "bf16": "umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors",
+        "int8": "umt5-xxl/models_t5_umt5-xxl-enc-quanto_int8.safetensors",
+    },
+    "files": [
+        "umt5-xxl/special_tokens_map.json",
+        "umt5-xxl/spiece.model",
+        "umt5-xxl/tokenizer.json",
+        "umt5-xxl/tokenizer_config.json",
+        "xlm-roberta-large/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors",
+        "xlm-roberta-large/sentencepiece.bpe.model",
+        "xlm-roberta-large/special_tokens_map.json",
+        "xlm-roberta-large/tokenizer.json",
+        "xlm-roberta-large/tokenizer_config.json",
+        "Wan2.1_VAE.safetensors",
+        "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors",
+    ],
+}
+WAN2GP_SHARED_FILES = {
+    "z_image": Z_IMAGE,
+    "ltx2_22B_distilled": LTX_2_3,
+    "ltx2_22B_distilled_gguf_q4_k_m": LTX_2_3,
+    "ltx2_22B_distilled_gguf_q6_k": LTX_2_3,
+    "ltx2_22B_distilled_gguf_q8_0": LTX_2_3,
+    "t2v_2_2": WAN_14B,
+    "i2v_2_2": WAN_14B,
+}
+TEXT_ENCODER_VARIANTS = ("bf16", "int8")
+SHARED_EXTENSIONS = {".safetensors", ".gguf", ".json", ".txt", ".model"}
+
+
+def expected_shared_files(model_type: str, variant: str) -> set[tuple[str, str]]:
+    family = WAN2GP_SHARED_FILES[model_type]
+    return {(family["repo"], path) for path in [family["text_encoder"][variant], *family["files"]]}
+
+
+def required_shared_files(registry: Registry, model_id: str, variant: str) -> list[tuple[str, str]]:
+    return [(component.source.repo, file.path) for component in registry.requirements(model_id) for file in component.files_for(variant)]
+
+
+def mvp_model_types() -> list[tuple[str, str]]:
+    pairs = {(path.stem, binding.model_type) for path in MODEL_FILES if path.stem in MVP_MODEL_IDS for binding in descriptor(path).engines}
+    return sorted(pairs)
+
+
+def test_every_mvp_model_type_has_a_committed_file_list():
+    assert {model_type for _, model_type in mvp_model_types()} == set(WAN2GP_SHARED_FILES)
+
+
+@pytest.mark.parametrize("variant", TEXT_ENCODER_VARIANTS)
+@pytest.mark.parametrize(("model_id", "model_type"), mvp_model_types(), ids=str)
+def test_mvp_model_requires_the_files_wan2gp_loads(model_id, model_type, variant):
+    required = required_shared_files(Registry.load(), model_id, variant)
+    assert len(required) == len(set(required)), "a shared file is listed twice"
+    assert set(required) == expected_shared_files(model_type, variant)
+
+
+def test_shared_components_present_and_used():
+    registry = Registry.load()
+    assert [path.stem for path in SHARED_FILES] == [component.id for component in registry.components()]
+    used = {component_id for model in registry.all() for component_id in model.requires}
+    assert used == {component.id for component in registry.components()}, "every shared component is required by a model"
+
+
+@pytest.mark.parametrize("path", SHARED_FILES, ids=lambda path: path.stem)
+def test_shared_files_are_pinned_safe_downloads(path):
+    component = Registry.load().component(path.stem)
+    assert component.source.provider == "huggingface"
+    assert re.fullmatch(r"[0-9a-f]{40}", component.source.revision)
+    for file in component.files:
+        assert re.fullmatch(r"[0-9a-f]{64}", file.sha256), file.path
+        assert file.size_bytes > 0, file.path
+        assert Path(file.name).suffix in SHARED_EXTENSIONS, file.path
+        if file.variant is not None:
+            assert Path(file.name).suffix == ".safetensors", "only text encoder weights have a variant"
+
+
+@pytest.mark.parametrize("path", MODEL_FILES, ids=lambda path: path.stem)
+def test_quantization_urls_name_the_source_revision(path):
+    model = descriptor(path)
+    assert model.source.revision is not None and re.fullmatch(r"[0-9a-f]{40}", model.source.revision)
+    base = f"https://huggingface.co/{model.source.repo}/resolve/{model.source.revision}/"
+    for quant in model.quantizations:
+        for file in quant.files:
+            assert file.url == base + file.name
+
+
+def test_no_resolve_main_url_in_registry():
+    files = [path for path in sorted(REGISTRY_DIR.rglob("*")) if path.is_file()]
+    assert files
+    assert [path.relative_to(REGISTRY_DIR).as_posix() for path in files if "resolve/main" in path.read_text(encoding="utf-8")] == []
