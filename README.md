@@ -173,6 +173,7 @@ End users never need these. They exist for CI and development.
 | `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core, and an installed core starts no worker until WanGP is set up (phase 1). `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
+| `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
 | `python scripts/build.py [--skip-web] [--skip-installer]` | Builds the web UI, the wheel and the installer |
 
 ### Internal API
