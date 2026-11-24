@@ -87,8 +87,8 @@ def transition(tx: Tx, job_id: str, state: JobState, data: dict[str, Any] | None
     assignments = ", ".join(f"{name} = ?" for name in values)
     # Column names are checked against JOB_COLUMNS above; every value is a bound parameter.
     query = f"UPDATE jobs SET {assignments} WHERE id = ?"  # noqa: S608
-    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
-    tx.conn.execute(query, (*values.values(), job_id))
+    # Semgrep's raw-query rule cannot see the allowlist check, hence the inline suppression.
+    tx.conn.execute(query, (*values.values(), job_id))  # nosemgrep
     tx.emit(job_id, EventKind.STATE, {"state": state.value, **(data or {})})
     if state == JobState.QUEUED:
         tx.wake_workers = True
