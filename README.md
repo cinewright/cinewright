@@ -105,6 +105,8 @@ pytest -q
 cd web && npm test && npm run typecheck
 ```
 
+`pytest -q` also runs the web tests. The component tests need `web/node_modules`: run `npm ci` in `web/` or `python scripts/build.py` first, or pytest skips them.
+
 ### Work on the web UI
 
 Start the core with `python -m cinewright`, then run `npm run dev` in `web/`. The Vite dev server proxies `/api` and `/mcp` to the core on `127.0.0.1:8737`. [`web/README.md`](web/README.md) lists the scripts.
