@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing, asynccontextmanager, suppress
 from typing import Annotated
@@ -13,6 +15,8 @@ from starlette.concurrency import run_in_threadpool
 from cinewright.core.assets import BlobWriter, StagedBlob
 from cinewright.core.errors import CoreError, Invalid, Unauthorized
 from cinewright.core.service import CoreService
+
+log = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 2 * 1024**3  # 2 GiB per asset or worker output
 # Uploads whose bodies are read at the same time; further uploads wait for a free slot. Waiting adds
@@ -151,11 +155,29 @@ async def receive_upload(request: Request, core: CoreService, check: Callable[[]
 
 
 async def _discard(writer: BlobWriter) -> None:
+    """Remove an upload's temporary file exactly once, in a thread, also when the request is cancelled."""
+    claimed = threading.Lock()
+
+    def discard_once() -> None:
+        if claimed.acquire(blocking=False):  # the thread and the fallback below never both touch the file
+            writer.discard()
+
+    task = asyncio.ensure_future(run_in_threadpool(discard_once))
     try:
-        await run_in_threadpool(writer.discard)
+        await asyncio.shield(task)  # a cancelled request goes on cancelling while the thread finishes
     except asyncio.CancelledError:
-        writer.discard()  # cancelled before the thread ran: remove the file here rather than leave it behind
+        task.add_done_callback(lambda done: _after_cancelled_discard(done, discard_once, writer))
         raise
+
+
+def _after_cancelled_discard(done: asyncio.Future, discard_once: Callable[[], None], writer: BlobWriter) -> None:
+    try:
+        if done.cancelled():
+            discard_once()  # no thread took it, for example because the event loop is shutting down
+        elif (error := done.exception()) is not None:
+            raise error
+    except OSError:
+        log.warning("Could not remove the temporary upload file %s.", writer.path, exc_info=True)
 
 
 def binary_body(description: str) -> dict:

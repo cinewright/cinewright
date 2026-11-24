@@ -6,10 +6,13 @@ The size-limit tests lower `MAX_UPLOAD_BYTES`, so they never send 2 GiB. Streami
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import threading
 from collections.abc import Iterator
 
+import anyio.to_thread
 import pytest
 from conftest import API, assert_problem, register_worker
 
@@ -107,4 +110,59 @@ def test_an_output_for_a_job_of_another_worker_writes_nothing_to_disk(client, st
     response = client.put(path, content=b"\x00" * 100, headers={**other, "Content-Type": "video/mp4"})
     assert_problem(response, 409, "urn:cinewright:problem:conflict")
     assert staged_uploads == []
+    assert not temporary_files(client)
+
+
+def test_a_cancelled_request_discards_its_temporary_file_once_in_the_thread(client):
+    """A request cancelled while its temporary file is discarded still removes it, and only the thread touches it."""
+    writer = client.app.state.core.stage_upload()
+    writer.write(b"half an upload")
+    started, release = threading.Event(), threading.Event()
+    on_main_thread: list[bool] = []
+    discard = writer.discard
+
+    def slow_discard() -> None:
+        on_main_thread.append(threading.current_thread() is threading.main_thread())
+        started.set()
+        release.wait(5)
+        discard()
+
+    writer.discard = slow_discard
+
+    async def cancel_while_discarding() -> None:
+        task = asyncio.create_task(deps._discard(writer))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        for _ in range(500):  # the shielded discard finishes after the cancellation
+            if len(asyncio.all_tasks()) == 1:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(cancel_while_discarding())
+    assert on_main_thread == [False]
+    assert not writer.path.exists()
+    assert not temporary_files(client)
+
+
+def test_a_discard_cut_short_by_the_event_loop_shutting_down_still_removes_the_file(client):
+    """When the event loop shuts down before a worker thread takes the discard, the file is removed on the loop."""
+    writer = client.app.state.core.stage_upload()
+    writer.write(b"half an upload")
+
+    async def shut_down_while_the_discard_waits_for_a_thread() -> None:
+        limiter = anyio.to_thread.current_default_thread_limiter()  # one per event loop
+        limiter.total_tokens = 1
+        await limiter.acquire()  # no worker thread is free, so the discard waits
+        task = asyncio.create_task(deps._discard(writer))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Returning ends asyncio.run, which cancels the waiting discard before any thread takes it.
+
+    asyncio.run(shut_down_while_the_discard_waits_for_a_thread())
+    assert not writer.path.exists()
     assert not temporary_files(client)
