@@ -15,7 +15,7 @@ version = "0"
 requires-python = "==3.11.*"
 dependencies = [
     # PyTorch, from torch_index (see [tool.uv.sources]).
-    'torch==2.10.0',
+    'torch==2.13.0',
     'torchvision==0.25.0',
     'torchaudio==2.10.0',
     # Upstream requirements.txt from here on.
