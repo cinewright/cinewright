@@ -1,5 +1,6 @@
 """Registry data: model descriptors and engine pins under src/cinewright/registry/."""
 
+import datetime as dt
 import re
 import tomllib
 from pathlib import Path
@@ -109,6 +110,9 @@ SCOPED_HOSTS = {
 }
 DIRECT_URL_HOST = "github.com"
 GLOBAL_INDEX_OPTIONS = ("--index-url", "--extra-index-url", "--find-links")
+# The lock follows the same supply-chain quarantine as the engine commit (ARCHITECTURE.md, "Wan2GP pin").
+QUARANTINE = dt.timedelta(days=7)
+FIXED_UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 def wan2gp_pin():
@@ -207,6 +211,39 @@ def test_engine_lock_input_scopes_the_extra_indexes():
         "onnxruntime-gpu": ONNXRUNTIME_FEED,
     }
     assert data["project"]["dependencies"][:3] == [f"{name}=={version}" for name, version in pin.torch_versions.items()]
+
+
+def lock_cutoff() -> dt.datetime:
+    """uv's `exclude-newer` from the lock input's [tool.uv]."""
+    return dt.datetime.fromisoformat(lock_input()["tool"]["uv"]["exclude-newer"])
+
+
+def test_engine_lock_input_keeps_the_quarantine():
+    """The lock input sets uv's exclude-newer to a fixed UTC time at least 7 days in the past, without exceptions.
+
+    A duration (such as `7 days`) would make a regeneration depend on the day it runs, and `exclude-newer-package`
+    would exempt packages. The 7-day check reads the clock, but it can only turn from failing to passing as time goes
+    on: it rejects a cutoff that is less than 7 days old when the change is tested.
+    """
+    uv = lock_input()["tool"]["uv"]
+    assert FIXED_UTC_TIMESTAMP.fullmatch(str(uv.get("exclude-newer", ""))), "[tool.uv] exclude-newer must be a fixed UTC time"
+    assert "exclude-newer-package" not in uv
+    assert lock_cutoff() <= dt.datetime.now(dt.UTC) - QUARANTINE
+
+
+def test_engine_lock_respects_the_quarantine():
+    """Every file the lock takes from an index was uploaded before the cutoff, so the lock was resolved with it.
+
+    The direct-URL wheels upstream names (`archive` entries) have no upload time; they are pinned by URL and hash.
+    """
+    cutoff = lock_cutoff()
+    for package in engine_lock()["packages"]:
+        for file in artifacts(package):
+            if file is package.get("archive"):
+                continue
+            uploaded = file.get("upload-time")
+            assert isinstance(uploaded, dt.datetime), (package["name"], file["url"])
+            assert uploaded < cutoff, (package["name"], file["url"], uploaded.isoformat())
 
 
 def test_optional_wheels_are_pinned_with_hashes():

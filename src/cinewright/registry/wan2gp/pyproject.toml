@@ -6,6 +6,7 @@
 # - torch, torchvision and torchaudio are added at the versions of `torch` in engines.yaml, from `torch_index` only.
 #   Upstream installs them in a separate step; requirements.txt only pulls torch in transitively.
 # An explicit index serves only the packages that name it in [tool.uv.sources]; everything else comes from PyPI.
+# [tool.uv] holds the 7-day quarantine. uv reads it only when it runs in this directory without --no-config.
 # How to regenerate the lock: src/cinewright/registry/README.md, section "Engine pins".
 
 [project]
@@ -138,6 +139,14 @@ dependencies = [
     'huggingface_hub[hf_xet]',
     'hf_xet>=1.5.2',
 ]
+
+[tool.uv]
+# Supply-chain quarantine, as for the Wan2GP commit: uv considers only files uploaded before this fixed time, 7 days
+# before the lock was resolved (2026-11-24). It applies to every index, including the two explicit ones below (both
+# report upload times); the direct-URL wheels upstream names are pinned by URL and hash instead. A fixed timestamp,
+# not a duration, so a regeneration with unchanged input resolves the same versions. Move it to 7 days before the new
+# resolution when the pin changes.
+exclude-newer = "2026-11-17T00:00:00Z"
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

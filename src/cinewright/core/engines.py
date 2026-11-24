@@ -34,6 +34,7 @@ TORCH_PACKAGES = ("torch", "torchvision", "torchaudio")
 # Files provisioning extracts from the Windows ffmpeg archive into `<wan2gp root>/ffmpeg_bins`, plus any DLLs.
 FFMPEG_WINDOWS_FILES = frozenset({"ffmpeg.exe", "ffprobe.exe", "ffplay.exe"})
 
+_GITHUB = "github.com"  # host of every engine repository and its source archives
 _ENGINE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _LOCK_NAME = re.compile(r"^pylock(\.[^.]+)?\.toml$")  # PEP 751 file name
 _TORCH_PIN = re.compile(r"^(?P<name>[a-z]+)==(?P<version>\d+(\.\d+)*)$")
@@ -152,7 +153,7 @@ class EnginePin(_Pin):
     """One engine: source archive, Python environment (with its lock), ffmpeg, optional wheels, driver and licence."""
 
     name: str = Field(min_length=1)
-    repo: HttpsUrl
+    repo: HttpsUrl = Field(description="Upstream GitHub repository, https://github.com/<owner>/<name>")
     commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     committed_at: AwareDatetime
     archive_url: HttpsUrl
@@ -168,6 +169,14 @@ class EnginePin(_Pin):
     min_driver: str = Field(pattern=r"^\d+(\.\d+)*$", description="Minimum NVIDIA driver branch")
     verified: Verification
     licence: Licence
+
+    @field_validator("repo")
+    @classmethod
+    def _github_repository(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.netloc != _GITHUB or len(_url_path_segments(value)) != 2 or parts.query or parts.fragment:
+            raise ValueError(f"repo {value!r} is not a GitHub repository (https://{_GITHUB}/<owner>/<name>)")
+        return value
 
     @field_validator("torch")
     @classmethod
@@ -202,9 +211,10 @@ class EnginePin(_Pin):
 
     @model_validator(mode="after")
     def _archive_of_commit(self) -> EnginePin:
-        segments = _url_path_segments(self.archive_url)
-        if segments[-2:] != ["archive", f"{self.commit}.zip"]:
-            raise ValueError("archive_url must be the source archive of `commit` (.../archive/<commit>.zip)")
+        owner, name = _url_path_segments(self.repo)
+        expected = f"https://{_GITHUB}/{owner}/{name}/archive/{self.commit}.zip"
+        if self.archive_url != expected:
+            raise ValueError(f"archive_url must be the GitHub source archive of `commit` in `repo`, {expected}")
         return self
 
     @property

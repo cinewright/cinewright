@@ -13,7 +13,9 @@ from pydantic import ValidationError
 from cinewright.core.engines import DEFAULT_PATH, REGISTRY_DIR, EnginePin, EnginePinError, load_engine_pins
 
 RAW = yaml.safe_load(DEFAULT_PATH.read_text(encoding="utf-8"))
+COMMIT = RAW["wan2gp"]["commit"]
 FFMPEG_LATEST = "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-release-essentials.zip"
+WRONG_ARCHIVE = "archive_url must be the GitHub source archive of `commit` in `repo`"
 DELETE = object()
 
 
@@ -68,7 +70,7 @@ def test_bundled_pins_validate():
     assert set(pins) == set(RAW)
     wan2gp = pins["wan2gp"]
     assert isinstance(wan2gp, EnginePin)
-    assert wan2gp.archive_url.endswith(f"/archive/{wan2gp.commit}.zip")
+    assert wan2gp.archive_url == f"{wan2gp.repo}/archive/{wan2gp.commit}.zip"
     assert (REGISTRY_DIR / wan2gp.lock).is_file()
     assert wan2gp.torch_versions == {"torch": "2.10.0", "torchvision": "0.25.0", "torchaudio": "2.10.0"}
     assert set(wan2gp.ffmpeg.win_amd64.files) >= {"ffmpeg.exe", "ffprobe.exe", "ffplay.exe"}
@@ -120,15 +122,37 @@ def test_unmodified_copy_validates(tmp_path):
             "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
             "wan2gp/ffmpeg/win_amd64: does not name version 9.1",
         ),
-        # A lock path that does not exist. The rules for the path itself: test_lock_path_rules.
+        # A lock path that does not exist. The rules for the path itself: test_lock_path_rules and the rows below.
         ("lock", "wan2gp/pylock.missing.toml", "wan2gp/lock: does not exist"),
-        # The source archive must be the one of the pinned commit.
-        ("archive_url", archive_of("0" * 40), "wan2gp: archive_url must be the source archive of `commit`"),
+        # Paths stay inside their directory: no absolute path, no drive (checked before the lock's existence).
+        ("lock", "/registry/wan2gp/pylock.win_amd64.toml", "wan2gp/lock: must be a relative path"),
+        ("lock", "C:wan2gp/pylock.win_amd64.toml", "wan2gp/lock: must be a relative path"),
+        ("requirements", "/requirements.txt", "wan2gp/requirements: must be a relative path"),
+        ("requirements", "C:requirements.txt", "wan2gp/requirements: must be a relative path"),
+        ("ffmpeg/win_amd64/bin_dir", "/ffmpeg-9.1-essentials_build/bin", "wan2gp/ffmpeg/win_amd64/bin_dir: must be a relative path"),
+        ("ffmpeg/win_amd64/bin_dir", "C:/ffmpeg-9.1-essentials_build/bin", "wan2gp/ffmpeg/win_amd64/bin_dir: must be a relative path"),
+        # The source archive must be the GitHub source archive of the pinned commit in the pinned repository.
+        ("archive_url", archive_of("0" * 40), f"wan2gp: {WRONG_ARCHIVE}"),
+        ("archive_url", f"https://example.com/deepbeepmeep/WanGP/archive/{COMMIT}.zip", f"wan2gp: {WRONG_ARCHIVE}"),
+        ("archive_url", f"https://github.com@example.com/deepbeepmeep/WanGP/archive/{COMMIT}.zip", f"wan2gp: {WRONG_ARCHIVE}"),
+        ("archive_url", f"https://github.com/someone-else/WanGP/archive/{COMMIT}.zip", f"wan2gp: {WRONG_ARCHIVE}"),
+        ("archive_url", f"https://github.com/mirror/deepbeepmeep/WanGP/archive/{COMMIT}.zip", f"wan2gp: {WRONG_ARCHIVE}"),
+        ("archive_url", f"https://github.com/deepbeepmeep/Wan2GP/archive/{COMMIT}.zip", f"wan2gp: {WRONG_ARCHIVE}"),
+        ("repo", "https://github.com/someone-else/WanGP", f"wan2gp: {WRONG_ARCHIVE}"),
+        # The repository is a GitHub repository URL.
+        ("repo", "https://gitlab.com/deepbeepmeep/WanGP", "wan2gp/repo: is not a GitHub repository"),
+        ("repo", "https://github.com/deepbeepmeep", "wan2gp/repo: is not a GitHub repository"),
+        ("repo", "https://github.com/deepbeepmeep/WanGP/tree/main", "wan2gp/repo: is not a GitHub repository"),
         # PyTorch: exactly torch, torchvision and torchaudio, each pinned with ==.
         ("torch", "torch==2.10.0 torchvision==0.25.0", "wan2gp/torch: must pin exactly torch, torchvision, torchaudio"),
         ("torch", "torch>=2.10.0 torchvision==0.25.0 torchaudio==2.10.0", "wan2gp/torch: 'torch>=2.10.0' is not name==version"),
-        # ffmpeg must pin every file provisioning extracts.
+        # ffmpeg must pin every file provisioning extracts, and nothing else but DLLs.
         ("ffmpeg/win_amd64/files/ffprobe.exe", DELETE, "wan2gp/ffmpeg/win_amd64: lacks ['ffprobe.exe']"),
+        (
+            "ffmpeg/win_amd64/files/readme.txt",
+            {"sha256": "0" * 64, "size": 1},
+            "wan2gp/ffmpeg/win_amd64: may list only ['ffmpeg.exe', 'ffplay.exe', 'ffprobe.exe'] and DLLs, not ['readme.txt']",
+        ),
         # An optional wheel must be a wheel of the package it is pinned for.
         (
             "optional_wheels/triton-windows/url",
@@ -175,6 +199,19 @@ def test_lock_path_rules(tmp_path, lock, message):
     path = write_copy(registry, mutated("lock", lock))
     (registry / lock).touch()
     assert_rejected(path, f"wan2gp/lock: {message}")
+
+
+def test_windows_ffmpeg_pin_may_list_dlls(tmp_path):
+    path = write_copy(tmp_path, mutated("ffmpeg/win_amd64/files/avcodec-62.dll", {"sha256": "0" * 64, "size": 1}))
+    assert "avcodec-62.dll" in load_engine_pins(path)["wan2gp"].ffmpeg.win_amd64.files
+
+
+@pytest.mark.parametrize("engine_id", ["Wan2GP!", "wan-2gp", "2wan", "WAN2GP"])
+def test_engine_id_rules(tmp_path, engine_id):
+    # The entry itself is the valid bundled one (it loads under a valid id), so only the id can be what fails.
+    assert set(load_engine_pins(write_copy(tmp_path, {"wan2gp_next": RAW["wan2gp"]}))) == {"wan2gp_next"}
+    with pytest.raises(EnginePinError, match="is not an engine id"):
+        load_engine_pins(write_copy(tmp_path, {engine_id: RAW["wan2gp"]}))
 
 
 def test_lock_is_resolved_next_to_the_file(tmp_path):
