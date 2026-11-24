@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from cinewright.api.schemas import GpuInfo, HardwareProfile, ModelDescriptor, Problem
 from cinewright.app import create_app
 from cinewright.config import Config
+from cinewright.core.assets import StagedBlob
 from cinewright.core.core import Core
 from cinewright.core.registry import Registry
 
@@ -120,6 +121,13 @@ def assert_problem(response: Any, status: int, problem_type: str | None = None) 
     if problem_type is not None:
         assert problem.type == problem_type
     return problem
+
+
+def stage(core: Core, data: bytes) -> StagedBlob:
+    """Bytes as the API layer hands an upload to the core: a complete temporary file in the asset store."""
+    writer = core.stage_upload()
+    writer.write(data)
+    return writer.finish()
 
 
 def register_worker(client: TestClient, models: tuple[str, ...] = ("test_image",), engine: str = "wan2gp") -> dict[str, str]:

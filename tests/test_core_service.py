@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+from conftest import stage
 
 from cinewright.api.schemas import ClientKind, DataClass, JobRequest, SettingsPatch, WorkerRegistration
 from cinewright.core.errors import Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
@@ -63,20 +64,20 @@ def test_health_and_local_host(core):
 
 
 def test_identical_bytes_are_one_asset_with_the_stricter_data_class(core):
-    first = core.add_asset(b"same bytes", "image/png", DataClass.PUBLIC)
-    second = core.add_asset(b"same bytes", "image/png", DataClass.BIOMETRIC)
+    first = core.add_asset(stage(core, b"same bytes"), "image/png", DataClass.PUBLIC)
+    second = core.add_asset(stage(core, b"same bytes"), "image/png", DataClass.BIOMETRIC)
     assert first.sha256 == second.sha256 == hashlib.sha256(b"same bytes").hexdigest()
     assert second.data_class == DataClass.BIOMETRIC
     assert len(core.list_assets(None, 50).items) == 1
     path = core.asset_path(first.sha256)
     assert path.read_bytes() == b"same bytes"
     assert path.parent.name == first.sha256[:2]
-    assert not [p for p in path.parent.iterdir() if p.name.startswith(".upload-")]
+    assert not list(core.paths.assets_dir.rglob(".upload-*"))
 
 
 def test_asset_pagination(core):
     for index in range(5):
-        core.add_asset(f"asset {index}".encode(), "image/png", DataClass.PRIVATE)
+        core.add_asset(stage(core, f"asset {index}".encode()), "image/png", DataClass.PRIVATE)
     first = core.list_assets(None, 2)
     second = core.list_assets(first.next_cursor, 2)
     third = core.list_assets(second.next_cursor, 2)
@@ -88,7 +89,7 @@ def test_asset_pagination(core):
 
 def test_job_data_class_is_the_strictest_of_request_and_inputs(core):
     core.register_worker(REGISTRATION, core.enrollment_token)
-    face = core.add_asset(b"face", "image/png", DataClass.BIOMETRIC)
+    face = core.add_asset(stage(core, b"face"), "image/png", DataClass.BIOMETRIC)
     job = core.submit_job(request(capability="i2i", inputs=[face.sha256], data_class="public"), ClientKind.UI, None)
     row = core.db.query_one("SELECT data_class, seed FROM jobs WHERE id = ?", (job.id,))
     assert row["data_class"] == "biometric"

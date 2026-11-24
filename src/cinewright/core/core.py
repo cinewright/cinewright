@@ -86,7 +86,7 @@ from cinewright.api.schemas import (
 )
 from cinewright.config import Config
 from cinewright.core import hardware, router
-from cinewright.core.assets import BlobStore, asset_from_row, input_provenance, output_provenance, record_asset
+from cinewright.core.assets import BlobStore, BlobWriter, StagedBlob, asset_from_row, input_provenance, output_provenance, record_asset
 from cinewright.core.clock import Clock, from_iso, to_iso, utcnow
 from cinewright.core.errors import Conflict, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
 from cinewright.core.events import EventLog, Published
@@ -605,11 +605,14 @@ class Core:
 
     # ------------------------------------------------------------------ assets
 
-    def add_asset(self, data: bytes, media_type: str, data_class: DataClass) -> Asset:
-        sha256 = self.blobs.write(data)
+    def stage_upload(self) -> BlobWriter:
+        return self.blobs.writer()
+
+    def add_asset(self, upload: StagedBlob, media_type: str, data_class: DataClass) -> Asset:
+        sha256 = self.blobs.place(upload)
         now = self.clock()
         with self.db.transaction() as conn:
-            row = record_asset(conn, input_provenance(sha256, media_type, len(data), now), data_class, None, now)
+            row = record_asset(conn, input_provenance(sha256, media_type, upload.size_bytes, now), data_class, None, now)
         return asset_from_row(row)
 
     def list_assets(self, cursor: str | None, limit: int) -> AssetList:
@@ -874,17 +877,20 @@ class Core:
             self.scheduler.extend(tx, worker_id, job_id)
         return WorkerEventsAck(cancel_requested=bool(row["cancel_requested"]))
 
-    def store_output(self, worker_id: str, job_id: str, name: str, media_type: str, data: bytes) -> OutputUploaded:
+    def check_output(self, worker_id: str, job_id: str) -> None:
         with self.db.transaction() as conn:
-            self._active_job(conn, worker_id, job_id)  # refuse before writing the blob
-        sha256 = self.blobs.write(data)
+            self._active_job(conn, worker_id, job_id)
+
+    def store_output(self, worker_id: str, job_id: str, name: str, media_type: str, upload: StagedBlob) -> OutputUploaded:
+        self.check_output(worker_id, job_id)  # the job may have ended while the upload ran; then the blob is not placed
+        sha256 = self.blobs.place(upload)
         with self._tx() as tx:
             row = self._active_job(tx.conn, worker_id, job_id)
             self._mark_running(tx, row)
-            output = {"name": name, "sha256": sha256, "media_type": media_type, "size_bytes": len(data)}
+            output = {"name": name, "sha256": sha256, "media_type": media_type, "size_bytes": upload.size_bytes}
             tx.emit(job_id, EventKind.LOG, {"message": f"Uploaded output {name}", UPLOAD_RECORD_KEY: output})
             self.scheduler.extend(tx, worker_id, job_id)
-        return OutputUploaded(sha256=sha256, size_bytes=len(data))
+        return OutputUploaded(sha256=sha256, size_bytes=upload.size_bytes)
 
     @staticmethod
     def _uploaded_outputs(conn: sqlite3.Connection, job_id: str) -> dict[str, _Upload]:

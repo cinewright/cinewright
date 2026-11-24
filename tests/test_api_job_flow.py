@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
-from conftest import API, PNG, assert_problem, register_worker
+from conftest import API, PNG, assert_problem, register_worker, stage
 
 from cinewright.api.schemas import Asset, DataClass, Job, JobEvent, JobState, Lease, Provenance
+from cinewright.core.assets import BlobWriter
 
 OUTPUT = b"\x89PNG\r\n\x1a\n" + b"generated-output"
 CONTENT_CSP = "sandbox; default-src 'none'"
@@ -276,7 +277,8 @@ def test_completion_cannot_change_the_uploaded_media_type(client):
 
 def test_asset_content_outside_the_allow_list_is_only_a_download(client):
     core = client.app.state.core
-    sha = core.add_asset(b"<script>alert(1)</script>", "text/html", DataClass.PRIVATE).sha256  # as an older or buggy core stored it
+    # As an older or buggy core stored it.
+    sha = core.add_asset(stage(core, b"<script>alert(1)</script>"), "text/html", DataClass.PRIVATE).sha256
     content = client.get(f"{API}/assets/{sha}/content")
     assert content.status_code == 200 and content.content == b"<script>alert(1)</script>"
     assert content.headers["content-type"] == "application/octet-stream"
@@ -315,22 +317,31 @@ def test_client_headers_are_validated_and_agent_needs_mcp(client):
 
 def test_uploads_are_stored_off_the_event_loop(client, monkeypatch):
     core = client.app.state.core
-    off_loop: list[str] = []
+    calls: list[tuple[str, bool]] = []
 
-    def checked(method):
+    def checked(name, method):
         def wrapper(*args):
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                off_loop.append(method.__name__)
+                calls.append((name, False))
+            else:
+                calls.append((name, True))
             return method(*args)
 
         return wrapper
 
-    monkeypatch.setattr(core, "add_asset", checked(core.add_asset))
-    monkeypatch.setattr(core, "store_output", checked(core.store_output))
+    for name in ("stage_upload", "add_asset", "check_output", "store_output"):
+        monkeypatch.setattr(core, name, checked(name, getattr(core, name)))
+    for name in ("write", "finish"):  # the streamed chunk writes, hashing and fsync
+        monkeypatch.setattr(BlobWriter, name, checked(name, getattr(BlobWriter, name)))
     assert client.post(f"{API}/assets", content=PNG, headers={"Content-Type": "image/png"}).status_code == 201
     auth = register_worker(client)
     submit(client)
     run_job(client, auth)
-    assert off_loop == ["add_asset", "store_output"]
+    on_loop = [name for name, loop in calls if loop]
+    assert on_loop == []
+    assert [name for name, _ in calls] == [
+        *("stage_upload", "write", "finish", "add_asset"),
+        *("check_output", "stage_upload", "write", "finish", "store_output", "check_output"),  # store_output checks again
+    ]

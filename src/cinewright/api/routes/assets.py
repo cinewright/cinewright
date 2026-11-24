@@ -6,7 +6,7 @@ from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from cinewright.api.deps import UPLOAD_MEDIA_TYPES, Core, binary_body, read_upload
+from cinewright.api.deps import UPLOAD_MEDIA_TYPES, Core, binary_body, receive_upload, upload_media_type
 from cinewright.api.problems import PROBLEM_RESPONSE
 from cinewright.api.schemas import Asset, AssetList, DataClass, Provenance
 
@@ -27,8 +27,10 @@ CONTENT_SECURITY_POLICY = "sandbox; default-src 'none'"
     openapi_extra=binary_body("Input file (image, clip or audio) as raw bytes; Content-Type names the media type."),
 )
 async def upload_asset(request: Request, core: Core, data_class: DataClass = Query(default=DataClass.PRIVATE)) -> Asset:
-    data, media_type = await read_upload(request)
-    return await run_in_threadpool(core.add_asset, data, media_type, data_class)
+    media_type = upload_media_type(request)
+    async with receive_upload(request, core) as upload:
+        # Placing the file and recording it must not block the event loop (SSE, leases, heartbeats).
+        return await run_in_threadpool(core.add_asset, upload, media_type, data_class)
 
 
 @router.get("/assets", response_model=AssetList, operation_id="listAssets")
