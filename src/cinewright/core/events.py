@@ -25,8 +25,6 @@ from cinewright.core.notify import Broadcaster
 from cinewright.db.database import Database
 
 _TERMINAL = {state.value for state in TERMINAL_JOB_STATES}
-# Replay reads stored events only. Releases 0.0.1 and 0.0.2 also stored previews, which replay skips.
-_REPLAY_SQL = "SELECT rowid, * FROM job_events WHERE kind != 'preview' AND "
 
 
 class Published(NamedTuple):
@@ -129,18 +127,29 @@ class EventLog:
                 # Any kind: 0.0.1 and 0.0.2 sent previews with an `id:`, so Last-Event-ID can name an old preview row.
                 row = conn.execute("SELECT rowid FROM job_events WHERE job_id = ? AND seq = ?", last).fetchone()
                 start = row[0] if row else None
+            # Replay reads stored events only: releases 0.0.1 and 0.0.2 also stored previews, which it skips.
             if job_id is not None:
                 state = conn.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
                 if state is None:
                     return _Replay([], watermark, True, published, [])
                 if start is not None:
-                    rows = conn.execute(_REPLAY_SQL + "job_id = ? AND rowid > ? ORDER BY rowid", (job_id, start)).fetchall()
+                    rows = conn.execute(
+                        "SELECT rowid, * FROM job_events WHERE kind != 'preview' AND job_id = ? AND rowid > ? ORDER BY rowid",
+                        (job_id, start),
+                    ).fetchall()
                 else:
                     after_seq = last[1] if last is not None and last[0] == job_id else 0
-                    rows = conn.execute(_REPLAY_SQL + "job_id = ? AND seq > ? ORDER BY rowid", (job_id, after_seq)).fetchall()
+                    rows = conn.execute(
+                        "SELECT rowid, * FROM job_events WHERE kind != 'preview' AND job_id = ? AND seq > ? ORDER BY rowid",
+                        (job_id, after_seq),
+                    ).fetchall()
                 finished = state["state"] in _TERMINAL
             else:
-                rows = conn.execute(_REPLAY_SQL + "rowid > ? ORDER BY rowid", (start,)).fetchall() if start else []
+                rows = []
+                if start:
+                    rows = conn.execute(
+                        "SELECT rowid, * FROM job_events WHERE kind != 'preview' AND rowid > ? ORDER BY rowid", (start,)
+                    ).fetchall()
                 finished = False
             previews = [] if finished else self.kept_previews(job_id)
         return _Replay([Published(row["rowid"], _event(row)) for row in rows], watermark, finished, published, previews)
