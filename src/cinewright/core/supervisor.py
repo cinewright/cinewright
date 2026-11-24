@@ -206,6 +206,11 @@ def spawn_bound(
         except OSError:
             popen.kill()
             popen.wait()
+            try:
+                if popen.stdin is not None:
+                    popen.stdin.close()  # else the garbage collector closes the pipe with a ResourceWarning
+            except OSError:
+                pass  # the pipe is already broken
             raise
         return BoundProcess(popen, job)
     preexec = _death_signal() if sys.platform.startswith("linux") else None

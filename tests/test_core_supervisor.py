@@ -19,6 +19,7 @@ from conftest import fake_detect
 
 import cinewright_worker
 from cinewright.api.schemas import ClientKind, JobRequest, LeaseRequest, WorkerRegistration
+from cinewright.core import supervisor as supervisor_module
 from cinewright.core.core import Core
 from cinewright.core.registry import Registry
 from cinewright.core.supervisor import (
@@ -307,6 +308,32 @@ def test_a_process_the_child_starts_at_once_joins_the_job_while_other_threads_ho
                 bound.release()
     finally:
         done.set()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Job Object setup runs only on Windows")
+def test_a_failed_job_setup_kills_the_suspended_child_and_closes_its_stdin_pipe(monkeypatch):
+    started: list[subprocess.Popen[bytes]] = []
+
+    class RecordingPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            started.append(self)
+
+    def fail(pid: int) -> int:
+        raise OSError(5, "AssignProcessToJobObject failed: Access is denied.")
+
+    monkeypatch.setattr(supervisor_module.subprocess, "Popen", RecordingPopen)
+    monkeypatch.setattr(supervisor_module, "_run_in_new_job", fail)
+    with pytest.raises(OSError, match="AssignProcessToJobObject"):
+        spawn_bound(
+            [BASE_PYTHON, "-I", "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    (popen,) = started
+    assert popen.returncode is not None  # killed while still suspended, and reaped
+    assert popen.stdin is not None and popen.stdin.closed  # no ResourceWarning when it is collected
 
 
 # --------------------------------------------------------------------------- restart backoff
