@@ -12,13 +12,15 @@ The worker runs as `<engine python> -I -u -c <BOOTSTRAP> <copy dir> --engine <en
   Cinewright variable. HTTP(S) proxies point at a loopback port the supervisor binds but never listens on,
   so library downloads in the engine are refused; the worker's own client uses no proxy.
 - The process ends with the core: a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (Windows
-  does not end children with their parent), on Linux `PR_SET_PDEATHSIG` with `SIGKILL`. The death signal
+  does not end children with their parent), joined while the process is still suspended, so nothing it
+  starts escapes the job; on Linux `PR_SET_PDEATHSIG` with `SIGKILL`. The death signal
   fires when the spawning thread ends, so one supervisor thread spawns every worker and lives until `stop()`.
 - Stop: close the worker's stdin (`--stop-on-stdin-eof`), wait `grace_seconds`, then kill it with everything
   it started. Console control events do not reach a worker of a console-less (pythonw) core, and
   `Popen.terminate()` is an immediate TerminateProcess, so stdin is the stop request on both platforms.
 - After a crash the worker restarts with exponential backoff; `restart()` replaces a running worker at once,
-  so it registers again (its model list is sent only at registration).
+  so it registers again (its model list is sent only at registration). `Core.restart_local_worker` first
+  retires the old worker's id, so its pending lease long-poll returns at once and takes no job.
 - stdout and stderr go to `<data dir>/logs/worker.log`: the worker logs to stderr, Wan2GP prints to stdout.
 """
 
@@ -53,7 +55,6 @@ BACKOFF_MAX_SECONDS = 60.0
 STABLE_SECONDS = 60.0  # a worker that ran this long before it exited restarts after the initial backoff again
 POLL_SECONDS = 0.2
 LOG_NAME = "worker.log"
-LOG_MAX_BYTES = 5 * 1024 * 1024  # checked at each start; the larger log becomes worker.log.1
 NO_PROXY = "127.0.0.1,localhost"
 COPY_DIR_NAME = "worker"  # below <data dir>/engines/
 
@@ -68,6 +69,8 @@ _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
+_PROCESS_SUSPEND_RESUME = 0x0800
+_CREATE_SUSPENDED = 0x00000004  # not exported by subprocess
 
 
 @dataclass(frozen=True)
@@ -158,7 +161,12 @@ class BoundProcess:
             self.popen.kill()
 
     def release(self) -> None:
-        """After the process ended: kill what it left behind and free the job handle."""
+        """After the process ended: close its stdin pipe, kill what it left behind and free the job handle."""
+        try:
+            if self.popen.stdin is not None:
+                self.popen.stdin.close()
+        except OSError:
+            pass  # the pipe is already broken
         if self._job is not None:
             job, self._job = self._job, None
             _kernel32().CloseHandle(job)  # KILL_ON_JOB_CLOSE ends any remaining descendant
@@ -176,18 +184,25 @@ def spawn_bound(
 ) -> BoundProcess:
     """Start `argv` so that it ends when this process ends, however this process ends.
 
-    Windows: the child joins a new Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` right after it starts;
-    only this process holds the job handle, so the system kills the job when this process ends. No console
-    window opens. Linux: `PR_SET_PDEATHSIG` with `SIGKILL`, in a new session so its descendants can be killed
+    Windows: the child starts suspended, joins a new Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and
+    only then runs, so no process it starts can be created outside the job (e.g. the interpreter a venv
+    launcher starts, while other threads of this process delay the assignment). Only this process holds the
+    job handle, so the system kills the job when this process ends. No console window opens. Linux:
+    `PR_SET_PDEATHSIG` with `SIGKILL` (set before `exec`), in a new session so its descendants can be killed
     together. The death signal follows the calling thread, so call this from a thread that lives as long as
     the child should.
     """
     if sys.platform == "win32":
         popen = subprocess.Popen(  # noqa: S603 - the interpreter of the engine environment, fixed arguments
-            list(argv), env=env, stdin=stdin, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW
+            list(argv),
+            env=env,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            creationflags=subprocess.CREATE_NO_WINDOW | _CREATE_SUSPENDED,
         )
         try:
-            job = _job_for(popen.pid)
+            job = _run_in_new_job(popen.pid)
         except OSError:
             popen.kill()
             popen.wait()
@@ -278,8 +293,21 @@ class _ExtendedLimits(ctypes.Structure):
     )
 
 
-def _job_for(pid: int) -> int:
-    """A new kill-on-close Job Object holding process `pid`; raises OSError when any step fails."""
+@cache
+def _nt_resume_process() -> Any:
+    from ctypes import wintypes
+
+    resume = ctypes.WinDLL("ntdll").NtResumeProcess
+    resume.argtypes = (wintypes.HANDLE,)
+    resume.restype = ctypes.c_long  # NTSTATUS, 0 on success
+    return resume
+
+
+def _run_in_new_job(pid: int) -> int:
+    """Put the suspended process `pid` into a new kill-on-close Job Object, then let it run; returns the job.
+
+    Raises OSError when any step fails; the process then stays suspended for the caller to kill.
+    """
     kernel32 = _kernel32()
 
     def fail(step: str) -> OSError:
@@ -294,26 +322,21 @@ def _job_for(pid: int) -> int:
         limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not kernel32.SetInformationJobObject(job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)):
             raise fail("SetInformationJobObject")
-        process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        process = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _PROCESS_SUSPEND_RESUME, False, pid)
         if not process:
             raise fail("OpenProcess")
         try:
             if not kernel32.AssignProcessToJobObject(job, process):
                 raise fail("AssignProcessToJobObject")
+            status = _nt_resume_process()(process)
+            if status != 0:
+                raise OSError(f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08X}")
         finally:
             kernel32.CloseHandle(process)
     except OSError:
         kernel32.CloseHandle(job)
         raise
     return job
-
-
-def _rotate(path: Path) -> None:
-    try:
-        if path.stat().st_size > LOG_MAX_BYTES:
-            os.replace(path, path.with_name(path.name + ".1"))
-    except OSError:
-        pass  # no log yet, or the old one is in use: keep appending
 
 
 # --------------------------------------------------------------------------- the supervisor
@@ -432,7 +455,6 @@ class WorkerSupervisor:
             self._copied = True
         self._paths.logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._paths.logs_dir / LOG_NAME
-        _rotate(log_path)
         env = spawn_environment(
             os.environ,
             core_url=self._core_url,

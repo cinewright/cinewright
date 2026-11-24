@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -25,11 +26,14 @@ from cinewright.core.supervisor import (
     NO_PROXY,
     SupervisorStatus,
     WorkerLaunch,
+    WorkerSupervisor,
     copy_worker_package,
     reserve_closed_port,
+    spawn_bound,
     spawn_environment,
     worker_command,
 )
+from cinewright.paths import DataPaths
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 # The interpreter itself, not a venv launcher that starts it as a child, so a test sees one process.
@@ -172,14 +176,19 @@ print(child.pid, flush=True)
 time.sleep(120)
 """
 
+# The worker runs without --stop-on-stdin-eof: when the host dies its stdin pipe reaches end of file, and only
+# the Job Object or the death signal may end it (it keeps retrying its registration with the closed port).
 HOST_SUPERVISOR = """
 import os, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from cinewright.core.supervisor import WorkerLaunch, WorkerSupervisor, reserve_closed_port
 from cinewright.paths import DataPaths
+class DeafLaunch(WorkerLaunch):
+    def worker_args(self):
+        return [arg for arg in super().worker_args() if arg != "--stop-on-stdin-eof"]
 closed = reserve_closed_port()
-supervisor = WorkerSupervisor(WorkerLaunch(python=Path(sys.executable), engine="mock"))
+supervisor = WorkerSupervisor(DeafLaunch(python=Path(sys.executable), engine="mock"))
 supervisor.start(core_url=f"http://127.0.0.1:{closed.getsockname()[1]}", enrollment_token="t", paths=DataPaths(Path(sys.argv[2])))
 while supervisor.pid is None:
     time.sleep(0.05)
@@ -222,6 +231,7 @@ def kill_and_expect_gone(host: subprocess.Popen, interpreter: psutil.Process, tr
                 process.kill()
         host.kill()
         host.wait(timeout=10)
+        host.stdout.close()
 
 
 @pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")), reason="Job Object or PR_SET_PDEATHSIG")
@@ -233,8 +243,145 @@ def test_a_bound_child_ends_when_its_host_is_killed_even_if_it_ignores_stdin():
 @pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")), reason="Job Object or PR_SET_PDEATHSIG")
 def test_killing_a_process_that_runs_the_supervisor_ends_its_worker(tmp_path):
     host, interpreter, tree = start_host(HOST_SUPERVISOR, str(tmp_path / "home"))
-    assert any("--engine" in process.cmdline() for process in tree)
+    workers = [process for process in tree if "--engine" in process.cmdline()]
+    assert workers and not any("--stop-on-stdin-eof" in process.cmdline() for process in workers)
     kill_and_expect_gone(host, interpreter, tree)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or Path(BASE_PYTHON) == Path(sys.executable), reason="a Windows venv launcher starts its interpreter as a child"
+)
+def test_a_process_the_child_starts_at_once_joins_the_job_while_other_threads_hold_the_gil():
+    # Without the suspended start, the venv launcher's child is created before the job assignment whenever
+    # other threads delay it (in the core: the event loop), and so lies outside the job.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
+    kernel32.IsProcessInJob.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    query_limited_information = 0x1000
+
+    def in_job(pid: int, job: int) -> bool:
+        handle = kernel32.OpenProcess(query_limited_information, False, pid)
+        assert handle, ctypes.get_last_error()
+        try:
+            result = wintypes.BOOL()
+            assert kernel32.IsProcessInJob(handle, job, ctypes.byref(result)), ctypes.get_last_error()
+            return bool(result.value)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    done = threading.Event()
+
+    def hold_the_gil() -> None:
+        total = 0
+        while not done.is_set():
+            for number in range(2000):
+                total += number
+
+    for thread in [threading.Thread(target=hold_the_gil, daemon=True) for _ in range(2)]:
+        thread.start()
+    try:
+        for _ in range(5):
+            bound = spawn_bound(
+                [sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                children: list[psutil.Process] = []
+                while not children and time.monotonic() < deadline:
+                    children = [child for child in psutil.Process(bound.pid).children() if child.name().lower() != "conhost.exe"]
+                    time.sleep(0.02)
+                assert children, "the venv launcher started no interpreter"
+                assert all(in_job(child.pid, bound._job) for child in children)
+            finally:
+                bound.kill()
+                bound.popen.wait(timeout=10)
+                bound.release()
+    finally:
+        done.set()
+
+
+# --------------------------------------------------------------------------- restart backoff
+
+
+class CrashingLaunch(WorkerLaunch):
+    """A worker that exits at once: its argument parser rejects the option."""
+
+    def worker_args(self) -> list[str]:
+        return ["--engine", "mock", "--no-such-option"]
+
+
+class RecordingSupervisor(WorkerSupervisor):
+    """Records each restart delay instead of waiting and stops after `limit` of them.
+
+    `stable_from` maps a number of recorded delays to the `stable_seconds` that the following runs use.
+    """
+
+    def __init__(self, launch: WorkerLaunch, limit: int, stable_from: dict[int, float] | None = None, **kwargs) -> None:
+        super().__init__(launch, **kwargs)
+        self.limit = limit
+        self.stable_from = stable_from or {}
+        self.delays: list[float] = []
+
+    def _pause(self, seconds: float) -> None:
+        self.delays.append(seconds)
+        self.stable_seconds = self.stable_from.get(len(self.delays), self.stable_seconds)
+        if len(self.delays) >= self.limit:
+            with self._lock:
+                self._stopping = True
+
+
+def run_supervisor(supervisor: WorkerSupervisor, home: Path) -> None:
+    supervisor.start(core_url="http://127.0.0.1:9", enrollment_token="t", paths=DataPaths(home))
+    try:
+        deadline = time.monotonic() + 120
+        while supervisor.status().state != "stopped":
+            assert time.monotonic() < deadline, "the supervisor did not stop"
+            time.sleep(0.05)
+    finally:
+        supervisor.stop()
+
+
+def test_quick_crashes_double_the_restart_delay_up_to_the_cap(tmp_path):
+    supervisor = RecordingSupervisor(
+        CrashingLaunch(python=Path(BASE_PYTHON), engine="mock"), limit=6, backoff_initial=1.0, backoff_max=8.0, stable_seconds=3600
+    )
+    run_supervisor(supervisor, tmp_path / "home")
+    assert supervisor.delays == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+    assert supervisor.spawns == 6
+    log = (tmp_path / "home" / "logs" / "worker.log").read_text(encoding="utf-8", errors="replace")
+    assert log.count("unrecognized arguments: --no-such-option") == 6  # every start appends to the one log
+
+
+def test_a_run_of_at_least_stable_seconds_resets_the_restart_delay(tmp_path):
+    # After three quick crashes, the fourth run counts as stable (stable_seconds 0), the runs after it as quick again.
+    supervisor = RecordingSupervisor(
+        CrashingLaunch(python=Path(BASE_PYTHON), engine="mock"),
+        limit=6,
+        stable_from={3: 0.0, 4: 3600.0},
+        backoff_initial=1.0,
+        backoff_max=60.0,
+        stable_seconds=3600,
+    )
+    run_supervisor(supervisor, tmp_path / "home")
+    assert supervisor.delays == [1.0, 2.0, 4.0, 1.0, 2.0, 4.0]
+
+
+def test_a_worker_that_cannot_start_is_retried_with_the_same_backoff(tmp_path):
+    supervisor = RecordingSupervisor(
+        WorkerLaunch(python=tmp_path / "missing" / "python.exe", engine="mock"), limit=4, backoff_initial=1.0, backoff_max=4.0
+    )
+    run_supervisor(supervisor, tmp_path / "home")
+    assert supervisor.delays == [1.0, 2.0, 4.0, 4.0]
+    assert supervisor.spawns == 0
 
 
 # --------------------------------------------------------------------------- the worker's stdin stop channel
@@ -282,6 +429,7 @@ def test_a_worker_started_with_stop_on_stdin_eof_stops_when_stdin_closes(worker_
         if worker.poll() is None:
             worker.kill()
             worker.wait(timeout=10)
+        worker.stderr.close()
 
 
 # --------------------------------------------------------------------------- core: shutdown and host health
@@ -362,3 +510,29 @@ def test_the_supervisor_overrides_the_local_health_while_the_process_is_not_regi
 
     core.restart_local_worker()
     assert stub.restarts == 1
+
+
+def test_the_restart_call_retires_the_running_worker_so_its_waiting_long_poll_returns_without_a_job(core, clock):
+    stub = StubSupervisor(SupervisorStatus("running", since=clock.now))
+    core.supervisor = stub
+    old = core.register_worker(REGISTRATION, core.enrollment_token).worker_id
+
+    async def scenario():
+        waiting = asyncio.create_task(core.lease(old, LeaseRequest(wait_seconds=10)))
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        core.restart_local_worker()
+        result = await asyncio.wait_for(waiting, 5)
+        return result, time.monotonic() - started
+
+    result, elapsed = asyncio.run(scenario())
+    assert result is None and elapsed < 2
+    assert stub.restarts == 1
+
+    job = core.submit_job(JobRequest(capability="t2i", prompt="a lighthouse"), ClientKind.UI, None)
+    assert asyncio.run(core.lease(old, LeaseRequest(wait_seconds=0))) is None  # a fresh request of the old worker: no job
+    clock.advance(1)
+    stub.current = SupervisorStatus("running", since=clock.now)  # the replacement process
+    new = core.register_worker(REGISTRATION, core.enrollment_token).worker_id
+    granted = asyncio.run(core.lease(new, LeaseRequest(wait_seconds=0)))
+    assert granted is not None and granted.job.job_id == job.id

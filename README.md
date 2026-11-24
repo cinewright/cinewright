@@ -158,7 +158,7 @@ The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TO
 | `engines/` | Engine data, e.g. `engines/wan2gp/wgp_config.json` |
 | `engines/worker/cinewright_worker/` | Copy of the worker package that the engine's Python runs; the core replaces it at each start |
 | `logs/cinewright.log` | Launcher and core log |
-| `logs/worker.log` | Output of the worker the core started: the worker's log and the engine's messages. At a worker start, a log larger than 5 MB becomes `worker.log.1` |
+| `logs/worker.log` | Output of the worker the core started: the worker's log and the engine's messages |
 
 ### Commands
 

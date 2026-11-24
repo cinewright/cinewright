@@ -180,13 +180,19 @@ def test_a_killed_worker_restarts_with_backoff_and_the_queue_continues(supervise
 
 def test_the_restart_call_registers_the_worker_again(supervised: Supervised):
     wait_ready(supervised)
+    time.sleep(1)  # the idle worker now waits in a lease long-poll, longer than the grace period
     before = supervised.worker_ids()
     old_tree = supervised.tree()
+    started = time.monotonic()
     supervised.core.restart_local_worker()
+    wait_for(lambda: supervised.supervisor.spawns == 2, "the supervisor to start the new worker", lambda: supervised.log)
+    # The old worker's long-poll returned at once, so it stopped on the stdin request instead of being killed.
+    assert supervised.supervisor.last_stop_graceful is True, supervised.log
+    assert time.monotonic() - started < supervised.supervisor.grace_seconds
     wait_for(lambda: len(supervised.worker_ids()) == len(before) + 1, "the worker to register again", lambda: supervised.log)
-    assert supervised.supervisor.spawns == 2
     assert psutil.wait_procs(old_tree, timeout=5)[1] == []
     assert wait_ready(supervised)["state"] == "ready"
+    assert run_job(supervised)["state"] == "succeeded"  # the new worker takes jobs, the retired one took none
 
 
 # Each refused connection costs about 2 s on Windows (SYN retries): the worker needs two of them after the

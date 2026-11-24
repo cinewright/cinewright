@@ -171,6 +171,7 @@ class Core:
         self.supervisor: WorkerSupervisor | None = None
         self._closed = False
         self._leasing = True
+        self._retired: set[str] = set()  # workers replaced by a restart of the local worker: they get no new job
         self._ensure_local_host()
 
     def stop_leasing(self) -> None:
@@ -182,10 +183,20 @@ class Core:
         """Restart the supervised local worker, so it registers again with its current model list.
 
         For model installs and removals (#3): a worker sends its model list only when it registers.
-        Does nothing while the core supervises no worker.
+        First the running worker process is retired: its pending lease long-poll returns at once and it gets
+        no new job. An idle worker waits in a long-poll longer than the stop's grace period, so it would
+        otherwise be killed instead of stopping on request, and a job it took in that window would wait for
+        its lease to expire while the new worker idles. Does nothing while the core supervises no worker.
         """
-        if self.supervisor is not None:
-            self.supervisor.restart()
+        supervisor = self.supervisor
+        if supervisor is None:
+            return
+        status = supervisor.status()
+        if status.state == "running" and status.since is not None:
+            rows = self.db.query("SELECT id FROM workers WHERE host_id = ? AND registered_at >= ?", (LOCAL_HOST_ID, to_iso(status.since)))
+            self._retired.update(row["id"] for row in rows)
+            self.scheduler.wakeup.notify()
+        supervisor.restart()
 
     def close(self) -> None:
         if self._closed:
@@ -759,7 +770,10 @@ class Core:
         return HeartbeatAck(cancel=[row["id"] for row in rows])
 
     async def lease(self, worker_id: str, request: LeaseRequest, gone: Callable[[], Awaitable[bool]] | None = None) -> Lease | None:
-        """Long-poll for a job. `gone` reports whether the requesting worker disconnected; a later check then takes no job."""
+        """Long-poll for a job. `gone` reports whether the requesting worker disconnected; a later check then takes no job.
+
+        A worker retired by `restart_local_worker` gets no job, and its waiting long-poll returns at once.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.wait_seconds
         first = True
@@ -774,7 +788,7 @@ class Core:
             granted = self._try_lease(worker_id, abandon=first)
             first = False
             remaining = deadline - loop.time()
-            if granted is not None or remaining <= 0:
+            if granted is not None or remaining <= 0 or worker_id in self._retired:
                 return granted
             try:
                 await asyncio.wait_for(wakeup.wait(), remaining)
@@ -783,7 +797,7 @@ class Core:
         return None
 
     def _try_lease(self, worker_id: str, *, abandon: bool = True) -> Lease | None:
-        if not self._leasing:
+        if not self._leasing or worker_id in self._retired:
             return None
         with self._tx() as tx:
             worker = self._worker_record(tx.conn, worker_id)
