@@ -6,6 +6,8 @@ base URL `http://127.0.0.1:8737`, because the core refuses any other `Host`.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,18 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from cinewright.api.schemas import GpuInfo, HardwareProfile, ModelDescriptor, Problem
+from cinewright.api.schemas import (
+    ClientKind,
+    GpuInfo,
+    HardwareProfile,
+    JobCompletion,
+    JobRequest,
+    LeaseRequest,
+    ModelDescriptor,
+    Problem,
+    WorkerEvents,
+    WorkerRegistration,
+)
 from cinewright.app import create_app
 from cinewright.config import Config
 from cinewright.core.assets import StagedBlob
@@ -128,6 +141,34 @@ def stage(core: Core, data: bytes) -> StagedBlob:
     writer = core.stage_upload()
     writer.write(data)
     return writer.finish()
+
+
+def leased_job(core: Core) -> tuple[str, str, str]:
+    """Register a worker on the core, submit a t2i job and lease it to that worker: (worker id, job id, lease id).
+
+    Call it outside an event loop; the lease runs in its own.
+    """
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["test_image"], health={"state": "ready"})
+    worker_id = core.register_worker(registration, core.enrollment_token).worker_id
+    job_id = core.submit_job(JobRequest.model_validate({"capability": "t2i", "prompt": "a lighthouse"}), ClientKind.UI, None).id
+    granted = asyncio.run(core.lease(worker_id, LeaseRequest(wait_seconds=0)))
+    assert granted is not None and granted.job.job_id == job_id
+    return worker_id, job_id, granted.job.lease_id
+
+
+def report(core: Core, worker_id: str, job_id: str, lease_id: str, *events: dict[str, Any]) -> None:
+    """Post worker events for a leased job, as the worker's events call does."""
+    core.worker_events(worker_id, job_id, WorkerEvents(lease_id=lease_id, events=list(events)))
+
+
+def finish_job(core: Core, worker_id: str, job_id: str, lease_id: str) -> None:
+    sha256 = core.store_output(worker_id, job_id, "image.png", "image/png", stage(core, PNG)).sha256
+    outputs = [{"sha256": sha256, "media_type": "image/png", "name": "image.png"}]
+    core.complete_job(worker_id, job_id, JobCompletion(lease_id=lease_id, outputs=outputs))
+
+
+def preview_event(frame: int) -> dict[str, Any]:
+    return {"kind": "preview", "data": {"media_type": "image/png", "data_base64": base64.b64encode(f"frame {frame}".encode()).decode()}}
 
 
 def register_worker(client: TestClient, models: tuple[str, ...] = ("test_image",), engine: str = "wan2gp") -> dict[str, str]:
