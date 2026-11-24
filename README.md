@@ -227,7 +227,7 @@ The core keeps one long-running worker on your computer, so WanGP's models stay 
 
 - **Crashes.** If the worker ends unexpectedly, the core starts it again after a pause that doubles with each quick crash, from 1 second up to 1 minute. Jobs keep running on the new worker. A job that was running when the worker crashed returns to the queue when its lease expires, after two minutes.
 - **Stopping.** When the core exits, it stops granting jobs, asks the worker to stop by closing the worker's standard input, and ends the worker after 5 seconds. If the core itself is killed, or ends when you sign out, Windows ends the worker too, because the worker belongs to a job object that dies with the core. On Linux the worker gets a kill signal when the core ends.
-- **Network.** The worker's proxy settings point at a closed local port, so libraries in the engine cannot download anything, while the worker still reaches the core. On Windows this is configuration only, because a per-user installation cannot add firewall rules.
+- **Network.** The worker's proxy settings point at a closed local port, so engine libraries that honour the standard proxy variables (Python's `urllib` and `requests` among them) cannot reach the internet, while the worker still reaches the core. Code that ignores these variables is not stopped: on Windows this is configuration only, because a per-user installation cannot add firewall rules.
 - **Health.** The Hosts view shows the worker's state (starting, ready, busy or failed) and the VRAM it uses. The state comes from the worker's own reports and, while the worker is starting or down, from the core's view of the process.
 
 ### Routing

@@ -199,11 +199,22 @@ def start_host(script: str, *args: str) -> tuple[subprocess.Popen, psutil.Proces
     return host, interpreter, [child, *child.children(recursive=True)]
 
 
+def running(process: psutil.Process) -> bool:
+    """Alive and not a zombie: an orphan that ended may wait for a reaper (e.g. in a container without init)."""
+    try:
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
 def kill_and_expect_gone(host: subprocess.Popen, interpreter: psutil.Process, tree: list[psutil.Process]) -> None:
     assert all(process.is_running() for process in tree)
     try:
         interpreter.kill()  # TerminateProcess on Windows, SIGKILL on Linux: no cleanup code runs
-        _, alive = psutil.wait_procs(tree, timeout=10)
+        deadline = time.monotonic() + 10
+        while any(running(process) for process in tree) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        alive = [process for process in tree if running(process)]
         assert alive == [], f"still running after the host was killed: {alive}"
     finally:
         for process in tree:
