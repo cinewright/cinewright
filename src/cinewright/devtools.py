@@ -1,10 +1,14 @@
 """Maintainer tools (not for end users).
 
-  python -m cinewright.devtools openapi [PATH]   write the OpenAPI document (default: stdout)
-  python -m cinewright.devtools surface          print the public surface, one sorted line per item
+  python -m cinewright.devtools openapi [PATH]            write the OpenAPI document (default: stdout)
+  python -m cinewright.devtools surface                   print the public surface, one sorted line per item
+  python -m cinewright.devtools upstream-check [--json]   report a Wan2GP commit eligible for a pin update
 
 The surface (routes, request and response schemas, MCP tools) is what governance's
 classification check compares between base and head: a change there is a `feat`.
+
+upstream-check exits 0 when no upstream commit is eligible (and prints nothing), 10 when one
+is, and 1 when the check failed (see cinewright.upstream_check).
 """
 
 from __future__ import annotations
@@ -86,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     export = sub.add_parser("openapi")
     export.add_argument("path", nargs="?")
     sub.add_parser("surface")
+    upstream = sub.add_parser("upstream-check")
+    upstream.add_argument("--json", action="store_true", help="print the report as one JSON object")
     args = parser.parse_args(argv)
+    if args.cmd == "upstream-check":
+        from cinewright import upstream_check
+
+        return upstream_check.run(as_json=args.json)
     if args.cmd == "openapi":
         text = openapi_text()
         if args.path:

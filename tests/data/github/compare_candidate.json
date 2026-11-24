@@ -1,0 +1,64 @@
+{
+  "url": "https://api.github.com/repos/deepbeepmeep/WanGP/compare/38758d3c73366422efcf609abb63cab8385f3552...d31d7e00bed83e2f069fe33888046bdb18bf2e31",
+  "html_url": "https://github.com/deepbeepmeep/WanGP/compare/38758d3c73366422efcf609abb63cab8385f3552...d31d7e00bed83e2f069fe33888046bdb18bf2e31",
+  "permalink_url": "https://github.com/deepbeepmeep/WanGP/compare/deepbeepmeep:38758d3...deepbeepmeep:d31d7e0",
+  "diff_url": "https://github.com/deepbeepmeep/WanGP/compare/38758d3c73366422efcf609abb63cab8385f3552...d31d7e00bed83e2f069fe33888046bdb18bf2e31.diff",
+  "patch_url": "https://github.com/deepbeepmeep/WanGP/compare/38758d3c73366422efcf609abb63cab8385f3552...d31d7e00bed83e2f069fe33888046bdb18bf2e31.patch",
+  "status": "ahead",
+  "ahead_by": 2,
+  "behind_by": 0,
+  "total_commits": 2,
+  "base_commit": {
+    "sha": "38758d3c73366422efcf609abb63cab8385f3552"
+  },
+  "merge_base_commit": {
+    "sha": "38758d3c73366422efcf609abb63cab8385f3552"
+  },
+  "commits": [
+    {
+      "sha": "f4cfc1259215577be9a2ee280c41efbedfb4459a",
+      "commit": {
+        "author": {
+          "date": "2026-11-17T17:41:02Z"
+        },
+        "committer": {
+          "date": "2026-11-17T17:41:02Z"
+        },
+        "message": "v20",
+        "tree": {
+          "sha": "7142ab560f6372224b2ddf4f3aa47e068378dd9e"
+        }
+      },
+      "url": "https://api.github.com/repos/deepbeepmeep/WanGP/commits/f4cfc1259215577be9a2ee280c41efbedfb4459a",
+      "html_url": "https://github.com/deepbeepmeep/WanGP/commit/f4cfc1259215577be9a2ee280c41efbedfb4459a",
+      "parents": [
+        {
+          "sha": "38758d3c73366422efcf609abb63cab8385f3552"
+        }
+      ]
+    },
+    {
+      "sha": "d31d7e00bed83e2f069fe33888046bdb18bf2e31",
+      "commit": {
+        "author": {
+          "date": "2026-11-17T17:43:04Z"
+        },
+        "committer": {
+          "date": "2026-11-17T17:43:04Z"
+        },
+        "message": "v20",
+        "tree": {
+          "sha": "5b5aec30b0bb84dd588903fb1c03b2a6f8bee31a"
+        }
+      },
+      "url": "https://api.github.com/repos/deepbeepmeep/WanGP/commits/d31d7e00bed83e2f069fe33888046bdb18bf2e31",
+      "html_url": "https://github.com/deepbeepmeep/WanGP/commit/d31d7e00bed83e2f069fe33888046bdb18bf2e31",
+      "parents": [
+        {
+          "sha": "f4cfc1259215577be9a2ee280c41efbedfb4459a"
+        }
+      ]
+    }
+  ],
+  "files": []
+}
