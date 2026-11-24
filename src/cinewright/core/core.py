@@ -1,7 +1,8 @@
 """The core: the implementation of `CoreService` (see `service.py`).
 
 One `Core` per process start. It owns the database, the asset store, the scheduler and the event
-log, and generates the enrollment token that worker processes need to register.
+log, and generates the enrollment token that worker processes need to register. The app's lifespan
+attaches the local worker's supervisor (`supervisor.py`) when it starts one.
 """
 
 from __future__ import annotations
@@ -15,11 +16,11 @@ import logging
 import os
 import secrets
 import sqlite3
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -94,6 +95,9 @@ from cinewright.core.registry import Registry
 from cinewright.core.scheduler import ACTIVE_STATES, LEASE_SECONDS, Scheduler, Tx, WorkerRecord, transition
 from cinewright.db.database import Database
 
+if TYPE_CHECKING:
+    from cinewright.core.supervisor import WorkerSupervisor
+
 log = logging.getLogger(__name__)
 
 LOCAL_HOST_ID = "local"
@@ -162,8 +166,26 @@ class Core:
         self.scheduler = Scheduler(self.registry, lease_seconds=lease_seconds)
         # Per start; handed to spawned worker processes in CINEWRIGHT_ENROLLMENT_TOKEN.
         self.enrollment_token = secrets.token_urlsafe(32)
+        self.started_at = clock()
+        # Set by the app's lifespan while it supervises the local worker process.
+        self.supervisor: WorkerSupervisor | None = None
         self._closed = False
+        self._leasing = True
         self._ensure_local_host()
+
+    def stop_leasing(self) -> None:
+        """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
+        self._leasing = False
+        self.scheduler.wakeup.notify()
+
+    def restart_local_worker(self) -> None:
+        """Restart the supervised local worker, so it registers again with its current model list.
+
+        For model installs and removals (#3): a worker sends its model list only when it registers.
+        Does nothing while the core supervises no worker.
+        """
+        if self.supervisor is not None:
+            self.supervisor.restart()
 
     def close(self) -> None:
         if self._closed:
@@ -605,8 +627,33 @@ class Core:
 
     # ------------------------------------------------------------------ hosts, approvals, libraries
 
+    def _worker_health(self) -> dict[str, WorkerHealth]:
+        """Per host, the health its most recently seen worker reported, among workers registered since this start.
+
+        Rows of earlier starts stay in the database. On the local host the supervisor's view of the process
+        wins while the process is starting or down, or runs but has not registered yet.
+        """
+        cutoff = to_iso(self.clock() - timedelta(seconds=WORKER_STALE_SECONDS))
+        rows = self.db.query(
+            "SELECT host_id, health, registered_at FROM workers WHERE last_seen_at >= ? AND registered_at >= ? "
+            "ORDER BY last_seen_at, registered_at",
+            (cutoff, to_iso(self.started_at)),
+        )
+        latest = {row["host_id"]: row for row in rows}  # ascending order: the last row of a host wins
+        health = {host_id: WorkerHealth.model_validate_json(row["health"]) for host_id, row in latest.items()}
+        supervisor = self.supervisor
+        if supervisor is not None:
+            status = supervisor.status()
+            local = latest.get(LOCAL_HOST_ID)
+            if status.state != "running":
+                health[LOCAL_HOST_ID] = WorkerHealth(state="starting" if status.state == "starting" else "failed", detail=status.detail)
+            elif local is None or (status.since is not None and from_iso(local["registered_at"]) < status.since):
+                health[LOCAL_HOST_ID] = WorkerHealth(state="starting", detail="The worker process runs and has not registered yet.")
+        return health
+
     def list_hosts(self) -> HostList:
         online = {w.host_id for w in self._online_workers()}
+        worker_health = self._worker_health()
         last_seen = {
             row["host_id"]: row["seen"] for row in self.db.query("SELECT host_id, MAX(last_seen_at) AS seen FROM workers GROUP BY host_id")
         }
@@ -621,6 +668,7 @@ class Core:
                     online=host.kind == HostKind.LOCAL or host.id in online,
                     last_seen_at=from_iso(last_seen.get(host.id)),
                     hardware=self._stored_hardware(host.id),
+                    worker_health=worker_health.get(host.id),
                 )
             )
         return HostList(items=items)
@@ -710,15 +758,19 @@ class Core:
             ).fetchall()
         return HeartbeatAck(cancel=[row["id"] for row in rows])
 
-    async def lease(self, worker_id: str, request: LeaseRequest) -> Lease | None:
+    async def lease(self, worker_id: str, request: LeaseRequest, gone: Callable[[], Awaitable[bool]] | None = None) -> Lease | None:
+        """Long-poll for a job. `gone` reports whether the requesting worker disconnected; a later check then takes no job."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.wait_seconds
         first = True
-        while not self._closed:
+        while not self._closed and self._leasing:
             wakeup = self.scheduler.wakeup.snapshot()  # before checking, so no enqueue slips between check and wait
             # Only a request's first check releases the worker's abandoned jobs. A later check may belong to a
             # stale long-poll whose connection dropped while the worker's retry already got a job; it must not
-            # take that job back.
+            # take that job back. Nor may the long-poll of a worker process that was killed take a new job:
+            # the job would wait for its lease to expire while the restarted worker idles.
+            if not first and gone is not None and await gone():
+                return None
             granted = self._try_lease(worker_id, abandon=first)
             first = False
             remaining = deadline - loop.time()
@@ -731,6 +783,8 @@ class Core:
         return None
 
     def _try_lease(self, worker_id: str, *, abandon: bool = True) -> Lease | None:
+        if not self._leasing:
+            return None
         with self._tx() as tx:
             worker = self._worker_record(tx.conn, worker_id)
             row = self.scheduler.lease_next(tx, worker, abandon=abandon)

@@ -47,8 +47,9 @@ def heartbeat(heartbeat: Heartbeat, core: Core, worker_id: WorkerId) -> Heartbea
     operation_id="leaseJob",
     responses={204: {"description": "No job available within wait_seconds"}},
 )
-async def lease(request: LeaseRequest, core: Core, worker_id: WorkerId) -> Lease | Response:
-    granted = await core.lease(worker_id, request)
+async def lease(request: LeaseRequest, http: Request, core: Core, worker_id: WorkerId) -> Lease | Response:
+    # A long-poll whose worker went away (e.g. a killed worker process) must not take a job it can never receive.
+    granted = await core.lease(worker_id, request, gone=http.is_disconnected)
     return granted if granted is not None else Response(status_code=204)
 
 

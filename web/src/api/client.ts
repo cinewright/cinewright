@@ -22,6 +22,7 @@ export type Priority = Schemas['Priority'];
 export type Provenance = Schemas['Provenance'];
 export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
+export type WorkerHealth = Schemas['WorkerHealth'];
 
 // The SSE stream is not modelled in openapi.json; these mirror EventKind and JobEvent in api/schemas.py.
 export type EventKind = 'state' | 'progress' | 'preview' | 'log';

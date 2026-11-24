@@ -945,6 +945,8 @@ export interface components {
             name: string;
             /** Online */
             online: boolean;
+            /** @description State and VRAM use of the host's worker, as last reported by a worker registered since the core started. On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker */
+            worker_health?: components["schemas"]["WorkerHealth"] | null;
         };
         /**
          * HostKind

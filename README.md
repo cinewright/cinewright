@@ -17,12 +17,13 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256.
 - **Windows installer.** `scripts/build.py` builds it.
 - **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
+- **Worker supervision.** The core can start the local worker in the engine's own Python environment, restart it after a crash and stop it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
 
 ## What does not work yet
 
-- **Real generation.** Model downloads, WanGP setup, workers started by the core and calibration all arrive with phase 1. Until then, an installed Cinewright starts no worker, and the Generate view reports that no model can run the request.
+- **Real generation.** Model downloads, WanGP setup and calibration arrive with phase 1. The core starts its worker only once WanGP is set up. Until then, an installed Cinewright starts no worker, the Hosts view shows "No worker", and the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
-- **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager.
+- **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
 - **Code signing.** The installer is not code-signed yet, so Windows SmartScreen warns before it runs.
 
@@ -145,6 +146,8 @@ Set `CINEWRIGHT_PORT` or `CINEWRIGHT_HOME` before you run `python -m cinewright`
 | `CINEWRIGHT_CORE_URL` | worker | Core URL, default `http://127.0.0.1:8737` |
 | `CINEWRIGHT_ENROLLMENT_TOKEN` | worker | Registration token; the core creates a new one at each start and holds it in memory only |
 
+The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TOKEN` and `CINEWRIGHT_HOME` set, and removes every other `CINEWRIGHT_*` variable from the worker's environment. It also sets `HTTP_PROXY` and `HTTPS_PROXY` to a closed port on `127.0.0.1` and `NO_PROXY` to `127.0.0.1,localhost` (on Linux also the lower-case names), replacing any proxy setting of your own.
+
 ### Data directory
 
 | Path | Holds |
@@ -153,7 +156,9 @@ Set `CINEWRIGHT_PORT` or `CINEWRIGHT_HOME` before you run `python -m cinewright`
 | `assets/<sha[:2]>/<sha256>` | Inputs and outputs, stored by SHA-256 |
 | `models/` | Model files (phase 1) |
 | `engines/` | Engine data, e.g. `engines/wan2gp/wgp_config.json` |
+| `engines/worker/cinewright_worker/` | Copy of the worker package that the engine's Python runs; the core replaces it at each start |
 | `logs/cinewright.log` | Launcher and core log |
+| `logs/worker.log` | Output of the worker the core started: the worker's log and the engine's messages. At a worker start, a log larger than 5 MB becomes `worker.log.1` |
 
 ### Commands
 
@@ -163,7 +168,7 @@ End users never need these. They exist for CI and development.
 | --- | --- |
 | `python -m cinewright` | Starts the core and opens the web UI in the browser |
 | `python -m cinewright --version` | Prints `cinewright <version>` |
-| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core, which starts no workers yet. `mock` stands in for WanGP and serves its model types |
+| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core, and an installed core starts no worker until WanGP is set up (phase 1). `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
 | `python scripts/build.py [--skip-web] [--skip-installer]` | Builds the web UI, the wheel and the installer |
@@ -215,6 +220,15 @@ The core records jobs submitted over MCP as `ui` jobs until issue #7 adds MCP cl
 ### Core and workers
 
 The core decides and the workers compute. The core owns the API, the registry, the router, the queue and the asset store. Workers are separate processes that pull jobs from the core (`POST /worker/lease`). Each worker drives one engine through an adapter, reports progress, uploads its outputs and completes the job. The worker package uses only the Python standard library, so it can run inside an engine's own environment. WanGP, for example, needs Python 3.11, while the core needs Python 3.12.
+
+### Worker supervision
+
+The core keeps one long-running worker on your computer, so WanGP's models stay loaded between jobs. It runs the worker with the engine's own Python, isolated from your Python settings, and from a copy of the worker package in the data directory, never from the core's own packages.
+
+- **Crashes.** If the worker ends unexpectedly, the core starts it again after a pause that doubles with each quick crash, from 1 second up to 1 minute. Jobs keep running on the new worker. A job that was running when the worker crashed returns to the queue when its lease expires, after two minutes.
+- **Stopping.** When the core exits, it stops granting jobs, asks the worker to stop by closing the worker's standard input, and ends the worker after 5 seconds. If the core itself is killed, or ends when you sign out, Windows ends the worker too, because the worker belongs to a job object that dies with the core. On Linux the worker gets a kill signal when the core ends.
+- **Network.** The worker's proxy settings point at a closed local port, so libraries in the engine cannot download anything, while the worker still reaches the core. On Windows this is configuration only, because a per-user installation cannot add firewall rules.
+- **Health.** The Hosts view shows the worker's state (starting, ready, busy or failed) and the VRAM it uses. The state comes from the worker's own reports and, while the worker is starting or down, from the core's view of the process.
 
 ### Routing
 
