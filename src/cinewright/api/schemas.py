@@ -470,6 +470,13 @@ class AssetList(Contract):
 # --------------------------------------------------------------------------- hosts, approvals
 
 
+class WorkerHealth(Contract):
+    state: Literal["starting", "ready", "busy", "failed"]
+    vram_used_mb: int | None = None
+    vram_total_mb: int | None = None
+    detail: str | None = None
+
+
 class Host(Contract):
     id: str
     name: str
@@ -478,6 +485,11 @@ class Host(Contract):
     online: bool
     last_seen_at: datetime | None = None
     hardware: HardwareProfile | None = None
+    worker_health: WorkerHealth | None = Field(
+        default=None,
+        description="State and VRAM use of the host's worker, as last reported by a worker registered since the core started. "
+        "On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker",
+    )
 
 
 class HostList(Contract):
@@ -568,13 +580,6 @@ class LicenseNotices(Contract):
 
 
 # --------------------------------------------------------------------------- worker protocol (core <-> worker, pull model)
-
-
-class WorkerHealth(Contract):
-    state: Literal["starting", "ready", "busy", "failed"]
-    vram_used_mb: int | None = None
-    vram_total_mb: int | None = None
-    detail: str | None = None
 
 
 class WorkerRegistration(Contract):

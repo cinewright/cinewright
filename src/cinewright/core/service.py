@@ -7,7 +7,7 @@ Methods raise `cinewright.core.errors.CoreError` subclasses, never HTTP exceptio
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -106,7 +106,10 @@ class CoreService(Protocol):
         ...
 
     def heartbeat(self, worker_id: str, heartbeat: Heartbeat) -> HeartbeatAck: ...
-    async def lease(self, worker_id: str, request: LeaseRequest) -> Lease | None: ...
+    async def lease(self, worker_id: str, request: LeaseRequest, gone: Callable[[], Awaitable[bool]] | None = None) -> Lease | None:
+        """Long-poll for a job; `gone` tells whether the requesting worker disconnected meanwhile."""
+        ...
+
     def worker_input_path(self, worker_id: str, sha256: str) -> Path:
         """Path of an input asset, only for inputs of jobs currently leased to this worker."""
         ...
