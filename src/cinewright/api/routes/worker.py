@@ -6,7 +6,7 @@ from fastapi import APIRouter, Path, Request, Response
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
-from cinewright.api.deps import BearerToken, Core, WorkerId, binary_body, read_upload
+from cinewright.api.deps import BearerToken, Core, WorkerId, binary_body, receive_upload, upload_media_type
 from cinewright.api.problems import PROBLEM_RESPONSE
 from cinewright.api.schemas import (
     Heartbeat,
@@ -75,9 +75,11 @@ def post_events(job_id: str, events: WorkerEvents, core: Core, worker_id: Worker
     openapi_extra=binary_body("Output file as raw bytes; Content-Type names the media type."),
 )
 async def upload_output(request: Request, job_id: str, core: Core, worker_id: WorkerId, name: str = OutputName) -> OutputUploaded:
-    data, media_type = await read_upload(request)
-    # Hashing and writing a large file must not block the event loop (SSE, leases, heartbeats).
-    return await run_in_threadpool(core.store_output, worker_id, job_id, name, media_type, data)
+    media_type = upload_media_type(request)
+    # The job check runs before anything is written to disk; store_output repeats it before placing the file.
+    async with receive_upload(request, core, check=lambda: core.check_output(worker_id, job_id)) as upload:
+        # Placing the file and recording it must not block the event loop (SSE, leases, heartbeats).
+        return await run_in_threadpool(core.store_output, worker_id, job_id, name, media_type, upload)
 
 
 @router.post("/jobs/{job_id}/complete", status_code=204, operation_id="completeJob")
