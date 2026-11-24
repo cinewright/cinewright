@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from cinewright.core.engines import DEFAULT_PATH, REGISTRY_DIR, EnginePin, EnginePinError, load_engine_pins
 
@@ -41,6 +42,27 @@ def mutated(field: str, value):
     return data
 
 
+def archive_of(commit: str) -> str:
+    return f"https://github.com/deepbeepmeep/WanGP/archive/{commit}.zip"
+
+
+def assert_rejected(path: Path, error: str) -> None:
+    """Loading `path` fails with exactly one validation error, `error` (`wan2gp/<field path>: <part of the message>`).
+
+    Checking the location and message, not just that loading fails, makes sure the rule under test rejects the copy
+    and not another rule that happens to trip over the same change.
+    """
+    where, message = error.split(": ", 1)
+    with pytest.raises(EnginePinError, match="wan2gp") as excinfo:
+        load_engine_pins(path)
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, ValidationError)
+    errors = [("/".join(["wan2gp", *map(str, item["loc"])]), item["msg"]) for item in cause.errors()]
+    assert len(errors) == 1, errors
+    assert errors[0][0] == where, errors
+    assert message in errors[0][1], errors
+
+
 def test_bundled_pins_validate():
     pins = load_engine_pins()
     assert set(pins) == set(RAW)
@@ -58,57 +80,101 @@ def test_unmodified_copy_validates(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "error"),
     [
-        # A commit that is not 40 hex.
-        ("commit", "38758d3"),
-        ("commit", "38758D3C73366422EFCF609ABB63CAB8385F3552"),
-        ("commit", "z" * 40),
         # A SHA-256 that is not 64 hex.
-        ("archive_sha256", "4a65052e"),
-        ("archive_sha256", "g" * 64),
-        ("ffmpeg/win_amd64/sha256", "b9bbbb3a"),
-        ("ffmpeg/win_amd64/files/ffmpeg.exe/sha256", "0" * 63),
-        ("optional_wheels/triton-windows/sha256", "sha256:" + "0" * 64),
-        ("optional_wheels/sageattention/sha256", ""),
+        ("archive_sha256", "4a65052e", "wan2gp/archive_sha256: [0-9a-f]{64}"),
+        ("archive_sha256", "g" * 64, "wan2gp/archive_sha256: [0-9a-f]{64}"),
+        ("ffmpeg/win_amd64/sha256", "b9bbbb3a", "wan2gp/ffmpeg/win_amd64/sha256: [0-9a-f]{64}"),
+        ("ffmpeg/win_amd64/files/ffmpeg.exe/sha256", "0" * 63, "wan2gp/ffmpeg/win_amd64/files/ffmpeg.exe/sha256: [0-9a-f]{64}"),
+        ("optional_wheels/triton-windows/sha256", "sha256:" + "0" * 64, "wan2gp/optional_wheels/triton-windows/sha256: [0-9a-f]{64}"),
+        ("optional_wheels/sageattention/sha256", "", "wan2gp/optional_wheels/sageattention/sha256: [0-9a-f]{64}"),
         # A non-https URL.
-        ("repo", "http://github.com/deepbeepmeep/Wan2GP"),
-        ("archive_url", "http://github.com/deepbeepmeep/WanGP/archive/38758d3c73366422efcf609abb63cab8385f3552.zip"),
-        ("torch_index", "http://download.pytorch.org/whl/cu130"),
-        ("licence/url", "ftp://github.com/deepbeepmeep/Wan2GP/blob/main/LICENSE.txt"),
-        ("ffmpeg/win_amd64/url", "http://github.com/GyanD/codexffmpeg/releases/download/9.1/ffmpeg-9.1-essentials_build.zip"),
-        ("optional_wheels/sageattention/url", "file:///C:/wheels/sageattention-2.2.0-cp310-abi3-win_amd64.whl"),
+        ("repo", "http://github.com/deepbeepmeep/Wan2GP", "wan2gp/repo: is not an https URL"),
+        (
+            "archive_url",
+            "http://github.com/deepbeepmeep/WanGP/archive/38758d3c73366422efcf609abb63cab8385f3552.zip",
+            "wan2gp/archive_url: is not an https URL",
+        ),
+        ("torch_index", "http://download.pytorch.org/whl/cu130", "wan2gp/torch_index: is not an https URL"),
+        ("licence/url", "ftp://github.com/deepbeepmeep/Wan2GP/blob/main/LICENSE.txt", "wan2gp/licence/url: is not an https URL"),
+        (
+            "ffmpeg/win_amd64/url",
+            "http://github.com/GyanD/codexffmpeg/releases/download/9.1/ffmpeg-9.1-essentials_build.zip",
+            "wan2gp/ffmpeg/win_amd64/url: is not an https URL",
+        ),
+        (
+            "optional_wheels/sageattention/url",
+            "file:///C:/wheels/sageattention-2.2.0-cp310-abi3-win_amd64.whl",
+            "wan2gp/optional_wheels/sageattention/url: is not an https URL",
+        ),
         # An ffmpeg URL that points to a "latest" release, or names no version.
-        ("ffmpeg/win_amd64/url", FFMPEG_LATEST),
-        ("ffmpeg/win_amd64/url", "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-9.1-essentials_build.zip"),
-        ("ffmpeg/win_amd64/url", "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
-        # A lock path that does not exist, or leaves the registry directory.
-        ("lock", "wan2gp/pylock.missing.toml"),
-        ("lock", "../pylock.toml"),
-        ("lock", "wan2gp/pyproject.toml"),
+        ("ffmpeg/win_amd64/url", FFMPEG_LATEST, "wan2gp/ffmpeg/win_amd64: points to a 'latest' release"),
+        (
+            "ffmpeg/win_amd64/url",
+            "https://github.com/GyanD/codexffmpeg/releases/latest/download/ffmpeg-9.1-essentials_build.zip",
+            "wan2gp/ffmpeg/win_amd64: points to a 'latest' release",
+        ),
+        (
+            "ffmpeg/win_amd64/url",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "wan2gp/ffmpeg/win_amd64: does not name version 9.1",
+        ),
+        # A lock path that does not exist. The rules for the path itself: test_lock_path_rules.
+        ("lock", "wan2gp/pylock.missing.toml", "wan2gp/lock: does not exist"),
         # The source archive must be the one of the pinned commit.
-        ("archive_url", "https://github.com/deepbeepmeep/WanGP/archive/0000000000000000000000000000000000000000.zip"),
+        ("archive_url", archive_of("0" * 40), "wan2gp: archive_url must be the source archive of `commit`"),
         # PyTorch: exactly torch, torchvision and torchaudio, each pinned with ==.
-        ("torch", "torch==2.10.0 torchvision==0.25.0"),
-        ("torch", "torch>=2.10.0 torchvision==0.25.0 torchaudio==2.10.0"),
+        ("torch", "torch==2.10.0 torchvision==0.25.0", "wan2gp/torch: must pin exactly torch, torchvision, torchaudio"),
+        ("torch", "torch>=2.10.0 torchvision==0.25.0 torchaudio==2.10.0", "wan2gp/torch: 'torch>=2.10.0' is not name==version"),
         # ffmpeg must pin every file provisioning extracts.
-        ("ffmpeg/win_amd64/files/ffprobe.exe", DELETE),
+        ("ffmpeg/win_amd64/files/ffprobe.exe", DELETE, "wan2gp/ffmpeg/win_amd64: lacks ['ffprobe.exe']"),
         # An optional wheel must be a wheel of the package it is pinned for.
-        ("optional_wheels/triton-windows/url", "https://files.pythonhosted.org/packages/x/triton-3.7.1-cp311-cp311-win_amd64.whl"),
-        ("optional_wheels/sageattention/url", "https://github.com/woct0rdho/SageAttention/archive/refs/tags/v2.2.0.zip"),
-        ("committed_at", "2026-11-13T00:59:23"),
-        ("min_driver", "R580"),
-        ("python", "3.11"),
-        ("verified/date", "yesterday"),
-        ("licence/notice", DELETE),
-        ("archive_sha256", DELETE),
-        ("unknown_field", "value"),
+        (
+            "optional_wheels/triton-windows/url",
+            "https://files.pythonhosted.org/packages/x/triton-3.7.1-cp311-cp311-win_amd64.whl",
+            "wan2gp/optional_wheels: points to a wheel of 'triton'",
+        ),
+        (
+            "optional_wheels/sageattention/url",
+            "https://github.com/woct0rdho/SageAttention/archive/refs/tags/v2.2.0.zip",
+            "wan2gp/optional_wheels/sageattention/url: is not a wheel",
+        ),
+        ("committed_at", "2026-11-13T00:59:23", "wan2gp/committed_at: timezone info"),
+        ("min_driver", "R580", "wan2gp/min_driver: should match pattern"),
+        ("python", "3.11", "wan2gp/python: should match pattern"),
+        ("verified/date", "yesterday", "wan2gp/verified/date: valid date"),
+        ("licence/notice", DELETE, "wan2gp/licence/notice: Field required"),
+        ("archive_sha256", DELETE, "wan2gp/archive_sha256: Field required"),
+        ("unknown_field", "value", "wan2gp/unknown_field: Extra inputs are not permitted"),
     ],
 )
-def test_malformed_copy_fails_validation(tmp_path, field, value):
-    path = write_copy(tmp_path, mutated(field, value))
-    with pytest.raises(EnginePinError, match="wan2gp"):
-        load_engine_pins(path)
+def test_malformed_copy_fails_validation(tmp_path, field, value, error):
+    assert_rejected(write_copy(tmp_path, mutated(field, value)), error)
+
+
+@pytest.mark.parametrize("commit", ["38758d3", "38758D3C73366422EFCF609ABB63CAB8385F3552", "z" * 40])
+def test_commit_must_be_40_lowercase_hex(tmp_path, commit):
+    # archive_url follows the commit, so the archive cross-check cannot be what rejects the copy.
+    data = mutated("commit", commit)
+    data["wan2gp"]["archive_url"] = archive_of(commit)
+    assert_rejected(write_copy(tmp_path, data), "wan2gp/commit: [0-9a-f]{40}")
+
+
+@pytest.mark.parametrize(
+    ("lock", "message"),
+    [
+        ("../pylock.toml", "stays inside its directory"),
+        ("wan2gp\\pylock.win_amd64.toml", "with / separators"),
+        ("wan2gp/pyproject.toml", "must be a PEP 751 file"),
+    ],
+)
+def test_lock_path_rules(tmp_path, lock, message):
+    # The file exists, so the existence check cannot be what rejects the copy.
+    registry = tmp_path / "registry"
+    path = write_copy(registry, mutated("lock", lock))
+    (registry / lock).touch()
+    assert_rejected(path, f"wan2gp/lock: {message}")
 
 
 def test_lock_is_resolved_next_to_the_file(tmp_path):
@@ -118,10 +184,10 @@ def test_lock_is_resolved_next_to_the_file(tmp_path):
         load_engine_pins(path)
 
 
-@pytest.mark.parametrize("text", ["", "- wan2gp\n", "wan2gp: [\n", "Wan2GP!: {}\n"])
-def test_unreadable_file_is_an_error(tmp_path, text):
+@pytest.mark.parametrize("content", [b"", b"- wan2gp\n", b"wan2gp: [\n", b"Wan2GP!: {}\n", b"wan2gp:\n  name: \xff\xfe not UTF-8\n"])
+def test_unreadable_file_is_an_error(tmp_path, content):
     path = tmp_path / "engines.yaml"
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(content)
     with pytest.raises(EnginePinError):
         load_engine_pins(path)
 

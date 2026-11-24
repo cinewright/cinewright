@@ -218,7 +218,7 @@ def load_engine_pins(path: Path | None = None) -> dict[str, EnginePin]:
     path = DEFAULT_PATH if path is None else path
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise EnginePinError(f"Cannot read engine pins {path.name}: {exc}") from exc
     if not isinstance(data, dict) or not data:
         raise EnginePinError(f"{path.name} must map engine ids to engine pins")
