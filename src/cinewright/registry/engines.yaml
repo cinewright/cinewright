@@ -1,15 +1,69 @@
-# Engine pins. One entry per engine id (the `engine` of a model's engine binding).
-# Provisioning installs exactly this commit and environment; Cinewright never redistributes the engine.
+# Engine pins. One entry per engine id (the `engine` of a model's engine binding), validated by
+# cinewright.core.engines.EnginePin. Provisioning installs exactly this commit and environment and checks every
+# download against the hashes here; Cinewright never redistributes the engine.
+# Every hash comes from the index, the release or the downloaded file, never invented. When the pin changes, re-read
+# all of them as described in src/cinewright/registry/README.md, section "Engine pins" (short version in the comments).
 wan2gp:
   name: WanGP (Wan2GP)
   repo: https://github.com/deepbeepmeep/Wan2GP
   commit: 38758d3c73366422efcf609abb63cab8385f3552
   committed_at: "2026-11-13T00:59:23+01:00"
+  # GitHub source archive of `commit`. Upstream renamed the repository to deepbeepmeep/WanGP; the old name redirects.
+  # The commit id git writes into the archive (zip comment) is not authenticated, so provisioning checks this hash.
+  # Re-read: download the archive twice, compare, then take its SHA-256 and size.
+  archive_url: https://github.com/deepbeepmeep/WanGP/archive/38758d3c73366422efcf609abb63cab8385f3552.zip
+  archive_sha256: 4a65052e218297de2ca5e8291737739c153298f9babf43212e6925d50515bb0f
+  archive_size: 45677450
   python: "3.11.14"
   torch: "torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0"
   torch_index: https://download.pytorch.org/whl/cu130
   # Path inside the Wan2GP checkout.
   requirements: requirements.txt
+  # Hash-locked engine environment for win_amd64 and Python 3.11 (PEP 751), relative to this file. It records the URL
+  # and SHA-256 of every artifact, so installing it needs no index option. Input: wan2gp/pyproject.toml, which is
+  # upstream `requirements` at `commit` without its global --extra-index-url, plus `torch` from `torch_index`;
+  # torch* and onnxruntime-gpu come from explicit indexes scoped to them. Regenerate from the repository root with the
+  # GitHub tokens removed (uv builds sdist-only dependencies to read their metadata, which runs their build code):
+  #   env -u GH_TOKEN -u GITHUB_TOKEN python -m uv pip compile src/cinewright/registry/wan2gp/pyproject.toml
+  #     --python-version 3.11 --python-platform x86_64-pc-windows-msvc --generate-hashes --no-config
+  #     -o src/cinewright/registry/wan2gp/pylock.win_amd64.toml
+  lock: wan2gp/pylock.win_amd64.toml
+  # ffmpeg that provisioning puts into <wan2gp root>/ffmpeg_bins. Upstream downloads the latest GyanD/codexffmpeg
+  # essentials build; this pins the versioned release that "latest" resolved to (9.1, published 2026-11-20).
+  # Re-read: archive SHA-256 and size from the GitHub release asset digest
+  # (https://api.github.com/repos/GyanD/codexffmpeg/releases/tags/<version>), then download the archive, check it
+  # against that hash, extract it and hash each file in `bin_dir`. Linux pins follow with #22.
+  ffmpeg:
+    win_amd64:
+      version: "9.1"
+      url: https://github.com/GyanD/codexffmpeg/releases/download/9.1/ffmpeg-9.1-essentials_build.zip
+      sha256: b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd
+      size: 119467219
+      # The build is static and ships no DLLs.
+      bin_dir: ffmpeg-9.1-essentials_build/bin
+      files:
+        ffmpeg.exe:
+          sha256: ed8f66cb877087a96f5bbb40a2944f0e764f2ad8870d5cb647360d912e62bc07
+          size: 110590976
+        ffplay.exe:
+          sha256: b548206c6ecfef75675816c04eda3ca7414dea31ce02ddfc016fd804e0c6a897
+          size: 112080896
+        ffprobe.exe:
+          sha256: df0199f606faa88e9ad192732a7c3987acfb647663534c297772e17730611a08
+          size: 110374912
+  # Optional attention wheels provisioning tries on RTX 30 to 50 cards: upstream setup_config.json at `commit`,
+  # gpu_profiles RTX_30 to RTX_50, triton "v37" and sage "v220_cu13". They are not in upstream requirements.txt.
+  optional_wheels:
+    # Upstream: triton-windows>=3.7.0.post26,<=3.7.1.post27; pinned to the newest release in that range.
+    # Re-read: digests.sha256 of the cp311 win_amd64 file in https://pypi.org/pypi/triton-windows/<version>/json.
+    triton-windows:
+      url: https://files.pythonhosted.org/packages/26/f5/0f5eaf48abc0c9900f600dbdfa8139e678aa7d47dc1da51b0541979e96df/triton_windows-3.7.1.post27-cp311-cp311-win_amd64.whl
+      sha256: b739bd7d39f919280294d8af172a90aa2f17a4377bfbca2ea30a8afae61d5eaa
+    # SageAttention 2.2.0 for torch 2.10 and CUDA 13. Re-read: the GitHub release asset digest
+    # (https://api.github.com/repos/woct0rdho/SageAttention/releases/tags/v2.2.0-windows.post6).
+    sageattention:
+      url: https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post6/sageattention-2.2.0%2Bcu130torch2.10.0andhigher.post6-cp310-abi3-win_amd64.whl
+      sha256: 1635283f5c01ec3cda58a784d0d7eabbcaffaf9511d1b263db4750e1ed7958bb
   # NVIDIA driver branch CUDA 13.0 needs.
   min_driver: "580"
   verified:
