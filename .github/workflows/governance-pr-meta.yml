@@ -13,23 +13,23 @@ jobs:
   # re-runs everything. When skipped, the caller job yields no check named "guard / ...".
   guard:
     if: github.event.action == 'edited' && github.event.changes.base
-    uses: nullthrone/governance/.github/workflows/governance-guard.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/governance-guard.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
       pull-requests: read
   classification:
-    uses: nullthrone/governance/.github/workflows/classification-check.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/classification-check.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
       pull-requests: read
       issues: read
   docs:
-    uses: nullthrone/governance/.github/workflows/docs-required.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/docs-required.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
       pull-requests: read
   wip:
-    uses: nullthrone/governance/.github/workflows/wip-limit.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/wip-limit.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
       pull-requests: read

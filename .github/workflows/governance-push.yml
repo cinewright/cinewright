@@ -7,7 +7,7 @@ permissions: {}
 jobs:
   sync:
     if: github.ref == 'refs/heads/main'
-    uses: nullthrone/governance/.github/workflows/sync-main-to-next.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/sync-main-to-next.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
     secrets:
@@ -15,7 +15,7 @@ jobs:
       GOVERNANCE_APP_PRIVATE_KEY: ${{ secrets.GOVERNANCE_APP_PRIVATE_KEY }}
   release:
     if: github.ref == 'refs/heads/main'
-    uses: nullthrone/governance/.github/workflows/release.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/release.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: write
       id-token: write
@@ -26,7 +26,7 @@ jobs:
   docs:
     needs: release
     if: needs.release.outputs.release_created == 'true'
-    uses: nullthrone/governance/.github/workflows/docs.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/docs.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     with:
       mode: publish
       version: ${{ needs.release.outputs.tag_name }}
@@ -40,7 +40,7 @@ jobs:
   deploy:
     needs: release
     if: needs.release.outputs.release_created == 'true'
-    uses: nullthrone/governance/.github/workflows/deploy.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/deploy.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     with:
       tag: ${{ needs.release.outputs.tag_name }}
     permissions:
@@ -53,7 +53,7 @@ jobs:
       ALERT_WEBHOOK_TOKEN: ${{ secrets.ALERT_WEBHOOK_TOKEN }}
   candidate:
     if: github.ref == 'refs/heads/next'
-    uses: nullthrone/governance/.github/workflows/candidate-pr.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/candidate-pr.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     permissions:
       contents: read
       id-token: write
@@ -62,7 +62,7 @@ jobs:
       PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
   docs-preview:
     if: github.ref == 'refs/heads/next'
-    uses: nullthrone/governance/.github/workflows/docs.yml@2b802b86340a3c527f3e8bd42c0c0c6d2173dd2b
+    uses: nullthrone/governance/.github/workflows/docs.yml@d298535cdb31d29ebb82c0fcebee3234338b2d18
     with:
       mode: preview
     # docs.yml's deploy job (skipped in preview mode) declares pages/id-token write; GitHub checks the grant
