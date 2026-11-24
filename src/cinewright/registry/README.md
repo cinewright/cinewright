@@ -50,7 +50,7 @@ YAML comments record where each value comes from and what was left out.
 | `archive_url`, `archive_sha256`, `archive_size` | GitHub source archive of the commit (`.../archive/<commit>.zip`). The commit id git writes into the archive is not authenticated, so provisioning checks the archive by this hash. |
 | `python`, `torch`, `torch_index` | Python version of the engine environment, the PyTorch packages (`torch==X torchvision==Y torchaudio==Z`) and the only index they come from. |
 | `requirements` | Upstream requirements file inside the checkout. Provisioning installs `lock` instead. |
-| `lock` | Hash-locked environment (PEP 751 `pylock.<name>.toml`), relative to `engines.yaml`. It records the URL and SHA-256 of every artifact, so installing it needs no extra index option. Its sdist-only entries need build requirements the lock does not pin (below). |
+| `lock` | Hash-locked environment (PEP 751 `pylock.<name>.toml`), relative to `engines.yaml`. It records the URL and SHA-256 of every artifact, so installing it needs no extra index option. Its sdist-only entries need build requirements that are resolved outside the lock (below). |
 | `ffmpeg.win_amd64` | A versioned ffmpeg release archive (never a "latest" URL) with its SHA-256 and size, the directory inside it (`bin_dir`) and the SHA-256 and size of each file provisioning extracts into `<wan2gp root>/ffmpeg_bins`. Linux follows with #22. |
 | `optional_wheels` | Optional wheels provisioning tries (Triton, SageAttention), each `{url, sha256}`, keyed by distribution name. |
 | `min_driver`, `verified`, `licence` | Minimum NVIDIA driver branch, the verification on real hardware, and the licence. For Wan2GP `licence.notice` is the disclosure its licence requires in the UI and docs. |
