@@ -17,11 +17,12 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256, including the text encoders, VAEs, upscalers, tokenizer and config files WanGP needs next to the model.
 - **Windows installer.** `scripts/build.py` builds it.
 - **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
-- **Worker supervision.** The core can start the local worker in the engine's own Python environment, restart it after a crash and stop it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
+- **WanGP setup.** On the first start of the installed app, the core sets up WanGP in the background: the pinned WanGP commit, ffmpeg and WanGP's own Python environment, with every file checked against its pinned SHA-256. The Setup view shows the progress. Once WanGP is ready, the core starts its worker on it. Later starts reuse the installation. Windows only.
+- **Worker supervision.** The installed app starts the local worker in WanGP's own Python environment once the WanGP setup is ready, restarts it after a crash and stops it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
 
 ## What does not work yet
 
-- **Real generation.** Model downloads, WanGP setup and calibration arrive with phase 1. The core starts its worker only once WanGP is set up. Until then, an installed Cinewright starts no worker, the Hosts view shows "No worker", and the Generate view reports that no model can run the request.
+- **Real generation.** Model downloads and calibration arrive with phase 1. Until then, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
@@ -61,7 +62,7 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
    python -m cinewright
    ```
 
-   Your browser opens `http://127.0.0.1:8737/`. The Setup view shows the hardware the core detected. The Generate view shows that no model can run a request, because this core runs no worker. The core keeps its data in the default data directory and writes its log to `logs/cinewright.log` there, so the terminal stays quiet. Stop the core with Ctrl+C.
+   Your browser opens `http://127.0.0.1:8737/`. The Setup view shows the hardware the core detected. Its Engine panel says that WanGP cannot be set up here: only the installed app on Windows sets it up, with the installer's `uv.exe`. The Generate view shows that no model can run a request, because no model files are installed yet. The core keeps its data in the default data directory and writes its log to `logs/cinewright.log` there, so the terminal stays quiet. Stop the core with Ctrl+C.
 
 ## How-to guides
 
@@ -70,8 +71,20 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
 1. Download `CinewrightSetup-<version>.exe` from the [GitHub releases](https://github.com/cinewright/cinewright/releases). No release exists yet.
 2. Run it. Setup installs Cinewright for your user account, into `%LOCALAPPDATA%\Programs\Cinewright`, and needs no administrator rights. It downloads Python 3.12 and Cinewright's Python packages during installation, so it needs an internet connection.
 3. Start Cinewright from the Start menu. The web UI opens in your browser. If Cinewright already runs, starting it again only opens the browser.
+4. On the first start, Cinewright sets up its engine WanGP in the background. It downloads several gigabytes, so this takes a while; open **Setup** to watch the progress. Once the Engine panel shows **Ready**, Cinewright starts its worker on WanGP, and the **Hosts** view shows the local worker as ready. Later starts skip the setup.
 
 For a silent installation, run `CinewrightSetup-<version>.exe /S /D=<folder>`. `/D=` must come last and must not be quoted.
+
+### Retry the WanGP setup
+
+If the WanGP setup fails, for example because the internet connection dropped, the Setup view's Engine panel says what went wrong and what that means.
+
+1. Fix the cause the message names, for example reconnect to the internet.
+2. Open **Setup** and choose **Try again** in the Engine panel. Downloads continue where they stopped, and files that were already checked are not downloaded again.
+
+If the panel shows no **Try again**, trying again cannot help: a file that already passed its hash check does not have the content Cinewright expects, so only a Cinewright update can fix it.
+
+Quitting Cinewright during the setup is safe too: the next start continues it. When a downloaded file does not match its pinned hash, Cinewright deletes it and downloads it again on the retry. The details of each step are in `logs/provisioning.log` in the data directory.
 
 ### Uninstall Cinewright
 
@@ -158,9 +171,15 @@ The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TO
 | `assets/<sha[:2]>/<sha256>` | Inputs and outputs, stored by SHA-256 |
 | `models/` | Model files (phase 1) |
 | `engines/` | Engine data, e.g. `engines/wan2gp/wgp_config.json` |
+| `engines/wan2gp/<commit>/` | WanGP's source at the pinned commit (`wgp.py` lies directly in it), with the pinned ffmpeg in `ffmpeg_bins/` |
+| `engines/wan2gp/env/` | WanGP's Python environment (Python 3.11, PyTorch with CUDA 13.0, the locked packages) |
+| `engines/wan2gp/provisioning.json` | Record of a completed setup: commit, paths and the attention mode that worked (`sage2`, `sage` or `sdpa`) |
+| `engines/wan2gp/downloads/` | Checked downloads; an interrupted one continues from its `.part` file |
+| `engines/python/`, `engines/uv-cache/` | The Python that uv downloaded for WanGP, and uv's package cache |
 | `engines/worker/cinewright_worker/` | Copy of the worker package that the engine's Python runs; the core replaces it at each start |
 | `logs/cinewright.log` | Launcher and core log |
 | `logs/worker.log` | Output of the worker the core started: the worker's log and the engine's messages |
+| `logs/provisioning.log` | Output of uv and of the attention check during the WanGP setup |
 
 ### Commands
 
@@ -170,7 +189,7 @@ End users never need these. They exist for CI and development.
 | --- | --- |
 | `python -m cinewright` | Starts the core and opens the web UI in the browser |
 | `python -m cinewright --version` | Prints `cinewright <version>` |
-| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core, and an installed core starts no worker until WanGP is set up (phase 1). `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
+| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core; the installed app starts one on WanGP once WanGP is set up. `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
 | `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
@@ -179,6 +198,8 @@ End users never need these. They exist for CI and development.
 ### Internal API
 
 All routes live under `/api/v1`. [`openapi.json`](openapi.json) is the contract, and [ARCHITECTURE.md](ARCHITECTURE.md) has the route table. Errors are RFC 9457 problem documents (`application/problem+json`). Operations of later phases return `501` with the problem type `urn:cinewright:problem:not-implemented`.
+
+`GET /api/v1/events` streams server-sent events. Job events have an `id` (`<job_id>:<seq>`) and are replayed after `Last-Event-ID`. Previews are the exception: they are sent live but not stored and have no `id`, so after its replay a stream sends only the latest preview of each running job it covers. Without `job_id`, the stream also carries `engine` events with the engine's state, progress and error, as `GET /api/v1/system` reports it. They have no `id` and are not replayed. `POST /api/v1/engines/wan2gp/provision` starts the WanGP setup again after a failure; it does nothing while the setup runs or once the engine is ready.
 
 ### MCP tools
 
@@ -228,6 +249,7 @@ The core decides and the workers compute. The core owns the API, the registry, t
 
 The core keeps one long-running worker on your computer, so WanGP's models stay loaded between jobs. It runs the worker with the engine's own Python, isolated from your Python settings, and from a copy of the worker package in the data directory, never from the core's own packages.
 
+- **Start.** The installed app starts the worker as soon as the WanGP setup is ready: right at start when an earlier start completed the setup, otherwise when the setup or a retry completes. It starts no worker while the setup runs or after it failed.
 - **Crashes.** If the worker ends unexpectedly, the core starts it again after a pause that doubles with each quick crash, from 1 second up to 1 minute. Jobs keep running on the new worker. A job that was running when the worker crashed returns to the queue when its lease expires, after two minutes.
 - **Stopping.** When the core exits, it stops granting jobs, asks the worker to stop by closing the worker's standard input, and ends the worker after 5 seconds. If the core itself is killed, or ends when you sign out, Windows ends the worker too, because the worker belongs to a job object that dies with the core. On Linux the worker gets a kill signal when the core ends.
 - **Network.** The worker's proxy settings point at a closed local port, so engine libraries that honour the standard proxy variables (Python's `urllib` and `requests` among them) cannot reach the internet, while the worker still reaches the core. Code that ignores these variables is not stopped: on Windows this is configuration only, because a per-user installation cannot add firewall rules.
@@ -245,9 +267,21 @@ The core listens on `127.0.0.1` only. A web page in your browser can still send 
 
 Every output asset has a provenance record: prompt, seed, model, quantization, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
 
+### WanGP setup
+
+The installer sets up only Cinewright itself. WanGP comes on the first start, because Cinewright may not redistribute it (see below). The core sets it up in the background:
+
+1. It downloads the source archive of the pinned WanGP commit from GitHub and checks its SHA-256 before it opens it. The commit id inside the archive proves nothing, because anyone could write it there. It then unpacks the archive into the data directory.
+2. It downloads a pinned ffmpeg release and puts its checked binaries where WanGP looks for them. Otherwise WanGP would download the newest ffmpeg without any check.
+3. It uses the `uv.exe` that the installer installed to download Python 3.11 and create WanGP's own environment. It then installs exactly the packages of the lock, each checked against its SHA-256. uv ignores your own uv and pip settings, and no package comes from any index the lock does not name.
+4. It tries the optional SageAttention and Triton wheels, which speed up generation on recent NVIDIA cards. It installs a wheel only if the wheel matches its pinned hash, then runs one attention calculation on the GPU. WanGP uses SageAttention only if that calculation works. Otherwise it uses PyTorch's standard attention (`sdpa`), which works everywhere. If a wheel could not be downloaded, each later start tries it once more before the worker starts; a wheel that did not match its hash is not tried again.
+5. Finally, it writes a record of the setup and starts the worker on WanGP. A later start that finds the record and the files downloads and installs nothing else.
+
+During the setup, the core and uv connect to `github.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `releases.astral.sh`, `files.pythonhosted.org`, `download.pytorch.org`, `download-r2.pytorch.org` (the lock's PyTorch wheels), `aiinfra.pkgs.visualstudio.com` and `*.vsblob.vsassets.io`. WanGP itself needs no internet connection afterwards: it runs offline, and model downloads will go through the core. The setup runs on Windows only so far, because the pins cover only 64-bit Windows.
+
 ### Why WanGP is not bundled
 
-WanGP is source-available under the WanGP Community License 2.0, and Cinewright never redistributes it. Engine provisioning (phase 1) downloads a pinned commit from WanGP's official repository.
+WanGP is source-available under the WanGP Community License 2.0, and Cinewright never redistributes it. The WanGP setup downloads a pinned commit from WanGP's official repository.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) records the components, data flows, boundaries and current decisions.
 

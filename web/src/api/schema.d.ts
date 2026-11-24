@@ -192,6 +192,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/engines/{engine_id}/provision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Provision Engine
+         * @description Start provisioning the engine (the Setup view's retry) unless it is ready or already provisioning.
+         *
+         *     Returns the engine's state; progress and the result follow as `engine` events on `GET /events`.
+         */
+        post: operations["provisionEngine"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/estimate": {
         parameters: {
             query?: never;
@@ -810,6 +832,8 @@ export interface components {
         };
         /** EngineInfo */
         EngineInfo: {
+            /** @description Why provisioning failed (`failed`) or cannot run here (`not_installed`); null otherwise */
+            error?: components["schemas"]["SetupError"] | null;
             /**
              * Id
              * @description Engine id, e.g. `wan2gp`
@@ -822,8 +846,11 @@ export interface components {
              * @description Licence disclosure shown in the UI (WanGP requires one)
              */
             notice?: string | null;
+            /** @description Provisioning progress while `state` is `provisioning` */
+            progress?: components["schemas"]["Progress"] | null;
             /**
              * State
+             * @description From engine provisioning
              * @enum {string}
              */
             state: "not_installed" | "provisioning" | "ready" | "failed";
@@ -1463,6 +1490,27 @@ export interface components {
             kwh_price_eur?: number | null;
             /** Model Store Quota Gb */
             model_store_quota_gb?: number | null;
+        };
+        /**
+         * SetupError
+         * @description Why a setup task (engine provisioning) failed or cannot run.
+         */
+        SetupError: {
+            /**
+             * Action
+             * @description The one helpful action the UI offers; null when none helps
+             */
+            action?: "retry" | null;
+            /**
+             * Code
+             * @description Stable machine code, e.g. `hash_mismatch`, `download_failed`, `install_failed`
+             */
+            code: string;
+            /**
+             * Message
+             * @description Cause and consequence in one sentence
+             */
+            message: string;
         };
         /** SystemInfo */
         SystemInfo: {
@@ -2193,6 +2241,48 @@ export interface operations {
             };
         };
     };
+    provisionEngine: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                engine_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngineInfo"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+        };
+    };
     estimate: {
         parameters: {
             query?: never;
@@ -2271,7 +2361,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Server-sent events; each `data:` line is a JobEvent */
+            /** @description Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed. */
             200: {
                 headers: {
                     [name: string]: unknown;

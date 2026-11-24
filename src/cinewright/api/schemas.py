@@ -134,12 +134,24 @@ PROBLEM_INVALID = "urn:cinewright:problem:invalid"
 # --------------------------------------------------------------------------- system
 
 
+class SetupError(Contract):
+    """Why a setup task (engine provisioning) failed or cannot run."""
+
+    code: str = Field(description="Stable machine code, e.g. `hash_mismatch`, `download_failed`, `install_failed`")
+    message: str = Field(description="Cause and consequence in one sentence")
+    action: Literal["retry"] | None = Field(default=None, description="The one helpful action the UI offers; null when none helps")
+
+
 class EngineInfo(Contract):
     id: str = Field(description="Engine id, e.g. `wan2gp`")
     name: str
     version: str | None = Field(description="Pinned upstream commit or version; null when not provisioned")
-    state: Literal["not_installed", "provisioning", "ready", "failed"]
+    state: Literal["not_installed", "provisioning", "ready", "failed"] = Field(description="From engine provisioning")
     notice: str | None = Field(default=None, description="Licence disclosure shown in the UI (WanGP requires one)")
+    progress: Progress | None = Field(default=None, description="Provisioning progress while `state` is `provisioning`")
+    error: SetupError | None = Field(
+        default=None, description="Why provisioning failed (`failed`) or cannot run here (`not_installed`); null otherwise"
+    )
 
 
 class SystemInfo(Contract):
@@ -504,6 +516,21 @@ class JobEvent(Contract):
     seq: int = Field(description="Per-job sequence number, starting at 1")
     kind: EventKind
     data: dict[str, Any]
+    created_at: datetime
+
+
+class SystemEventKind(StrEnum):
+    ENGINE = "engine"
+
+
+class SystemEvent(Contract):
+    """A non-job event of `GET /events`: the SSE event name is `kind`; it has no id and is never replayed.
+
+    `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
+    """
+
+    kind: SystemEventKind
+    engine: EngineInfo | None = Field(default=None, description="For `engine`: the engine's new state, progress and error")
     created_at: datetime
 
 
