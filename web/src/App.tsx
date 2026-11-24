@@ -68,7 +68,8 @@ function useRoute(): Route {
   return route;
 }
 
-function ThemeSelect() {
+/** Exported for the component tests. */
+export function ThemeSelect() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const change = (value: ThemeChoice) => {
     setTheme(value);
