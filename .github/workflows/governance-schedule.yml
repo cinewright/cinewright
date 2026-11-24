@@ -16,7 +16,7 @@ permissions: {}
 jobs:
   housekeeping:
     if: github.event_name == 'schedule' || inputs.task != 'labels'
-    uses: nullthrone/governance/.github/workflows/housekeeping.yml@ca9eb90143f96eed2f9dc782da8633c59156a073
+    uses: nullthrone/governance/.github/workflows/housekeeping.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     with:
       task: ${{ inputs.task || '' }}
     permissions:
@@ -28,7 +28,7 @@ jobs:
       PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
   labels:
     if: github.event.schedule == '37 3 * * 1' || inputs.task == 'labels'
-    uses: nullthrone/governance/.github/workflows/label-sync.yml@ca9eb90143f96eed2f9dc782da8633c59156a073
+    uses: nullthrone/governance/.github/workflows/label-sync.yml@d9b120fa2f75e9c4d4e2379d5fb33f479add2dc9
     permissions:
       contents: read
       issues: write
