@@ -168,6 +168,7 @@ End users never need these. They exist for CI and development.
 | `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core, which starts no workers yet. `mock` stands in for WanGP and serves its model types |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
+| `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
 | `python scripts/build.py [--skip-web] [--skip-installer]` | Builds the web UI, the wheel and the installer |
 
 ### Internal API
