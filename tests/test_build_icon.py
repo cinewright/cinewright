@@ -102,3 +102,19 @@ def test_path_parser_rejects_unsupported_commands():
         make_icon.parse_path("m0 0h1v1z")
     with pytest.raises(ValueError):
         make_icon.parse_path("M0 0C1 1 2 2 3 3Z")
+
+
+def test_logo_reader_accepts_single_quotes_and_names_missing_attributes(tmp_path):
+    good = tmp_path / "single.svg"
+    good.write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='#6D28D9' fill-rule='evenodd' d='M0 0H16V16H0Z'/></svg>",
+        encoding="utf-8",
+    )
+    assert make_icon.Logo(good).color == "#6D28D9"
+    bad = tmp_path / "nofill.svg"
+    bad.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M0 0H16V16H0Z"/></svg>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing attribute"):
+        make_icon.Logo(bad)

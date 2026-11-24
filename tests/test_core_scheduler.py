@@ -166,3 +166,22 @@ def test_a_stale_long_poll_does_not_take_back_the_job_the_workers_retry_got(core
     assert job.state == JobState.LEASED
     assert queued_reasons(core, job_id) == [None]
     core.worker_events(worker, job_id, WorkerEvents(lease_id=fresh.job.lease_id, events=[{"kind": "log", "data": {}}]))
+
+
+def test_transition_refuses_columns_outside_the_allowlist():
+    from cinewright.core import scheduler
+
+    with pytest.raises(ValueError, match="not a jobs column"):
+        scheduler.transition(None, "job", JobState.QUEUED, **{"state = 'x'; --": 1})
+
+
+def test_job_columns_match_the_jobs_table():
+    import re
+
+    from cinewright.core.scheduler import JOB_COLUMNS
+    from cinewright.db.database import bundled_migrations
+
+    sql = (bundled_migrations() / "0001_initial.sql").read_text(encoding="utf-8")
+    body = sql.split("CREATE TABLE jobs (", 1)[1].split(");", 1)[0]
+    columns = {m.group(1) for m in re.finditer(r"^\s+([a-z_]+)\s+[A-Z]", body, re.MULTILINE)}
+    assert JOB_COLUMNS == columns - {"id", "created_at"}

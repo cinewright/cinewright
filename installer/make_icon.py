@@ -29,7 +29,7 @@ MARK_SIZES = (24, 32, 48, 64, 128, 256)
 SUPERSAMPLE = 16
 
 _TAG = re.compile(r"<(svg|path)\b([^>]*)>", re.IGNORECASE)
-_ATTR = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*"([^"]*)"')
+_ATTR = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
 _TOKEN = re.compile(r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _ARGS = {"M": 2, "L": 2, "H": 1, "V": 1, "A": 7, "Z": 0}
 
@@ -41,17 +41,25 @@ class Logo:
 
     def __init__(self, path: Path) -> None:
         # The logo files are simple, generated SVGs; reading two tags needs no XML parser.
-        tags = [(name.lower(), dict(_ATTR.findall(attrs))) for name, attrs in _TAG.findall(path.read_text(encoding="utf-8"))]
+        tags = [
+            (name.lower(), {key: double or single for key, double, single in _ATTR.findall(attrs)})
+            for name, attrs in _TAG.findall(path.read_text(encoding="utf-8"))
+        ]
         svg = [attrs for name, attrs in tags if name == "svg"]
         paths = [attrs for name, attrs in tags if name == "path"]
         if len(svg) != 1:
             raise ValueError(f"{path.name}: expected one <svg> element")
+        if "viewBox" not in svg[0]:
+            raise ValueError(f"{path.name}: missing attribute(s) viewBox")
         min_x, min_y, width, height = (float(v) for v in svg[0]["viewBox"].split())
         if width != height:
             raise ValueError(f"{path.name}: view box must be square")
         if len(paths) != 1:
             raise ValueError(f"{path.name}: expected exactly one <path>")
         element = paths[0]
+        missing = [name for name in ("fill", "d") if name not in element]
+        if missing:
+            raise ValueError(f"{path.name}: missing attribute(s) {', '.join(missing)}")
         if element.get("fill-rule") != "evenodd":
             raise ValueError(f"{path.name}: expected fill-rule=evenodd")
         if element.get("transform"):
