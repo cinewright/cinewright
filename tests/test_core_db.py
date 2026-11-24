@@ -12,16 +12,21 @@ from cinewright.db.database import Database
 def test_bundled_migrations_apply_once(tmp_path):
     db = Database(tmp_path / "db" / "test.sqlite3")
     try:
-        assert db.migrate() == ["0001_initial"]
+        assert db.migrate() == ["0001_initial", "0002_job_outputs"]
         assert db.migrate() == []
         assert db.query_one("PRAGMA journal_mode")[0] == "wal"
         assert db.query_one("PRAGMA foreign_keys")[0] == 1
         tables = {row["name"] for row in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"jobs", "job_events", "assets", "hosts", "workers", "settings", "schema_migrations"} <= tables
+        assert {"jobs", "job_events", "job_outputs", "assets", "hosts", "workers", "settings", "schema_migrations"} <= tables
         with pytest.raises(sqlite3.IntegrityError):  # workers.host_id references hosts
             db.execute(
                 "INSERT INTO workers (id, host_id, engine, models, health, token_hash, registered_at, last_seen_at) "
                 "VALUES ('w', 'missing', 'e', '[]', '{}', 'h', 'now', 'now')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # job_outputs.job_id references jobs
+            db.execute(
+                "INSERT INTO job_outputs (job_id, name, sha256, media_type, size_bytes, created_at) "
+                "VALUES ('missing', 'image.png', 'a', 'image/png', 1, 'now')"
             )
     finally:
         db.close()
