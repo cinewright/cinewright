@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import os
 import threading
+import time
 from collections.abc import Iterator
 
 import anyio.to_thread
@@ -166,3 +167,38 @@ def test_a_discard_cut_short_by_the_event_loop_shutting_down_still_removes_the_f
     asyncio.run(shut_down_while_the_discard_waits_for_a_thread())
     assert not writer.path.exists()
     assert not temporary_files(client)
+
+
+def test_a_shutdown_while_the_thread_discards_never_discards_twice(client):
+    """When the event loop shuts down while a thread is discarding, the fallback on the loop leaves the file to it."""
+    writer = client.app.state.core.stage_upload()
+    writer.write(b"half an upload")
+    started, release = threading.Event(), threading.Event()
+    on_main_thread: list[bool] = []
+    discard = writer.discard
+
+    def slow_discard() -> None:
+        on_main_thread.append(threading.current_thread() is threading.main_thread())
+        started.set()
+        release.wait(5)
+        discard()
+
+    writer.discard = slow_discard
+
+    async def shut_down_while_the_thread_discards() -> None:
+        task = asyncio.create_task(deps._discard(writer))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Returning ends asyncio.run, which cancels the inner discard while the thread is still in it.
+
+    try:
+        asyncio.run(shut_down_while_the_thread_discards())
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while writer.path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert on_main_thread == [False]
+    assert not writer.path.exists()

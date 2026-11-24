@@ -155,7 +155,12 @@ async def receive_upload(request: Request, core: CoreService, check: Callable[[]
 
 
 async def _discard(writer: BlobWriter) -> None:
-    """Remove an upload's temporary file exactly once, in a thread, also when the request is cancelled."""
+    """Remove an upload's temporary file exactly once, in a thread, also when the request is cancelled.
+
+    This relies on the upload routes running without an anyio task group around them (the middleware is
+    pure ASGI). A task group that keeps cancelling the request during shutdown could orphan the shielded
+    task and keep an anyio worker thread alive at exit; revisit this before adding one.
+    """
     claimed = threading.Lock()
 
     def discard_once() -> None:
