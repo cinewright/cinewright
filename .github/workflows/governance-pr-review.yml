@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   gate:
-    uses: nullthrone/governance/.github/workflows/external-contribution-gate.yml@6f1d6c3e8a5dd0e98c960f1bf97f1b0d70cbe4ed
+    uses: nullthrone/governance/.github/workflows/external-contribution-gate.yml@d3d7ccdab698d9d0d8486992a363f5c6b4e0f35f
     permissions:
       contents: read
       pull-requests: read
