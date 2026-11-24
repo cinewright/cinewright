@@ -19,7 +19,7 @@ Product background, goals and the roadmap live in the specification ("Cinewright
 | MCP server | `src/cinewright/mcp/` | Streamable HTTP at `/mcp`; tools `list_capabilities`, `estimate`, `submit`, `job_status`, `fetch_asset`, `list_recipes`, `list_cast`; calls the internal API, no own logic. |
 | Worker | `src/cinewright_worker/` | Standard library only, Python 3.10+. Runs in an engine's environment, pulls jobs over the worker protocol, drives one `EngineAdapter` (`adapter.py`). |
 | Engine adapters | `src/cinewright_worker/engines/` | `mock` (tests) and `wan2gp` (Wan2GP `shared/api.py`: `init()`, `WanGPSession.submit_task()`). |
-| Web UI | `web/` → built into `src/cinewright/web_dist/` | React + TypeScript + Vite, served by the core. Design tokens from `design/tokens.json`, component classes `cw-*` from `design/components.css`. |
+| Web UI | `web/` → built into `src/cinewright/web_dist/` | React + TypeScript + Vite, served by the core. Design tokens from `design/tokens.json`, component classes `cw-*` from `design/components.css`. Component tests: Vitest and Testing Library in jsdom, run by `npm test` and pytest. |
 | Launcher | `src/cinewright/launcher.py` | Starts the core on `127.0.0.1:8737` and opens the browser; a second start only opens the browser. |
 | Windows installer | `installer/` | NSIS, per-user, built on Linux by `scripts/build.py`; bundles `uv.exe` (pinned hash) and the wheel, creates the core runtime with uv. |
 
@@ -74,6 +74,7 @@ Internal API routes (scaffold status in brackets; `501` answers with problem typ
 - **Default data class** of a job is `private`, the stricter of the two non-biometric classes. (2026-11-22)
 - **Client attribution**: `POST /jobs` takes the optional headers `X-Cinewright-Client` (`ui`/`mcp`) and `X-Cinewright-Agent`; the MCP server sets them, so MCP jobs and their provenance name the agent. Self-declared until per-agent tokens arrive (#7). Neither header is CORS-safelisted. (2026-11-23)
 - **Installer dependencies**: the build generates a hash-locked requirements file for Windows with uv; the installer installs it with `--require-hashes` and the wheel with `--no-deps`, so every install of a release gets the same packages. (2026-11-23)
+- **Web test toolchain**: Vitest 4 and jsdom 27, not the newer majors. Vitest 5 and jsdom 31 need Node 22, and the supported range still starts at Node 20.19 (`web/package.json`, `NODE_RANGE` in `scripts/build.py`, README). Moving up means raising that range in all three places. (2026-11-24)
 - **Port** 8737 on 127.0.0.1; data in `%LOCALAPPDATA%\Cinewright` (Windows) or `$XDG_DATA_HOME/cinewright`, overridable with `CINEWRIGHT_HOME`. (2026-11-22)
 - **Language**: English for code, docs, UI and repository communication. (2026-11-22)
 - **Model store companion files**: as in "Boundaries". Every Wan2GP text encoder needs tokenizer and config files next to its weights (#41, #3). (2026-11-24)

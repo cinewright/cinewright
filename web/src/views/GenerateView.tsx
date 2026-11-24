@@ -251,7 +251,8 @@ export function GenerateView() {
   );
 }
 
-function EstimatePanel({ state, hasRequest }: { state: EstimateState; hasRequest: boolean }) {
+/** Exported for the component tests. */
+export function EstimatePanel({ state, hasRequest }: { state: EstimateState; hasRequest: boolean }) {
   // The only live text: the outcome, not the whole panel (cost and ETA change with every keystroke).
   let outcome = '';
   if (state.status === 'error') outcome = 'Estimate unavailable';

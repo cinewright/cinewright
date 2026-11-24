@@ -20,7 +20,7 @@ Neither this repository nor the Windows installer contains WanGP.
 | Lucide icons | `lucide-react` 1.70.0 | ISC; icons derived from Feather: MIT | Lucide Icons and Contributors; Cole Bemis |
 | Geist and Geist Mono fonts | `@fontsource-variable/geist` 5.3.0, `@fontsource-variable/geist-mono` 5.3.0 | SIL Open Font License 1.1 | The Geist Project Authors |
 
-The build tools in `web/package.json` (Vite, TypeScript, openapi-typescript) are not part of the build output.
+The build and test tools in `web/package.json` (Vite, TypeScript, openapi-typescript, Vitest, Testing Library, jsdom) are not part of the build output.
 
 ## Bundled in the Windows installer
 
