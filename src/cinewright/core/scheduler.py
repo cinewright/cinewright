@@ -42,6 +42,32 @@ class WorkerRecord:
     models: frozenset[str]
 
 
+# Columns of the jobs table that transition() may set (db/migrations/0001_initial.sql).
+JOB_COLUMNS = frozenset(
+    {
+        "state",
+        "priority",
+        "capability",
+        "data_class",
+        "request",
+        "route",
+        "seed",
+        "client",
+        "agent_id",
+        "progress",
+        "eta_seconds",
+        "error",
+        "attempts",
+        "cancel_requested",
+        "worker_id",
+        "lease_id",
+        "lease_expires_at",
+        "started_at",
+        "finished_at",
+    }
+)
+
+
 @dataclass
 class Tx:
     """A write transaction: the connection, its timestamp and the events to publish after commit."""
@@ -55,8 +81,14 @@ class Tx:
 def transition(tx: Tx, job_id: str, state: JobState, data: dict[str, Any] | None = None, **columns: Any) -> None:
     """Set a job's state (plus other columns) and record the state event."""
     values = {"state": state.value, **columns}
+    unknown = set(values) - JOB_COLUMNS
+    if unknown:
+        raise ValueError(f"not a jobs column: {', '.join(sorted(unknown))}")
     assignments = ", ".join(f"{name} = ?" for name in values)
-    tx.conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", (*values.values(), job_id))  # noqa: S608 - column names come from code
+    # Column names are checked against JOB_COLUMNS above; every value is a bound parameter.
+    query = f"UPDATE jobs SET {assignments} WHERE id = ?"  # noqa: S608
+    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+    tx.conn.execute(query, (*values.values(), job_id))
     tx.emit(job_id, EventKind.STATE, {"state": state.value, **(data or {})})
     if state == JobState.QUEUED:
         tx.wake_workers = True

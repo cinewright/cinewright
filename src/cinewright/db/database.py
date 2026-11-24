@@ -14,16 +14,15 @@ import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from importlib.resources import files
-from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
 _MIGRATION_FILE = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
 
 
-def bundled_migrations() -> Traversable:
-    return files("cinewright.db").joinpath("migrations")
+def bundled_migrations() -> Path:
+    """Migrations ship as plain files inside the package (wheel and source tree alike)."""
+    return Path(__file__).resolve().parent / "migrations"
 
 
 class Database:
@@ -43,7 +42,7 @@ class Database:
         db.migrate()
         return db
 
-    def migrate(self, directory: Traversable | Path | None = None) -> list[str]:
+    def migrate(self, directory: Path | None = None) -> list[str]:
         """Apply pending migrations in name order, each in its own transaction. Returns the applied versions."""
         source = directory if directory is not None else bundled_migrations()
         scripts = sorted((item.name, item) for item in source.iterdir() if _MIGRATION_FILE.match(item.name))
