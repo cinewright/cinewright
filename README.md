@@ -123,6 +123,58 @@ cd web && npm test && npm run typecheck
 
 `pytest -q` also runs the web tests. The component tests need `web/node_modules`: run `npm ci` in `web/` or `python scripts/build.py` first, or pytest skips them.
 
+### Smoke-test a build on the GPU
+
+CI has no GPU, so the owner checks a build on the reference PC with the GPU smoke test before accepting it. It runs one short generation with a fixed seed for each smoke model that is installed: LTX-2 2.3 Distilled (image to video), Wan 2.2 Image-to-Video and Z-Image Turbo (text to image). For each one it records the peak VRAM, the seconds per step, the wall time and the SHA-256 of the output. Once per run it records the Cinewright version, the WanGP commit, the GPU and its driver, and whether WanGP runs with SageAttention or with PyTorch's standard attention (`sdpa`). The test contacts only the local Cinewright.
+
+The test comes with Cinewright and runs with Cinewright's own Python. Release 0.1.0 does not contain it yet: there, the commands below end with `invalid choice: 'smoke'`. Run the commands in a Command Prompt (Start menu, type `cmd`). In PowerShell, put `&` before the quoted path at the start and write each `%NAME%` as `$env:NAME`, for example `& "$env:LOCALAPPDATA\Programs\Cinewright\runtime\Scripts\python.exe" -m cinewright.devtools smoke`.
+
+**Test the installed Cinewright**
+
+1. Use the Windows account where the build is installed. Cinewright must be running, with at least one of the three smoke models installed.
+2. Run:
+
+   ```bat
+   "%LOCALAPPDATA%\Programs\Cinewright\runtime\Scripts\python.exe" -m cinewright.devtools smoke
+   ```
+
+   The test uses the Cinewright that answers on `127.0.0.1`, on port 8737, or on the port in `CINEWRIGHT_PORT` if that is set. The jobs run one after another; the first job of a model can take several minutes, because WanGP loads the model first. While a job runs, the test prints a line about once a minute. To stop the test, press Ctrl+C: it cancels the job that is running and ends with exit code 2.
+3. Read the last line. It states the result and the exit code:
+   - `Smoke test passed: ... Exit code 0.`: every installed smoke model produced its output. Continue with step 4.
+   - `Smoke test failed: ... Exit code 1.`: at least one generation failed. The line names the models. The summary is written as usual and lists the error of each failed model, so continue with step 4 and post it.
+   - `Smoke test could not run: ... Exit code 2.`: the line says why, for example that no Cinewright answers or that none of the smoke models is installed. The test wrote no report and no summary. Copy this last line into your review or into issue #24 instead. If it names a folder, replace your Windows user name in it with `<user>` first.
+4. The lines `Report:` and `Summary:` name the two files. Both are in `logs` in the data directory, usually `%LOCALAPPDATA%\Cinewright\logs`: `smoke-<version>.json` is the full report, and `smoke-<version>.md` is the summary, where `<version>` is the Cinewright version under test. To open the summary, type `notepad` and then the path from the `Summary:` line in quotes, for example `notepad "%LOCALAPPDATA%\Cinewright\logs\smoke-0.2.0.md"`. Check that it lists the peak VRAM, the seconds per step and the attention result for each installed smoke model. Peak VRAM is the most memory PyTorch allocated in WanGP's process during that job. It counts neither other programs nor memory PyTorch keeps in reserve, so it is usually lower than the GPU memory Task Manager shows.
+5. Copy the whole summary and paste it into your review of the pull request with the build, or into a comment on issue #24. The summary replaces the folders of your computer, whose paths contain your Windows user name, with placeholders such as `<data dir>` or `%TEMP%`. Still, look over its error lines for your user name before you post it.
+
+**Test an installer in a temporary folder**
+
+With `--installer`, the test installs a build into a temporary folder and tests it there. Your own installation keeps its Start menu and desktop shortcuts and its Installed apps entry. This takes a long time, because the temporary Cinewright first sets up WanGP and installs the smoke models, like a new installation. The test runs with the Python of your installed Cinewright, so that installation must already contain the smoke test (see above). With 0.1.0 installed, install the build normally instead and use "Test the installed Cinewright".
+
+1. Quit Cinewright, so that the temporary Cinewright has the GPU and the models to itself: end the `pythonw.exe` process in Task Manager.
+2. The first time, create a folder for the models of the test (step 3 explains it):
+
+   ```bat
+   mkdir "%USERPROFILE%\cinewright-smoke-models"
+   ```
+
+   Then run, on one line, with the path of the downloaded installer:
+
+   ```bat
+   "%LOCALAPPDATA%\Programs\Cinewright\runtime\Scripts\python.exe" -m cinewright.devtools smoke --installer "%USERPROFILE%\Downloads\CinewrightSetup-<version>.exe" --model-store "%USERPROFILE%\cinewright-smoke-models"
+   ```
+
+   The test then does the following:
+   - It installs the build silently into a new folder `cinewright-smoke-...` in your temporary folder (`%TEMP%`). As soon as the installer ends, it puts the Start menu and desktop shortcuts and the Installed apps entry of your own installation back as they were. Do not close the window while the installer runs, during the first minutes. If it was closed anyway, the next run with `--installer` puts the shortcuts and the entry back first.
+   - It starts the temporary Cinewright with its own, empty data directory on a free port. A browser tab opens on it, where you can watch the WanGP setup. You can close the tab.
+   - It waits until WanGP is set up, which downloads several gigabytes, then installs the `int8` quantization of each smoke model, one after another, and runs the test as above. If the build cannot install models, the test ends with exit code 2 as soon as the temporary Cinewright has started, before the WanGP setup, and the last line says so.
+   - At the end, it stops the temporary Cinewright. To stop the test earlier, press Ctrl+C.
+3. `--model-store` is optional. It names a folder for the models, which the temporary Cinewright uses directly, without copying it. It reuses each file in the folder that passes its hash check, and it downloads the files the build needs and the folder lacks into it. Without `--model-store`, the temporary Cinewright downloads every model again into the temporary folder, tens of gigabytes, and they go when you delete that folder.
+   - A folder of its own, as in the command above, leaves your installation's models alone. The first run downloads all three smoke models into it, so its drive needs free space for all three together. Later runs reuse them.
+   - You can also name the `models` folder of your own installation, `%LOCALAPPDATA%\Cinewright\models`, so that nothing is downloaded twice. But if the build pins a different version of a model file, the temporary Cinewright replaces that file there, and your own Cinewright then uses the new version too.
+   - Even when the folder already holds all the models, its drive needs as much free space as the largest smoke model takes, tens of gigabytes. The temporary Cinewright checks the free space before it looks for the files. Without that space, the test ends with exit code 2 after the WanGP setup. A download that was interrupted stays in the hidden folder `.downloads` inside it.
+4. The last lines name the temporary folder, and the very last line states the result, as above. The report and the summary are in `data\logs` in the temporary folder; the lines `Report:` and `Summary:` give their full paths. Paste the summary as in step 5 above.
+5. Delete the temporary folder afterwards. It holds a whole Cinewright installation with WanGP, several gigabytes. At the end, the test removes the link from the temporary folder to your model folder, so deleting the temporary folder leaves your models alone. If the output warns that this link could not be removed, remove only the link first, with `rmdir "<temporary folder>\data\models"` (without `/s`), then delete the temporary folder.
+
 ### Work on the web UI
 
 Start the core with `python -m cinewright`, then run `npm run dev` in `web/`. The Vite dev server proxies `/api` and `/mcp` to the core on `127.0.0.1:8737`. [`web/README.md`](web/README.md) lists the scripts.
@@ -229,6 +281,8 @@ The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TO
 | `logs/cinewright.log` | Launcher and core log |
 | `logs/worker.log` | Output of the worker the core started: the worker's log and the engine's messages |
 | `logs/provisioning.log` | Output of uv and of the attention check during the WanGP setup |
+| `logs/smoke-<version>.json`, `logs/smoke-<version>.md` | Report and summary of the GPU smoke test (`python -m cinewright.devtools smoke`) |
+| `logs/smoke-core-output.log` | Only in the temporary data directory of `smoke --installer`: what the temporary Cinewright printed before its own log started |
 
 ### Commands
 
@@ -242,6 +296,7 @@ End users never need these. They exist for CI and development.
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
 | `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
+| `python -m cinewright.devtools smoke [--installer EXE [--model-store DIR]]` | Runs the GPU smoke test against the running Cinewright, or against a temporary installation of the installer `EXE`, and writes `logs/smoke-<version>.json` and a Markdown summary to the data directory (see [Smoke-test a build on the GPU](#smoke-test-a-build-on-the-gpu)). Exit code 0: every installed smoke model produced its output, 1: a generation failed, 2: the test could not run |
 | `python scripts/build.py [--skip-web] [--skip-installer]` | Builds the web UI, the wheel and the installer |
 
 ### Internal API
