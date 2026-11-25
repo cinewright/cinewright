@@ -12,7 +12,7 @@ from cinewright.db.database import Database
 def test_bundled_migrations_apply_once(tmp_path):
     db = Database(tmp_path / "db" / "test.sqlite3")
     try:
-        assert db.migrate() == ["0001_initial", "0002_job_outputs"]
+        assert db.migrate() == ["0001_initial", "0002_job_outputs", "0003_model_store"]
         assert db.migrate() == []
         assert db.query_one("PRAGMA journal_mode")[0] == "wal"
         assert db.query_one("PRAGMA foreign_keys")[0] == 1

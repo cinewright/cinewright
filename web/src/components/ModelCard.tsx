@@ -1,6 +1,7 @@
-// Card for one model and quantization (design/components/ModelCard). The licence is always visible.
+// Card for one model and quantization (design/components/ModelCard): calibration, install state with live download
+// progress, and the install and remove actions. The licence is always visible.
 
-import type { CalibrationResult, CalibrationStatus, ModelSummary, Schemas } from '../api/client';
+import type { CalibrationResult, CalibrationStatus, ModelInstall, ModelSummary, Schemas } from '../api/client';
 import { DASH, formatBytes, formatMb } from '../lib/format';
 import { CapabilityChip } from './DataClassTag';
 import { Light, PendingLight, StatusLight } from './StatusLight';
@@ -18,28 +19,117 @@ function commercial(license: Schemas['License']): string {
   return 'commercial use unclear';
 }
 
-function InstallAction({ quant }: { quant: Schemas['ModelQuantState'] }) {
-  switch (quant.install_state) {
+export interface InstallControls {
+  onInstall: () => void;
+  onRemove: () => void;
+  /** Why installing and removing are unavailable right now, as the disabled button's label; null when available. */
+  blocker: string | null;
+  /** The request this card started that has not answered yet. */
+  pending: 'install' | 'remove' | null;
+}
+
+function DownloadProgress({ label, live }: { label: string; live: ModelInstall | undefined }) {
+  const known = live?.progress != null && live.total_bytes != null;
+  const percent = known ? Math.min(100, Math.max(0, live.progress?.percent ?? 0)) : 0;
+  const text = known ? `${formatBytes(live.downloaded_bytes ?? 0)} of ${formatBytes(live.total_bytes)}` : 'Waiting for the download';
+  return (
+    <div>
+      <div
+        className="cw-progress"
+        data-state={known ? undefined : 'waiting'}
+        role="progressbar"
+        aria-label={`Downloading ${label}`}
+        // Indeterminate while waiting: no value, so it does not read as 0 %.
+        aria-valuenow={known ? Math.round(percent) : undefined}
+        aria-valuetext={known ? undefined : text}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="cw-progress__label">
+        <span>{text}</span>
+        <span>{known ? `${Math.round(percent)} %` : DASH}</span>
+      </div>
+    </div>
+  );
+}
+
+function InstallState({ state, error, label, live }: { state: Schemas['InstallState']; error: string | null; label: string; live?: ModelInstall }) {
+  switch (state) {
     case 'installed':
       return <Light state="ok" word="Installed" />;
     case 'downloading':
-      return <PendingLight word="Downloading" />;
-    case 'failed':
-      return <Light state="fail" word="Install failed" />;
-    case 'absent':
       return (
-        <button type="button" className="cw-btn cw-btn--secondary cw-btn--sm" disabled>
-          Installing arrives in phase 1
-        </button>
+        <div className="stack stack--tight">
+          <PendingLight word="Downloading" />
+          <DownloadProgress label={label} live={live} />
+        </div>
       );
+    case 'failed':
+      return (
+        <div className="stack stack--tight">
+          <Light state="fail" word="Install failed" />
+          {error ? <p className="text-caption">{error}</p> : null}
+        </div>
+      );
+    case 'absent':
+      return <span className="cw-status cw-muted">Not installed</span>;
   }
 }
 
-export function ModelCard({ model, quant }: { model: ModelSummary; quant: Schemas['ModelQuantState'] }) {
+function InstallActions({ state, label, controls }: { state: Schemas['InstallState']; label: string; controls: InstallControls }) {
+  const { blocker, pending } = controls;
+  const busy = blocker !== null || pending !== null;
+  // A disabled button says why, the other button of a pending request too.
+  const reason = pending === 'install' ? 'Starting install' : pending === 'remove' ? 'Removing' : blocker;
+  const remove = (
+    <button type="button" className="cw-btn cw-btn--danger cw-btn--sm" onClick={controls.onRemove} disabled={busy} aria-label={busy ? undefined : `Remove ${label}`}>
+      {reason ?? 'Remove'}
+    </button>
+  );
+  const install = (word: string) => (
+    <button type="button" className="cw-btn cw-btn--secondary cw-btn--sm" onClick={controls.onInstall} disabled={busy} aria-label={busy ? undefined : `${word} ${label}`}>
+      {pending === 'install' ? 'Starting' : (reason ?? word)}
+    </button>
+  );
+  switch (state) {
+    case 'absent':
+      return install('Install');
+    case 'installed':
+      return remove;
+    case 'failed':
+      // Remove also deletes the partial downloads a failed install keeps for the next try.
+      return (
+        <>
+          {remove}
+          {install('Try again')}
+        </>
+      );
+    case 'downloading':
+      return null;
+  }
+}
+
+/** `live` is the latest `model` event for this quantization, newer than `quant`; `controls` adds the actions. */
+export function ModelCard({
+  model,
+  quant,
+  live,
+  controls,
+}: {
+  model: ModelSummary;
+  quant: Schemas['ModelQuantState'];
+  live?: ModelInstall;
+  controls?: InstallControls;
+}) {
   const result = bestResult(quant.calibration);
   const license = model.license;
+  const label = `${model.name} ${quant.quant}`;
+  const state = live?.install_state ?? quant.install_state;
+  const error = state === 'failed' ? (live?.error?.message ?? quant.error ?? null) : null;
   return (
-    <article className="cw-model-card" aria-label={`${model.name} ${quant.quant}`}>
+    <article className="cw-model-card" aria-label={label}>
       <div className="cw-model-card__head">
         <div>
           <h3 className="cw-model-card__name">{model.name}</h3>
@@ -66,6 +156,7 @@ export function ModelCard({ model, quant }: { model: ModelSummary; quant: Schema
           <dd>{result?.seconds_per_step != null ? result.seconds_per_step.toFixed(1) : DASH}</dd>
         </div>
       </dl>
+      <InstallState state={state} error={error} label={label} live={state === 'downloading' ? live : undefined} />
       <div className="cw-model-card__foot">
         <span className="text-caption cw-muted">
           {license.url ? (
@@ -76,9 +167,14 @@ export function ModelCard({ model, quant }: { model: ModelSummary; quant: Schema
             license.name
           )}
           {` · ${commercial(license)}`}
-          {quant.size_bytes != null ? ` · ${formatBytes(quant.size_bytes)}` : ''}
+          {/* Installed: with the shared files it uses; otherwise its own model files, which an install downloads at least. */}
+          {quant.size_bytes != null ? ` · ${quant.install_state === 'installed' ? 'installed' : 'model files'} ${formatBytes(quant.size_bytes)}` : ''}
         </span>
-        <InstallAction quant={quant} />
+        {controls ? (
+          <div className="model-card__actions">
+            <InstallActions state={state} label={label} controls={controls} />
+          </div>
+        ) : null}
       </div>
     </article>
   );

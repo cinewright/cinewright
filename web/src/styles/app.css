@@ -229,6 +229,10 @@ a.cw-btn {
   gap: var(--space-4);
 }
 
+.stack--tight {
+  gap: var(--space-2);
+}
+
 .panel {
   padding: var(--space-4);
   border: 1px solid var(--line);
@@ -362,6 +366,11 @@ a.cw-btn {
 .table__strong {
   color: var(--ink-strong);
   font-weight: 500;
+}
+
+.table .table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .card-grid {
@@ -543,6 +552,27 @@ a.cw-btn {
   }
 }
 
+/* Models */
+
+.models-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.cw-model-card__foot {
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.model-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 /* Library */
 
 .library {
@@ -660,7 +690,7 @@ a.cw-btn {
   color: var(--accent-ink);
 }
 
-/* About dialog */
+/* Dialogs (About, confirmations) */
 
 .dialog {
   width: min(560px, calc(100vw - 2 * var(--space-4)));
@@ -692,6 +722,12 @@ a.cw-btn {
 
 .dialog__body {
   padding: var(--space-4);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
 }
 
 .sr-only {

@@ -142,8 +142,6 @@ def test_each_core_start_has_its_own_enrollment_token(core, config, registry_dir
 
 def test_later_phase_operations_raise_not_implemented(core):
     for call in (
-        lambda: core.install_model("test-image", None),
-        lambda: core.remove_model("test-image", "bf16"),
         core.start_calibration,
         core.add_host,
         lambda: core.decide_approval("a1", True),

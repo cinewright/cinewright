@@ -15,9 +15,11 @@ export type EngineInfo = Schemas['EngineInfo'];
 export type Estimate = Schemas['Estimate'];
 export type HardwareProfile = Schemas['HardwareProfile'];
 export type Host = Schemas['Host'];
+export type HostPatch = Schemas['HostPatch'];
 export type Job = Schemas['Job'];
 export type JobRequest = Schemas['JobRequest'];
 export type JobState = Schemas['JobState'];
+export type ModelStoreUsage = Schemas['ModelStoreUsage'];
 export type ModelSummary = Schemas['ModelSummary'];
 export type Priority = Schemas['Priority'];
 export type Provenance = Schemas['Provenance'];
@@ -25,8 +27,8 @@ export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
 export type WorkerHealth = Schemas['WorkerHealth'];
 
-// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind and
-// SystemEvent in api/schemas.py.
+// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind,
+// ModelInstall and SystemEvent in api/schemas.py.
 export type EventKind = 'state' | 'progress' | 'preview' | 'log';
 export interface JobEvent {
   job_id: string;
@@ -36,11 +38,25 @@ export interface JobEvent {
   created_at: string;
 }
 /** Non-job events: sent without an id and never replayed. */
-export type SystemEventKind = 'engine';
+export type SystemEventKind = 'engine' | 'model';
+/** A model quantization's new install state: download progress, the end of an install, or a removal. */
+export interface ModelInstall {
+  model_id: string;
+  quant: string;
+  install_state: Schemas['InstallState'];
+  /** While `downloading`: share of the bytes this install downloads. */
+  progress?: Schemas['Progress'] | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
+  /** Why the install failed (`failed`). */
+  error?: Schemas['SetupError'] | null;
+}
 export interface SystemEvent {
   kind: SystemEventKind;
   /** For `engine`: the engine as GET /system reports it. */
   engine?: EngineInfo | null;
+  /** For `model`: the quantization's new install state. */
+  model?: ModelInstall | null;
   created_at: string;
 }
 
@@ -137,7 +153,9 @@ async function request<T>(method: string, path: ApiPath, options: RequestOptions
   }
   if (!response.ok) throw await toApiError(response);
   if (response.status === 204 || response.headers.get('content-length') === '0') return undefined as T;
-  return (await response.json()) as T;
+  // A 202 without a body (installModel, updateHost) may come without a content-length.
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 const PAGE = '50';
@@ -156,6 +174,12 @@ export const api = {
   capabilities: (signal?: AbortSignal) => request<Schemas['CapabilityList']>('GET', '/api/v1/capabilities', { signal }),
   calibration: (signal?: AbortSignal) => request<Schemas['CalibrationReport']>('GET', '/api/v1/calibration', { signal }),
   models: (signal?: AbortSignal) => request<Schemas['ModelList']>('GET', '/api/v1/models', { signal }),
+  /** Starts the install in the background (202); progress follows as `model` events. */
+  installModel: (modelId: string, quant: string) =>
+    request<void>('POST', '/api/v1/models/{model_id}/install', { params: { model_id: modelId }, query: { quant } }),
+  /** Removes one quantization, or every one of the model when `quant` is left out. */
+  removeModel: (modelId: string, quant?: string) =>
+    request<void>('DELETE', '/api/v1/models/{model_id}', { params: { model_id: modelId }, query: { quant } }),
 
   estimate: (job: JobRequest, signal?: AbortSignal) => request<Estimate>('POST', '/api/v1/estimate', { body: job, signal }),
   submitJob: (job: JobRequest) => request<Job>('POST', '/api/v1/jobs', { body: job }),
@@ -168,6 +192,8 @@ export const api = {
     request<Schemas['AssetList']>('GET', '/api/v1/assets', { query: { cursor, limit: PAGE }, signal }),
 
   hosts: (signal?: AbortSignal) => request<Schemas['HostList']>('GET', '/api/v1/hosts', { signal }),
+  /** A new text encoder variant is switched in the background (202); GET /hosts shows it once the switch is done. */
+  updateHost: (hostId: string, patch: HostPatch) => request<void>('PATCH', '/api/v1/hosts/{host_id}', { params: { host_id: hostId }, body: patch }),
 };
 
 export const assetContentUrl = (sha256: string) => apiUrl('/api/v1/assets/{sha256}/content', { sha256 });

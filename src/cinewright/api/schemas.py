@@ -28,6 +28,7 @@ DEFAULT_PORT = 8737
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", description="Lowercase hex SHA-256")]
 ModelId = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9.]+)*$", max_length=80)]
+TextEncoderVariant = Literal["bf16", "int8"]
 
 
 class Contract(BaseModel):
@@ -395,8 +396,12 @@ class CalibrationReport(Contract):
 class ModelQuantState(Contract):
     quant: str
     install_state: InstallState
-    size_bytes: int | None = None
+    size_bytes: int | None = Field(
+        default=None,
+        description="Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files",
+    )
     calibration: list[CalibrationResult] = Field(default_factory=list)
+    error: str | None = Field(default=None, description="Why the last install failed (`failed`), in one sentence; null otherwise")
 
 
 class ModelSummary(Contract):
@@ -407,6 +412,9 @@ class ModelSummary(Contract):
     capabilities: list[Capability]
     license: License
     quantizations: list[ModelQuantState]
+    installed_bytes: int = Field(
+        default=0, description="Disk space of the model's installed quantizations together, each shared file once; 0 when none is"
+    )
 
 
 class ModelDetail(ModelSummary):
@@ -417,8 +425,17 @@ class ModelDetail(ModelSummary):
     engines: list[EngineBinding]
 
 
+class ModelStoreUsage(Contract):
+    """The model store (`<data dir>/models`) as the Models view shows it."""
+
+    total_bytes: int = Field(description="Disk space of every file in the model store, each shared file once")
+    quota_bytes: int | None = Field(description="`settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota")
+    free_bytes: int = Field(description="Free space of the drive that holds the model store, measured for this answer")
+
+
 class ModelList(Contract):
-    items: list[ModelSummary]
+    items: list[ModelSummary] = Field(description="Registry models, without those whose licence excludes `settings.country`")
+    store: ModelStoreUsage | None = Field(default=None, description="Size, quota and free disk space of the model store")
 
 
 class CapabilityEntry(Contract):
@@ -521,16 +538,33 @@ class JobEvent(Contract):
 
 class SystemEventKind(StrEnum):
     ENGINE = "engine"
+    MODEL = "model"
+
+
+class ModelInstall(Contract):
+    """A model quantization's new install state: download progress, the end of an install, or a removal."""
+
+    model_id: ModelId
+    quant: str
+    install_state: InstallState
+    progress: Progress | None = Field(
+        default=None, description="While `downloading`: share of the bytes this install downloads (`phase` `download`)"
+    )
+    downloaded_bytes: int | None = Field(default=None, description="While `downloading`: bytes downloaded so far")
+    total_bytes: int | None = Field(default=None, description="While `downloading`: bytes this install downloads")
+    error: SetupError | None = Field(default=None, description="Why the install failed (`failed`); null otherwise")
 
 
 class SystemEvent(Contract):
     """A non-job event of `GET /events`: the SSE event name is `kind`; it has no id and is never replayed.
 
     `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
+    `model`: progress or a state change of a model install, also a removal or an eviction (`absent`).
     """
 
     kind: SystemEventKind
     engine: EngineInfo | None = Field(default=None, description="For `engine`: the engine's new state, progress and error")
+    model: ModelInstall | None = Field(default=None, description="For `model`: the quantization's new install state and progress")
     created_at: datetime
 
 
@@ -624,6 +658,15 @@ class WorkerHealth(Contract):
     detail: str | None = None
 
 
+class TextEncoderSwitch(Contract):
+    """A text encoder variant switch of a host since the core started: running, or failed."""
+
+    variant: TextEncoderVariant = Field(description="The variant the switch installs")
+    error: SetupError | None = Field(
+        default=None, description="Why the switch failed; the previous variant stays in use. null while the switch runs"
+    )
+
+
 class Host(Contract):
     id: str
     name: str
@@ -637,10 +680,27 @@ class Host(Contract):
         description="State and VRAM use of the host's worker, as last reported by a worker registered since the core started. "
         "On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker",
     )
+    text_encoder_variant: TextEncoderVariant | None = Field(
+        default=None,
+        description="Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies",
+    )
+    text_encoder_switch: TextEncoderSwitch | None = Field(
+        default=None,
+        description="The host's last text encoder switch while it runs or after it failed; null when none ran since the core "
+        "started or the last one succeeded, which `text_encoder_variant` then shows",
+    )
 
 
 class HostList(Contract):
     items: list[Host]
+
+
+class HostPatch(Contract):
+    text_encoder_variant: TextEncoderVariant | None = Field(
+        default=None,
+        description="Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, "
+        "restarts the worker and removes the previous variant's files. Refused while a job runs on the host",
+    )
 
 
 class Approval(Contract):

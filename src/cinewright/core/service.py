@@ -27,6 +27,7 @@ from cinewright.api.schemas import (
     Heartbeat,
     HeartbeatAck,
     HostList,
+    HostPatch,
     Job,
     JobCompletion,
     JobEvent,
@@ -88,7 +89,8 @@ class CoreService(Protocol):
         """Replay job events after `after` (`<job_id>:<seq>`, from Last-Event-ID), then the kept latest previews, then live ones.
 
         Previews are live only: they carry the `seq` of the job's latest stored event and are never replayed.
-        Without `job_id`, live system events (engine provisioning) are mixed in; they are never stored, kept or replayed.
+        Without `job_id`, live system events (engine provisioning, model installs) are mixed in; they are never stored, kept or
+        replayed.
         """
         ...
 
@@ -104,6 +106,10 @@ class CoreService(Protocol):
 
     # hosts and approvals
     def list_hosts(self) -> HostList: ...
+    def update_host(self, host_id: str, patch: HostPatch) -> None:
+        """Check a host change and run it in the background (text encoder variant switch); raises a refusal at once."""
+        ...
+
     def add_host(self) -> None: ...
     def list_approvals(self) -> ApprovalList: ...
     def decide_approval(self, approval_id: str, approve: bool) -> None: ...
