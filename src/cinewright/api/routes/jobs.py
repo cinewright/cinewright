@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Header, Query, Request
@@ -9,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from cinewright.api.deps import Core
 from cinewright.api.problems import PROBLEM_RESPONSE
-from cinewright.api.schemas import ClientKind, Estimate, Job, JobList, JobRequest, JobState
+from cinewright.api.schemas import ClientKind, Estimate, EventKind, Job, JobEvent, JobList, JobRequest, JobState
 
 router = APIRouter(tags=["jobs"], responses={404: PROBLEM_RESPONSE, 409: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501: PROBLEM_RESPONSE})
 
@@ -73,10 +74,39 @@ async def stream_events(
 ) -> StreamingResponse:
     async def body() -> AsyncIterator[bytes]:
         yield f": cinewright events, keepalive {SSE_KEEPALIVE_SECONDS}s\n\n".encode()
-        async for event in core.events(job_id, last_event_id):
-            if await request.is_disconnected():
-                break
-            payload = event.model_dump_json()
-            yield f"id: {event.job_id}:{event.seq}\nevent: {event.kind}\ndata: {payload}\n\n".encode()
+        events = core.events(job_id, last_event_id)
+        # One pending wait survives keepalive timeouts: `asyncio.wait_for` would cancel the event
+        # generator on timeout, which closes it, so no later event would arrive.
+        pending: asyncio.Task[JobEvent | None] | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(_next_event(events))
+                done, _ = await asyncio.wait({pending}, timeout=SSE_KEEPALIVE_SECONDS)
+                if not done:
+                    # An idle stream writes nothing, so a silently dropped connection shows only now.
+                    yield b": keepalive\n\n"
+                    if await request.is_disconnected():
+                        return
+                    continue
+                event, pending = pending.result(), None
+                if event is None or await request.is_disconnected():
+                    return
+                yield _sse(event)
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()  # throws into the generator, whose `finally` unsubscribes
+                await asyncio.wait({pending})
+            await events.aclose()
 
     return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+
+async def _next_event(events: AsyncIterator[JobEvent]) -> JobEvent | None:
+    return await anext(events, None)
+
+
+def _sse(event: JobEvent) -> bytes:
+    # A preview is not stored, so it carries no `id:` and Last-Event-ID always names a stored event.
+    event_id = "" if event.kind == EventKind.PREVIEW else f"id: {event.job_id}:{event.seq}\n"
+    return f"{event_id}event: {event.kind}\ndata: {event.model_dump_json()}\n\n".encode()
