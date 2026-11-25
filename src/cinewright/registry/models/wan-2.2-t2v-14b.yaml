@@ -20,8 +20,11 @@ limits:
     544x960, 832x624, 624x832, 720x720, 832x480, 480x832, 672x384, 384x672, 512x512, 576x320,
     320x576, 448x448, 448x256, 256x448, 320x320,
   ]
-  # Wan2GP frame slider maximum for sliding-window models (737). Frame counts are 5 + 4n.
+  # Wan2GP frame slider maximum for sliding-window models (737).
   max_frames: 737
+  # Wan2GP frames_minimum and frames_steps of t2v_2_2: frame counts are 5 + 4n.
+  min_frames: 5
+  frames_step: 4
   fps: [16]
   # 737 frames / 16 fps, rounded down.
   max_duration_s: 46.0
@@ -32,7 +35,8 @@ license:
   commercial_use: true
   geo_exclusions: []
 quantizations:
-  # Wan2GP picks the files by its transformer_quantization setting: bf16 = first URL, int8 = the quanto bf16 int8 file.
+  # Wan2GP picks the files by the transformer_quantization override that the Wan2GP adapter sets for each job:
+  # bf16 = first URL, int8 = the quanto bf16 int8 file.
   - id: bf16
     format: safetensors
     files:

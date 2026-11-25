@@ -317,6 +317,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/hosts/{host_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Host
+         * @description Change a host's settings. A new `text_encoder_variant` is switched in the background.
+         *
+         *     Checks first and refuses with 409 while a job runs on the host or a model is being installed, and when the
+         *     variant's files do not fit on the drive of the model store. `GET /hosts` shows the switch as the host's
+         *     `text_encoder_switch` while it runs or after it failed, and the new `text_encoder_variant` once it is done.
+         */
+        patch: operations["updateHost"];
+        trace?: never;
+    };
     "/api/v1/jobs": {
         parameters: {
             query?: never;
@@ -414,7 +438,12 @@ export interface paths {
         get: operations["getModel"];
         put?: never;
         post?: never;
-        /** Remove Model */
+        /**
+         * Remove Model
+         * @description Remove installed quantizations; shared files stay while another installed model or a waiting job needs them.
+         *
+         *     Refused with 409 while the quantization is being installed or a queued or running job needs it.
+         */
         delete: operations["removeModel"];
         options?: never;
         head?: never;
@@ -430,7 +459,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Install Model */
+        /**
+         * Install Model
+         * @description Install a quantization with the shared files it needs, in the background.
+         *
+         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota
+         *     (it may remove the least recently used models first), an install in progress, the licence's country exclusions.
+         *     Progress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.
+         */
         post: operations["installModel"];
         delete?: never;
         options?: never;
@@ -877,6 +913,12 @@ export interface components {
             requires_approval: boolean;
             route?: components["schemas"]["Route"] | null;
         };
+        /**
+         * EventKind
+         * @description Kind of a job event, also its SSE event name; `JobEvent` describes the `data` of each kind.
+         * @enum {string}
+         */
+        EventKind: "state" | "progress" | "preview" | "log";
         /** GpuInfo */
         GpuInfo: {
             /**
@@ -972,6 +1014,13 @@ export interface components {
             name: string;
             /** Online */
             online: boolean;
+            /** @description The host's last text encoder switch while it runs or after it failed; null when none ran since the core started or the last one succeeded, which `text_encoder_variant` then shows */
+            text_encoder_switch?: components["schemas"]["TextEncoderSwitch"] | null;
+            /**
+             * Text Encoder Variant
+             * @description Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies
+             */
+            text_encoder_variant?: ("bf16" | "int8") | null;
             /** @description State and VRAM use of the host's worker, as last reported by a worker registered since the core started. On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker */
             worker_health?: components["schemas"]["WorkerHealth"] | null;
         };
@@ -984,6 +1033,14 @@ export interface components {
         HostList: {
             /** Items */
             items: components["schemas"]["Host"][];
+        };
+        /** HostPatch */
+        HostPatch: {
+            /**
+             * Text Encoder Variant
+             * @description Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, restarts the worker and removes the previous variant's files. Refused while a job runs on the host
+             */
+            text_encoder_variant?: ("bf16" | "int8") | null;
         };
         /**
          * InstallState
@@ -1021,6 +1078,11 @@ export interface components {
         };
         /** JobCompletion */
         JobCompletion: {
+            /**
+             * Accepted Extra
+             * @description Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them
+             */
+            accepted_extra?: string[] | null;
             /** Engine Version */
             engine_version?: string | null;
             /** Lease Id */
@@ -1045,6 +1107,38 @@ export interface components {
              * @default false
              */
             retryable: boolean;
+        };
+        /**
+         * JobEvent
+         * @description A job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
+         *
+         *     Stored events (`state`, `progress`, `log`) have the SSE id `<job_id>:<seq>`. A reconnecting browser resends the
+         *     last one as `Last-Event-ID`, and the stream replays the stored events after it. Previews are not stored in
+         *     `job_events` and never replayed: a `preview` has no `id:` line and repeats the `seq` of the job's latest stored
+         *     event, so `Last-Event-ID` always names a stored event. After a stream opens or reconnects (after its replay), the
+         *     core sends the latest kept preview of each running job the stream covers once; later previews follow live.
+         */
+        JobEvent: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Data
+             * @description By `kind`. `state`: `state` (a JobState), plus where set: `worker_id` (`leased`), `reason` (why the job was queued again, cancelled or failed after its last attempt), `outputs` (`succeeded`: the output SHA-256 values in completion order) and `error` (a JobError: `failed`, or `cancelled` while running). `progress`: a Progress (`phase`, `step`, `total_steps`, `percent`). `preview`: `media_type` and `data_base64` (the frame as base64), as the worker sent them; the core does not check them, the shipped worker sends `image/png`, `image/jpeg` or `image/webp` of at most 256 KiB. `log`: `message`, a sentence for people. Log rows that cores before migration 0002 stored for an upload also carry `output` (`name`, `sha256`, `media_type`, `size_bytes`), and replay still sends them as stored; uploads are now the job's outputs, and workers may not send `output`.
+             */
+            data: {
+                [key: string]: unknown;
+            };
+            /** Job Id */
+            job_id: string;
+            kind: components["schemas"]["EventKind"];
+            /**
+             * Seq
+             * @description Per-job sequence number of the stored events, starting at 1; a `preview` repeats the latest one
+             */
+            seq: number;
         };
         /** JobFailure */
         JobFailure: {
@@ -1172,10 +1266,20 @@ export interface components {
         Limits: {
             /** Fps */
             fps?: number[];
+            /**
+             * Frames Step
+             * @description A clip has `min_frames + n * frames_step` frames (n >= 0); null for a model without frames
+             */
+            frames_step?: number | null;
             /** Max Duration S */
             max_duration_s?: number | null;
             /** Max Frames */
             max_frames?: number | null;
+            /**
+             * Min Frames
+             * @description Fewest frames of a clip; null for a model without frames (images only)
+             */
+            min_frames?: number | null;
             /**
              * Resolutions
              * @description `WIDTHxHEIGHT` values the model supports
@@ -1196,6 +1300,12 @@ export interface components {
             family: string;
             /** Id */
             id: string;
+            /**
+             * Installed Bytes
+             * @description Disk space of the model's installed quantizations together, each shared file once; 0 when none is
+             * @default 0
+             */
+            installed_bytes: number;
             license: components["schemas"]["License"];
             limits: components["schemas"]["Limits"];
             /** Name */
@@ -1207,19 +1317,57 @@ export interface components {
             /** Vendor */
             vendor: string;
         };
+        /**
+         * ModelInstall
+         * @description A model quantization's new install state: download progress, the end of an install, or a removal.
+         */
+        ModelInstall: {
+            /**
+             * Downloaded Bytes
+             * @description While `downloading`: bytes downloaded so far
+             */
+            downloaded_bytes?: number | null;
+            /** @description Why the install failed (`failed`); null otherwise */
+            error?: components["schemas"]["SetupError"] | null;
+            install_state: components["schemas"]["InstallState"];
+            /** Model Id */
+            model_id: string;
+            /** @description While `downloading`: share of the bytes this install downloads (`phase` `download`) */
+            progress?: components["schemas"]["Progress"] | null;
+            /** Quant */
+            quant: string;
+            /**
+             * Total Bytes
+             * @description While `downloading`: bytes this install downloads
+             */
+            total_bytes?: number | null;
+        };
         /** ModelList */
         ModelList: {
-            /** Items */
+            /**
+             * Items
+             * @description Registry models, without those whose licence excludes `settings.country`
+             */
             items: components["schemas"]["ModelSummary"][];
+            /** @description Size, quota and free disk space of the model store */
+            store?: components["schemas"]["ModelStoreUsage"] | null;
         };
         /** ModelQuantState */
         ModelQuantState: {
             /** Calibration */
             calibration?: components["schemas"]["CalibrationResult"][];
+            /**
+             * Error
+             * @description Why the last install failed (`failed`), in one sentence; null otherwise
+             */
+            error?: string | null;
             install_state: components["schemas"]["InstallState"];
             /** Quant */
             quant: string;
-            /** Size Bytes */
+            /**
+             * Size Bytes
+             * @description Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files
+             */
             size_bytes?: number | null;
         };
         /** ModelSource */
@@ -1234,6 +1382,27 @@ export interface components {
             /** Revision */
             revision?: string | null;
         };
+        /**
+         * ModelStoreUsage
+         * @description The model store (`<data dir>/models`) as the Models view shows it.
+         */
+        ModelStoreUsage: {
+            /**
+             * Free Bytes
+             * @description Free space of the drive that holds the model store, measured for this answer
+             */
+            free_bytes: number;
+            /**
+             * Quota Bytes
+             * @description `settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota
+             */
+            quota_bytes: number | null;
+            /**
+             * Total Bytes
+             * @description Disk space of every file in the model store, each shared file once
+             */
+            total_bytes: number;
+        };
         /** ModelSummary */
         ModelSummary: {
             /** Capabilities */
@@ -1242,6 +1411,12 @@ export interface components {
             family: string;
             /** Id */
             id: string;
+            /**
+             * Installed Bytes
+             * @description Disk space of the model's installed quantizations together, each shared file once; 0 when none is
+             * @default 0
+             */
+            installed_bytes: number;
             license: components["schemas"]["License"];
             /** Name */
             name: string;
@@ -1345,6 +1520,8 @@ export interface components {
             model?: components["schemas"]["ProvenanceModel"] | null;
             /** Negative Prompt */
             negative_prompt?: string | null;
+            /** @description null for uploaded inputs and for records stored by earlier releases */
+            params?: components["schemas"]["ProvenanceParams"] | null;
             /** Parents */
             parents?: string[];
             /** Prompt */
@@ -1410,6 +1587,36 @@ export interface components {
             name: string;
             /** Quant */
             quant: string;
+        };
+        /**
+         * ProvenanceParams
+         * @description The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
+         *     them, for example to a distilled model's fixed steps; a clip's frame count lies on the model's frame grid.
+         */
+        ProvenanceParams: {
+            /**
+             * Extra
+             * @description The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them
+             */
+            extra?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Fps
+             * @description null for images
+             */
+            fps?: number | null;
+            /**
+             * Frames
+             * @description null for images
+             */
+            frames?: number | null;
+            /** Guidance */
+            guidance?: number | null;
+            /** Resolution */
+            resolution?: string | null;
+            /** Steps */
+            steps?: number | null;
         };
         /** RecipeList */
         RecipeList: {
@@ -1512,6 +1719,33 @@ export interface components {
              */
             message: string;
         };
+        /**
+         * SystemEvent
+         * @description A non-job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
+         *
+         *     Only a stream without `job_id` carries them. They have no id, are not stored and never replayed, so a stream
+         *     gets only those published while it is open; reload `GET /system` or `GET /models` whenever the stream opens.
+         *     `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
+         *     `model`: progress or a state change of a model install, also a removal or an eviction (`absent`).
+         */
+        SystemEvent: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** @description For `engine`: the engine's new state, progress and error */
+            engine?: components["schemas"]["EngineInfo"] | null;
+            kind: components["schemas"]["SystemEventKind"];
+            /** @description For `model`: the quantization's new install state and progress */
+            model?: components["schemas"]["ModelInstall"] | null;
+        };
+        /**
+         * SystemEventKind
+         * @description Kind of a non-job event, also its SSE event name and the `SystemEvent` field that carries its payload.
+         * @enum {string}
+         */
+        SystemEventKind: "engine" | "model";
         /** SystemInfo */
         SystemInfo: {
             /**
@@ -1536,6 +1770,20 @@ export interface components {
             name: "Cinewright";
             /** Version */
             version: string;
+        };
+        /**
+         * TextEncoderSwitch
+         * @description A text encoder variant switch of a host since the core started: running, or failed.
+         */
+        TextEncoderSwitch: {
+            /** @description Why the switch failed; the previous variant stays in use. null while the switch runs */
+            error?: components["schemas"]["SetupError"] | null;
+            /**
+             * Variant
+             * @description The variant the switch installs
+             * @enum {string}
+             */
+            variant: "bf16" | "int8";
         };
         /** WorkerEvent */
         WorkerEvent: {
@@ -2361,13 +2609,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed. */
+            /** @description Server-sent events. Each message has an `event:` line with the event's kind and a `data:` line with one JSON object: a JobEvent for the job event kinds (`state`, `progress`, `preview`, `log`), a SystemEvent for the other kinds (`engine`: engine provisioning, `model`: model install progress, installs, removals and evictions). Stored job events have an `id:` line (`<job_id>:<seq>`). A stream first replays the stored events after `Last-Event-ID`; with `job_id` and without `Last-Event-ID`, the job's whole history. Previews and system events have no id and are never replayed: after its replay a stream sends the latest preview of each running job it covers once, and system events only while it is open. With `job_id` the stream carries only that job's events and ends after its final state; only a stream without `job_id` carries system events. A comment line (`: keepalive`) follows after 15 s without an event. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/event-stream": unknown;
+                    "text/event-stream": components["schemas"]["JobEvent"] | components["schemas"]["SystemEvent"];
                 };
             };
             /** @description Not Found */
@@ -2612,6 +2860,72 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+        };
+    };
+    updateHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                host_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3034,6 +3348,7 @@ export interface operations {
     removeModel: {
         parameters: {
             query?: {
+                /** @description Quantization to remove; all when omitted */
                 quant?: string | null;
             };
             header?: never;
@@ -3053,6 +3368,16 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3086,6 +3411,7 @@ export interface operations {
     installModel: {
         parameters: {
             query?: {
+                /** @description Quantization to install (required) */
                 quant?: string | null;
             };
             header?: never;
@@ -3107,6 +3433,16 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

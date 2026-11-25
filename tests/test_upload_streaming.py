@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
-from conftest import API, PNG, fake_detect
+from conftest import API, PNG, TEST_INSTALLED, fake_detect, mark_installed
 
 from cinewright.api import deps
 from cinewright.app import create_app
@@ -80,6 +80,7 @@ def live(home: Path, registry_dir: Path) -> Iterator[Live]:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     core = Core(Config(home=home, port=port), registry=Registry.load(registry_dir), detect=fake_detect)
+    mark_installed(core, *TEST_INSTALLED)
     server = uvicorn.Server(uvicorn.Config(create_app(core), log_config=None, lifespan="on", timeout_graceful_shutdown=2))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True, name="uvicorn")
     thread.start()

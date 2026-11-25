@@ -636,6 +636,17 @@
         "title": "Estimate",
         "type": "object"
       },
+      "EventKind": {
+        "description": "Kind of a job event, also its SSE event name; `JobEvent` describes the `data` of each kind.",
+        "enum": [
+          "state",
+          "progress",
+          "preview",
+          "log"
+        ],
+        "title": "EventKind",
+        "type": "string"
+      },
       "GpuInfo": {
         "additionalProperties": false,
         "properties": {
@@ -872,6 +883,33 @@
             "title": "Online",
             "type": "boolean"
           },
+          "text_encoder_switch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextEncoderSwitch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The host's last text encoder switch while it runs or after it failed; null when none ran since the core started or the last one succeeded, which `text_encoder_variant` then shows"
+          },
+          "text_encoder_variant": {
+            "anyOf": [
+              {
+                "enum": [
+                  "bf16",
+                  "int8"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies",
+            "title": "Text Encoder Variant"
+          },
           "worker_health": {
             "anyOf": [
               {
@@ -919,6 +957,29 @@
           "items"
         ],
         "title": "HostList",
+        "type": "object"
+      },
+      "HostPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "text_encoder_variant": {
+            "anyOf": [
+              {
+                "enum": [
+                  "bf16",
+                  "int8"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, restarts the worker and removes the previous variant's files. Refused while a job runs on the host",
+            "title": "Text Encoder Variant"
+          }
+        },
+        "title": "HostPatch",
         "type": "object"
       },
       "InstallState": {
@@ -1052,6 +1113,23 @@
       "JobCompletion": {
         "additionalProperties": false,
         "properties": {
+          "accepted_extra": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "maxItems": 100,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them",
+            "title": "Accepted Extra"
+          },
           "engine_version": {
             "anyOf": [
               {
@@ -1107,6 +1185,44 @@
           "message"
         ],
         "title": "JobError",
+        "type": "object"
+      },
+      "JobEvent": {
+        "additionalProperties": false,
+        "description": "A job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.\n\nStored events (`state`, `progress`, `log`) have the SSE id `<job_id>:<seq>`. A reconnecting browser resends the\nlast one as `Last-Event-ID`, and the stream replays the stored events after it. Previews are not stored in\n`job_events` and never replayed: a `preview` has no `id:` line and repeats the `seq` of the job's latest stored\nevent, so `Last-Event-ID` always names a stored event. After a stream opens or reconnects (after its replay), the\ncore sends the latest kept preview of each running job the stream covers once; later previews follow live.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data": {
+            "additionalProperties": true,
+            "description": "By `kind`. `state`: `state` (a JobState), plus where set: `worker_id` (`leased`), `reason` (why the job was queued again, cancelled or failed after its last attempt), `outputs` (`succeeded`: the output SHA-256 values in completion order) and `error` (a JobError: `failed`, or `cancelled` while running). `progress`: a Progress (`phase`, `step`, `total_steps`, `percent`). `preview`: `media_type` and `data_base64` (the frame as base64), as the worker sent them; the core does not check them, the shipped worker sends `image/png`, `image/jpeg` or `image/webp` of at most 256 KiB. `log`: `message`, a sentence for people. Log rows that cores before migration 0002 stored for an upload also carry `output` (`name`, `sha256`, `media_type`, `size_bytes`), and replay still sends them as stored; uploads are now the job's outputs, and workers may not send `output`.",
+            "title": "Data",
+            "type": "object"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventKind"
+          },
+          "seq": {
+            "description": "Per-job sequence number of the stored events, starting at 1; a `preview` repeats the latest one",
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "seq",
+          "kind",
+          "data",
+          "created_at"
+        ],
+        "title": "JobEvent",
         "type": "object"
       },
       "JobFailure": {
@@ -1523,6 +1639,19 @@
             "title": "Fps",
             "type": "array"
           },
+          "frames_step": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A clip has `min_frames + n * frames_step` frames (n >= 0); null for a model without frames",
+            "title": "Frames Step"
+          },
           "max_duration_s": {
             "anyOf": [
               {
@@ -1544,6 +1673,19 @@
               }
             ],
             "title": "Max Frames"
+          },
+          "min_frames": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fewest frames of a clip; null for a model without frames (images only)",
+            "title": "Min Frames"
           },
           "resolutions": {
             "description": "`WIDTHxHEIGHT` values the model supports",
@@ -1588,6 +1730,12 @@
             "pattern": "^[a-z0-9]+(?:-[a-z0-9.]+)*$",
             "title": "Id",
             "type": "string"
+          },
+          "installed_bytes": {
+            "default": 0,
+            "description": "Disk space of the model's installed quantizations together, each shared file once; 0 when none is",
+            "title": "Installed Bytes",
+            "type": "integer"
           },
           "license": {
             "$ref": "#/components/schemas/License"
@@ -1634,15 +1782,99 @@
         "title": "ModelDetail",
         "type": "object"
       },
+      "ModelInstall": {
+        "additionalProperties": false,
+        "description": "A model quantization's new install state: download progress, the end of an install, or a removal.",
+        "properties": {
+          "downloaded_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "While `downloading`: bytes downloaded so far",
+            "title": "Downloaded Bytes"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the install failed (`failed`); null otherwise"
+          },
+          "install_state": {
+            "$ref": "#/components/schemas/InstallState"
+          },
+          "model_id": {
+            "maxLength": 80,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9.]+)*$",
+            "title": "Model Id",
+            "type": "string"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Progress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "While `downloading`: share of the bytes this install downloads (`phase` `download`)"
+          },
+          "quant": {
+            "title": "Quant",
+            "type": "string"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "While `downloading`: bytes this install downloads",
+            "title": "Total Bytes"
+          }
+        },
+        "required": [
+          "model_id",
+          "quant",
+          "install_state"
+        ],
+        "title": "ModelInstall",
+        "type": "object"
+      },
       "ModelList": {
         "additionalProperties": false,
         "properties": {
           "items": {
+            "description": "Registry models, without those whose licence excludes `settings.country`",
             "items": {
               "$ref": "#/components/schemas/ModelSummary"
             },
             "title": "Items",
             "type": "array"
+          },
+          "store": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelStoreUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Size, quota and free disk space of the model store"
           }
         },
         "required": [
@@ -1661,6 +1893,18 @@
             "title": "Calibration",
             "type": "array"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the last install failed (`failed`), in one sentence; null otherwise",
+            "title": "Error"
+          },
           "install_state": {
             "$ref": "#/components/schemas/InstallState"
           },
@@ -1677,6 +1921,7 @@
                 "type": "null"
               }
             ],
+            "description": "Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files",
             "title": "Size Bytes"
           }
         },
@@ -1721,6 +1966,41 @@
         "title": "ModelSource",
         "type": "object"
       },
+      "ModelStoreUsage": {
+        "additionalProperties": false,
+        "description": "The model store (`<data dir>/models`) as the Models view shows it.",
+        "properties": {
+          "free_bytes": {
+            "description": "Free space of the drive that holds the model store, measured for this answer",
+            "title": "Free Bytes",
+            "type": "integer"
+          },
+          "quota_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota",
+            "title": "Quota Bytes"
+          },
+          "total_bytes": {
+            "description": "Disk space of every file in the model store, each shared file once",
+            "title": "Total Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_bytes",
+          "quota_bytes",
+          "free_bytes"
+        ],
+        "title": "ModelStoreUsage",
+        "type": "object"
+      },
       "ModelSummary": {
         "additionalProperties": false,
         "properties": {
@@ -1740,6 +2020,12 @@
             "pattern": "^[a-z0-9]+(?:-[a-z0-9.]+)*$",
             "title": "Id",
             "type": "string"
+          },
+          "installed_bytes": {
+            "default": 0,
+            "description": "Disk space of the model's installed quantizations together, each shared file once; 0 when none is",
+            "title": "Installed Bytes",
+            "type": "integer"
           },
           "license": {
             "$ref": "#/components/schemas/License"
@@ -2051,6 +2337,17 @@
             ],
             "title": "Negative Prompt"
           },
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvenanceParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for uploaded inputs and for records stored by earlier releases"
+          },
           "parents": {
             "items": {
               "description": "Lowercase hex SHA-256",
@@ -2271,6 +2568,84 @@
           "engine"
         ],
         "title": "ProvenanceModel",
+        "type": "object"
+      },
+      "ProvenanceParams": {
+        "additionalProperties": false,
+        "description": "The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust\nthem, for example to a distilled model's fixed steps; a clip's frame count lies on the model's frame grid.",
+        "properties": {
+          "extra": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them",
+            "title": "Extra"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for images",
+            "title": "Fps"
+          },
+          "frames": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for images",
+            "title": "Frames"
+          },
+          "guidance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guidance"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "title": "ProvenanceParams",
         "type": "object"
       },
       "RecipeList": {
@@ -2550,6 +2925,57 @@
         "title": "SetupError",
         "type": "object"
       },
+      "SystemEvent": {
+        "additionalProperties": false,
+        "description": "A non-job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.\n\nOnly a stream without `job_id` carries them. They have no id, are not stored and never replayed, so a stream\ngets only those published while it is open; reload `GET /system` or `GET /models` whenever the stream opens.\n`engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.\n`model`: progress or a state change of a model install, also a removal or an eviction (`absent`).",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EngineInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For `engine`: the engine's new state, progress and error"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SystemEventKind"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelInstall"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For `model`: the quantization's new install state and progress"
+          }
+        },
+        "required": [
+          "kind",
+          "created_at"
+        ],
+        "title": "SystemEvent",
+        "type": "object"
+      },
+      "SystemEventKind": {
+        "description": "Kind of a non-job event, also its SSE event name and the `SystemEvent` field that carries its payload.",
+        "enum": [
+          "engine",
+          "model"
+        ],
+        "title": "SystemEventKind",
+        "type": "string"
+      },
       "SystemInfo": {
         "additionalProperties": false,
         "properties": {
@@ -2592,6 +3018,37 @@
           "engines"
         ],
         "title": "SystemInfo",
+        "type": "object"
+      },
+      "TextEncoderSwitch": {
+        "additionalProperties": false,
+        "description": "A text encoder variant switch of a host since the core started: running, or failed.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the switch failed; the previous variant stays in use. null while the switch runs"
+          },
+          "variant": {
+            "description": "The variant the switch installs",
+            "enum": [
+              "bf16",
+              "int8"
+            ],
+            "title": "Variant",
+            "type": "string"
+          }
+        },
+        "required": [
+          "variant"
+        ],
+        "title": "TextEncoderSwitch",
         "type": "object"
       },
       "WorkerEvent": {
@@ -3805,9 +4262,20 @@
         "responses": {
           "200": {
             "content": {
-              "text/event-stream": {}
+              "text/event-stream": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/JobEvent"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SystemEvent"
+                    }
+                  ]
+                }
+              }
             },
-            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed."
+            "description": "Server-sent events. Each message has an `event:` line with the event's kind and a `data:` line with one JSON object: a JobEvent for the job event kinds (`state`, `progress`, `preview`, `log`), a SystemEvent for the other kinds (`engine`: engine provisioning, `model`: model install progress, installs, removals and evictions). Stored job events have an `id:` line (`<job_id>:<seq>`). A stream first replays the stored events after `Last-Event-ID`; with `job_id` and without `Last-Event-ID`, the job's whole history. Previews and system events have no id and are never replayed: after its replay a stream sends the latest preview of each running job it covers once, and system events only while it is open. With `job_id` the stream carries only that job's events and ends after its final state; only a stream without `job_id` carries system events. A comment line (`: keepalive`) follows after 15 s without an event."
           },
           "404": {
             "content": {
@@ -4099,6 +4567,91 @@
           }
         },
         "summary": "Add Host",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
+    "/api/v1/hosts/{host_id}": {
+      "patch": {
+        "description": "Change a host's settings. A new `text_encoder_variant` is switched in the background.\n\nChecks first and refuses with 409 while a job runs on the host or a model is being installed, and when the\nvariant's files do not fit on the drive of the model store. `GET /hosts` shows the switch as the host's\n`text_encoder_switch` while it runs or after it failed, and the new `text_encoder_variant` once it is done.",
+        "operationId": "updateHost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Unprocessable Entity"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Not Implemented"
+          }
+        },
+        "summary": "Update Host",
         "tags": [
           "hosts"
         ]
@@ -4560,6 +5113,7 @@
     },
     "/api/v1/models/{model_id}": {
       "delete": {
+        "description": "Remove installed quantizations; shared files stay while another installed model or a waiting job needs them.\n\nRefused with 409 while the quantization is being installed or a queued or running job needs it.",
         "operationId": "removeModel",
         "parameters": [
           {
@@ -4574,6 +5128,7 @@
             }
           },
           {
+            "description": "Quantization to remove; all when omitted",
             "in": "query",
             "name": "quant",
             "required": false,
@@ -4586,6 +5141,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Quantization to remove; all when omitted",
               "title": "Quant"
             }
           }
@@ -4604,6 +5160,17 @@
               "application/problem+json": {}
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -4701,6 +5268,7 @@
     },
     "/api/v1/models/{model_id}/install": {
       "post": {
+        "description": "Install a quantization with the shared files it needs, in the background.\n\nChecks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota\n(it may remove the least recently used models first), an install in progress, the licence's country exclusions.\nProgress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.",
         "operationId": "installModel",
         "parameters": [
           {
@@ -4715,6 +5283,7 @@
             }
           },
           {
+            "description": "Quantization to install (required)",
             "in": "query",
             "name": "quant",
             "required": false,
@@ -4727,6 +5296,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Quantization to install (required)",
               "title": "Quant"
             }
           }
@@ -4750,6 +5320,17 @@
               "application/problem+json": {}
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {

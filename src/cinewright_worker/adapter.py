@@ -39,6 +39,7 @@ class EngineJob:
     params: dict[str, Any]
     input_paths: tuple[str, ...] = ()  # local files the worker downloaded from the core
     output_dir: str = ""
+    capability: str = ""  # the WorkerJob's capability, e.g. "t2i" or "i2v"
 
 
 @dataclass
@@ -51,6 +52,9 @@ class EngineStatus:
     preview_path: str | None = None
     error_code: str | None = None  # "oom", "engine_failed", "cancelled", ...
     error_message: str | None = None
+    # Keys of the job's `params.extra` the adapter passed on to the engine as asked; None when it does not report them.
+    # The worker sends them with the completion, and the core records them in provenance.
+    accepted_extra: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +84,7 @@ class EngineAdapter(Protocol):
         """Registry-relevant models this engine can serve right now."""
 
     def prepare(self, engine_model: str, quant: str) -> None:
-        """Check that the model's files are present and load it; raise on failure."""
+        """Check that the files of the model in quantization `quant` are present; raise on failure."""
 
     def submit(self, job: EngineJob) -> str:
         """Start a job and return the engine's job id. Must not block until completion."""

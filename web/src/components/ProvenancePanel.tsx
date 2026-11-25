@@ -1,5 +1,6 @@
 // An asset's provenance record with sidecar JSON export (design/components/ProvenancePanel).
-// Field order follows the specification; missing values stay "–" so records remain comparable.
+// The design's fields come first in the specification's order; the rows after Parents are additions of this app.
+// Missing values stay "–" so records remain comparable.
 
 import { Download } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
@@ -12,6 +13,19 @@ interface Row {
   value: string;
   title?: string;
   hash?: boolean;
+}
+
+/** Resolution, frames, fps, steps and guidance the job requested (registry defaults filled in); null for inputs. */
+function parameters(params: Provenance['params']): string {
+  if (!params) return DASH;
+  const parts = [
+    params.resolution,
+    params.frames != null ? `${params.frames} frames` : null,
+    params.fps != null ? `${params.fps} fps` : null,
+    params.steps != null ? `${params.steps} steps` : null,
+    params.guidance != null ? `guidance ${params.guidance}` : null,
+  ];
+  return parts.filter(Boolean).join(' · ') || DASH;
 }
 
 function rows(p: Provenance): Row[] {
@@ -42,6 +56,7 @@ function rows(p: Provenance): Row[] {
       title: parents.map(fullHash).join('\n') || undefined,
       hash: parents.length > 0,
     },
+    { label: 'Parameters', value: parameters(p.params) },
     { label: 'Prompt', value: p.prompt ?? DASH, title: p.prompt ?? undefined },
     { label: 'Job', value: p.job_id ? truncateMiddle(p.job_id) : DASH, title: p.job_id ?? undefined },
     { label: 'Client', value: p.client ? [p.client.kind, p.client.agent].filter(Boolean).join(' · ') : DASH },

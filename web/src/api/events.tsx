@@ -1,7 +1,7 @@
 // One EventSource on /api/v1/events for the whole app. The core sends named events
 // (`event: state|progress|preview|log`) whose `data:` line is a JobEvent; the browser resends
 // Last-Event-ID on reconnect, so events can repeat and listeners must be idempotent.
-// System events (`event: engine`) carry a SystemEvent with the full new state; they have no id
+// System events (`event: engine|model`) carry a SystemEvent with the full new state; they have no id
 // and are never replayed, so views load the current state over the API, follow them, and load the
 // state again whenever the stream (re)opens (`useEventsConnected` turning true).
 
@@ -13,7 +13,7 @@ type Listener = (event: JobEvent) => void;
 type SystemListener = (event: SystemEvent) => void;
 
 const KINDS = { state: true, progress: true, preview: true, log: true } satisfies Record<EventKind, true>;
-const SYSTEM_KINDS = { engine: true } satisfies Record<SystemEventKind, true>;
+const SYSTEM_KINDS = { engine: true, model: true } satisfies Record<SystemEventKind, true>;
 const RECONNECT_MS = 5000;
 
 interface EventsContextValue {

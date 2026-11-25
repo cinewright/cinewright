@@ -38,14 +38,30 @@ def get_model(core: Core, model_id: str = ModelIdPath) -> ModelDetail:
     return core.get_model(model_id)
 
 
-@router.post("/models/{model_id}/install", status_code=202, tags=["registry"], operation_id="installModel")
-def install_model(core: Core, model_id: str = ModelIdPath, quant: str | None = Query(default=None)) -> Response:
+@router.post(
+    "/models/{model_id}/install", status_code=202, tags=["registry"], operation_id="installModel", responses={409: PROBLEM_RESPONSE}
+)
+def install_model(
+    core: Core, model_id: str = ModelIdPath, quant: str | None = Query(default=None, description="Quantization to install (required)")
+) -> Response:
+    """Install a quantization with the shared files it needs, in the background.
+
+    Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota
+    (it may remove the least recently used models first), an install in progress, the licence's country exclusions.
+    Progress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.
+    """
     core.install_model(model_id, quant)
     return Response(status_code=202)
 
 
-@router.delete("/models/{model_id}", status_code=204, tags=["registry"], operation_id="removeModel")
-def remove_model(core: Core, model_id: str = ModelIdPath, quant: str | None = Query(default=None)) -> Response:
+@router.delete("/models/{model_id}", status_code=204, tags=["registry"], operation_id="removeModel", responses={409: PROBLEM_RESPONSE})
+def remove_model(
+    core: Core, model_id: str = ModelIdPath, quant: str | None = Query(default=None, description="Quantization to remove; all when omitted")
+) -> Response:
+    """Remove installed quantizations; shared files stay while another installed model or a waiting job needs them.
+
+    Refused with 409 while the quantization is being installed or a queued or running job needs it.
+    """
     core.remove_model(model_id, quant)
     return Response(status_code=204)
 

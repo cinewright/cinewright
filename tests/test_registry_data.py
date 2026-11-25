@@ -8,9 +8,10 @@ from urllib.parse import urlparse
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import cinewright
-from cinewright.api.schemas import ModelDescriptor
+from cinewright.api.schemas import Limits, ModelDescriptor
 from cinewright.core.engines import load_engine_pins
 from cinewright.core.registry import Registry
 
@@ -81,6 +82,44 @@ def test_defaults_within_limits(path):
         assert limits.max_frames is not None and defaults["frames"] <= limits.max_frames
     if "fps" in defaults:
         assert defaults["fps"] in limits.fps
+
+
+FRAME_GRIDS = {  # Wan2GP frames_minimum and frames_steps at the pinned commit; None = no frames
+    "ltx-2.3-distilled-22b": (17, 8),
+    "wan-2.2-i2v-14b": (5, 4),
+    "wan-2.2-t2v-14b": (5, 4),
+    "z-image-turbo": None,
+}
+
+
+@pytest.mark.parametrize("model_id", sorted(FRAME_GRIDS))
+def test_mvp_frame_grids_match_wan2gp(model_id):
+    limits = descriptor(REGISTRY_DIR / "models" / f"{model_id}.yaml").limits
+    grid = FRAME_GRIDS[model_id]
+    assert (limits.min_frames, limits.frames_step) == (grid or (None, None))
+    if grid is None:
+        assert limits.max_frames is None and limits.fps == []
+
+
+@pytest.mark.parametrize("grid", [{"min_frames": 5}, {"frames_step": 4}, {"min_frames": 5, "frames_step": 0}])
+def test_frame_grid_needs_both_fields_and_a_positive_step(grid):
+    with pytest.raises(ValidationError):
+        Limits.model_validate(grid)
+
+
+@pytest.mark.parametrize("path", MODEL_FILES, ids=lambda path: path.stem)
+def test_default_and_max_frames_lie_on_the_frame_grid(path):
+    model = descriptor(path)
+    limits = model.limits
+    if limits.min_frames is None:
+        assert "frames" not in model.defaults
+        return
+    # A default frame count means every clip job has one the router checked: the Wan2GP adapter lets the job's frames
+    # win over `params.extra` (`video_length`) and over `duration_s`, which would let Wan2GP pick the count.
+    assert "frames" in model.defaults
+    for frames in (limits.max_frames, model.defaults["frames"]):
+        assert frames is not None and frames >= limits.min_frames
+        assert (frames - limits.min_frames) % limits.frames_step == 0, frames
 
 
 def test_engine_pin():

@@ -1,7 +1,9 @@
 """Shared fixtures: a temp data directory, a test registry, a fake clock and hardware, a core and a client.
 
 Every test runs with `CINEWRIGHT_HOME` pointing at a temp directory. API tests use the client's
-base URL `http://127.0.0.1:8737`, because the core refuses any other `Host`.
+base URL `http://127.0.0.1:8737`, because the core refuses any other `Host`. The router routes only
+installed quantizations, so the test core has `test-image` `bf16` installed (`mark_installed`), the
+quantization the test workers serve.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -31,6 +34,7 @@ from cinewright.api.schemas import (
 from cinewright.app import create_app
 from cinewright.config import Config
 from cinewright.core.assets import StagedBlob
+from cinewright.core.clock import to_iso
 from cinewright.core.core import Core
 from cinewright.core.registry import Registry
 
@@ -96,6 +100,7 @@ TEST_VIDEO: dict[str, Any] = {
 }
 
 TEST_MODELS = [ModelDescriptor.model_validate(TEST_IMAGE), ModelDescriptor.model_validate(TEST_VIDEO)]
+TEST_INSTALLED = (("test-image", "bf16"),)  # installed in the test core: the quantization of `test_image`
 
 
 class FakeClock:
@@ -141,6 +146,18 @@ def assert_problem(response: Any, status: int, problem_type: str | None = None) 
     if problem_type is not None:
         assert problem.type == problem_type
     return problem
+
+
+def mark_installed(core: Core, *keys: tuple[str, str]) -> None:
+    """Record (model id, quantization) pairs as installed in the core's model store, as a completed install leaves
+    them, without files. The router routes only installed quantizations."""
+    now = to_iso(core.clock())
+    with core.db.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO installed_models (model_id, quant, state, installed_at) VALUES (?, ?, 'installed', ?) "
+            "ON CONFLICT (model_id, quant) DO UPDATE SET state = 'installed', error = NULL",
+            [(model_id, quant, now) for model_id, quant in keys],
+        )
 
 
 def stage(core: Core, data: bytes) -> StagedBlob:
@@ -217,9 +234,17 @@ def config(home: Path) -> Config:
     return Config(home=home)
 
 
+def no_network(request: httpx.Request) -> httpx.Response:
+    """The download transport of test cores: model installs never reach the network."""
+    return httpx.Response(404)
+
+
 @pytest.fixture
 def core(config: Config, registry_dir: Path, clock: FakeClock) -> Core:
-    instance = Core(config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock)
+    instance = Core(
+        config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock, download_transport=httpx.MockTransport(no_network)
+    )
+    mark_installed(instance, *TEST_INSTALLED)
     yield instance
     instance.close()
 
