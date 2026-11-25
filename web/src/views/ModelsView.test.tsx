@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { Host, ModelInstall, ModelStoreUsage, ModelSummary, Schemas } from '../api/client';
 import { EventsProvider } from '../api/events';
-import { ProblemAnswer, stubApi } from '../test/api';
+import { ProblemAnswer, callSummary, stubApi } from '../test/api';
 import { stubEventSource } from '../test/events';
 import { ModelsView } from './ModelsView';
 
@@ -144,7 +144,7 @@ describe('ModelsView', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
     const bar = await within(card('Z-Image Turbo 6B int8')).findByRole('progressbar', { name: 'Downloading Z-Image Turbo 6B int8' });
-    expect(calls.filter((call) => call.method === 'POST')).toStrictEqual([
+    expect(calls.filter((call) => call.method === 'POST').map(callSummary)).toStrictEqual([
       { method: 'POST', path: '/api/v1/models/z-image-turbo/install', query: { quant: 'int8' }, body: undefined },
     ]);
     // Waiting: indeterminate, so no value that reads as 0 %.
@@ -256,7 +256,7 @@ describe('ModelsView', () => {
         return null;
       },
     });
-    const deletes = () => calls.filter((call) => call.method === 'DELETE');
+    const deletes = () => calls.filter((call) => call.method === 'DELETE').map(callSummary);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Remove Wan 2.2 Text-to-Video 14B int8' }));
     let dialog = screen.getByRole('dialog', { name: 'Remove Wan 2.2 Text-to-Video 14B int8?' });
@@ -294,7 +294,7 @@ describe('ModelsView', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Switch to bf16' }));
 
     await within(panel).findByRole('button', { name: 'Switching to bf16' });
-    expect(calls.filter((call) => call.method === 'PATCH')).toStrictEqual([
+    expect(calls.filter((call) => call.method === 'PATCH').map(callSummary)).toStrictEqual([
       { method: 'PATCH', path: '/api/v1/hosts/local', query: {}, body: { text_encoder_variant: 'bf16' } },
     ]);
     expect(screen.getByRole('status').textContent).toBe('Switching the text encoder to bf16.');

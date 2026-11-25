@@ -34,11 +34,10 @@ from cinewright.api.schemas import (
     Route,
 )
 from cinewright.core.clock import from_iso, to_iso
-from cinewright.core.router import strictest
+from cinewright.core.router import IMAGE_CAPABILITIES, strictest
 from cinewright.paths import DataPaths
 
 UPLOAD_PREFIX = ".upload-"  # temporary files of uploads in progress, directly in the asset directory
-IMAGE_CAPABILITIES = frozenset({Capability.T2I, Capability.I2I})  # jobs that return a still image: no frames, no fps
 
 
 @dataclass(frozen=True)
@@ -167,7 +166,7 @@ def input_provenance(sha256: str, media_type: str, size_bytes: int, created_at: 
 
 def provenance_params(params: JobParams, capability: Capability, accepted_extra: Sequence[str] | None) -> ProvenanceParams:
     """The parameters a job requested, from its effective parameters (`router.effective_params`); the engine may still
-    adjust them (a distilled model's fixed steps, a frame count fitted to the model).
+    adjust them (a distilled model's fixed steps). The router routes a clip only with a frame count on the model's grid.
 
     An image job records no frames or fps: the registry defaults of video models fill them, but the engine renders
     one still image. Of `params.extra` only the keys the worker reports as passed on count; None when it reports none.

@@ -19,6 +19,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 
 import { EventsProvider } from './api/events';
 import { AboutDialog } from './components/AboutDialog';
+import { hashSegments } from './lib/route';
 import { THEME_CHOICES, applyTheme, readTheme, storeTheme, type ThemeChoice } from './lib/theme';
 import { GenerateView } from './views/GenerateView';
 import { HostsView } from './views/HostsView';
@@ -51,7 +52,7 @@ const ROUTES: Route[] = [
 const DEFAULT_ROUTE = ROUTES[0] as Route;
 
 function routeFromHash(): Route {
-  const id = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
+  const id = hashSegments()[0];
   return ROUTES.find((route) => route.id === id) ?? DEFAULT_ROUTE;
 }
 

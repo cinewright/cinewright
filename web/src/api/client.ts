@@ -10,6 +10,7 @@ export type Asset = Schemas['Asset'];
 export type CalibrationResult = Schemas['CalibrationResult'];
 export type CalibrationStatus = Schemas['CalibrationStatus'];
 export type Capability = Schemas['Capability'];
+export type CapabilityEntry = Schemas['CapabilityEntry'];
 export type DataClass = Schemas['DataClass'];
 export type EngineInfo = Schemas['EngineInfo'];
 export type Estimate = Schemas['Estimate'];
@@ -17,48 +18,26 @@ export type HardwareProfile = Schemas['HardwareProfile'];
 export type Host = Schemas['Host'];
 export type HostPatch = Schemas['HostPatch'];
 export type Job = Schemas['Job'];
+export type JobError = Schemas['JobError'];
 export type JobRequest = Schemas['JobRequest'];
 export type JobState = Schemas['JobState'];
+export type Limits = Schemas['Limits'];
 export type ModelStoreUsage = Schemas['ModelStoreUsage'];
 export type ModelSummary = Schemas['ModelSummary'];
 export type Priority = Schemas['Priority'];
+export type Progress = Schemas['Progress'];
 export type Provenance = Schemas['Provenance'];
 export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
 export type WorkerHealth = Schemas['WorkerHealth'];
 
-// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind,
-// ModelInstall and SystemEvent in api/schemas.py.
-export type EventKind = 'state' | 'progress' | 'preview' | 'log';
-export interface JobEvent {
-  job_id: string;
-  seq: number;
-  kind: EventKind;
-  data: Record<string, unknown>;
-  created_at: string;
-}
-/** Non-job events: sent without an id and never replayed. */
-export type SystemEventKind = 'engine' | 'model';
-/** A model quantization's new install state: download progress, the end of an install, or a removal. */
-export interface ModelInstall {
-  model_id: string;
-  quant: string;
-  install_state: Schemas['InstallState'];
-  /** While `downloading`: share of the bytes this install downloads. */
-  progress?: Schemas['Progress'] | null;
-  downloaded_bytes?: number | null;
-  total_bytes?: number | null;
-  /** Why the install failed (`failed`). */
-  error?: Schemas['SetupError'] | null;
-}
-export interface SystemEvent {
-  kind: SystemEventKind;
-  /** For `engine`: the engine as GET /system reports it. */
-  engine?: EngineInfo | null;
-  /** For `model`: the quantization's new install state. */
-  model?: ModelInstall | null;
-  created_at: string;
-}
+// The SSE payloads of GET /events, as openapi.json describes the text/event-stream response: a job event
+// (`state|progress|preview|log`, with an id unless it is a preview) or a system event (`engine|model`, no id).
+export type EventKind = Schemas['EventKind'];
+export type JobEvent = Schemas['JobEvent'];
+export type SystemEventKind = Schemas['SystemEventKind'];
+export type ModelInstall = Schemas['ModelInstall'];
+export type SystemEvent = Schemas['SystemEvent'];
 
 type Problem = Schemas['Problem'] & Record<string, unknown>;
 
@@ -120,7 +99,10 @@ export function apiUrl(path: ApiPath, params: Record<string, string> = {}, query
 interface RequestOptions {
   params?: Record<string, string>;
   query?: Record<string, string | undefined>;
+  /** Sent as JSON. */
   body?: unknown;
+  /** Sent as the raw body, with `mediaType` as its Content-Type (uploads; the core refuses multipart). */
+  file?: { data: Blob; mediaType: string };
   signal?: AbortSignal;
 }
 
@@ -139,8 +121,11 @@ async function toApiError(response: Response): Promise<ApiError> {
 
 async function request<T>(method: string, path: ApiPath, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
-  let body: string | undefined;
-  if (options.body !== undefined) {
+  let body: string | Blob | undefined;
+  if (options.file !== undefined) {
+    headers['Content-Type'] = options.file.mediaType;
+    body = options.file.data;
+  } else if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(options.body);
   }
@@ -156,6 +141,26 @@ async function request<T>(method: string, path: ApiPath, options: RequestOptions
   // A 202 without a body (installModel, updateHost) may come without a content-length.
   const text = await response.text();
   return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/** Image types an input upload may have: the image types of the core's allow-list (UPLOAD_MEDIA_TYPES in api/deps.py). */
+export const UPLOAD_IMAGE_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/webp'];
+const IMAGE_FORMATS = 'PNG, JPEG or WebP';
+
+/** Why `file` is not uploaded as an image, or null. Browsers leave `File.type` empty for a type they do not know. */
+export function imageTypeProblem(file: File): string | null {
+  if (!file.type) return `${file.name} has no known image type, so it is not uploaded; choose a ${IMAGE_FORMATS} image.`;
+  if (!UPLOAD_IMAGE_TYPES.includes(file.type)) return `${file.name} is ${file.type}, so it is not uploaded; choose a ${IMAGE_FORMATS} image.`;
+  return null;
+}
+
+/** Readable refusals of an upload. The core itself answers 422 with a detail of its own (type, size, empty body). */
+function uploadError(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error;
+  if (error.status === 413) return new ApiError(413, 'Too large', 'The image is too large for the core, so it was not uploaded.', error.type, error.problem);
+  if (error.status === 415)
+    return new ApiError(415, 'Unsupported media type', `The core refused the file type, so the image was not uploaded; choose a ${IMAGE_FORMATS} image.`, error.type, error.problem);
+  return error;
 }
 
 const PAGE = '50';
@@ -190,11 +195,28 @@ export const api = {
 
   assets: (cursor?: string, signal?: AbortSignal) =>
     request<Schemas['AssetList']>('GET', '/api/v1/assets', { query: { cursor, limit: PAGE }, signal }),
+  /** One asset; `sha256` must already be checked as 64 lowercase hex characters. */
+  asset: (sha256: string, signal?: AbortSignal) => request<Asset>('GET', '/api/v1/assets/{sha256}', { params: { sha256 }, signal }),
+  /** Uploads an input image as the raw body with its media type; a type outside UPLOAD_IMAGE_TYPES is refused before sending. */
+  uploadImage: async (file: File, dataClass: DataClass): Promise<Asset> => {
+    const problem = imageTypeProblem(file);
+    if (problem) throw new Error(problem);
+    try {
+      return await request<Asset>('POST', '/api/v1/assets', { query: { data_class: dataClass }, file: { data: file, mediaType: file.type } });
+    } catch (error) {
+      throw uploadError(error);
+    }
+  },
 
   hosts: (signal?: AbortSignal) => request<Schemas['HostList']>('GET', '/api/v1/hosts', { signal }),
   /** A new text encoder variant is switched in the background (202); GET /hosts shows it once the switch is done. */
   updateHost: (hostId: string, patch: HostPatch) => request<void>('PATCH', '/api/v1/hosts/{host_id}', { params: { host_id: hostId }, body: patch }),
 };
+
+/** An asset id as the API writes it: 64 lowercase hex characters. Check data from links and events before building a path. */
+export function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
 
 export const assetContentUrl = (sha256: string) => apiUrl('/api/v1/assets/{sha256}/content', { sha256 });
 export const assetProvenanceUrl = (sha256: string) => apiUrl('/api/v1/assets/{sha256}/provenance', { sha256 });

@@ -5,9 +5,10 @@ Pure functions over snapshots the core passes in. Check order for every candidat
 
 1. policy: the host accepts the job's data class (biometric data never leaves local hosts), and
    the model licence has no geo exclusion for the configured country (`EU` covers EU members)
-2. feasibility: capability, pinned quantization, model limits, the quantization installed on the
-   host (only for hosts whose installed quantizations the core passes in: the local model store),
-   an online worker on the host that serves the engine model, calibration not `wont_run`
+2. feasibility: capability, pinned quantization, model limits (resolution; for a clip also frames, on the
+   model's grid, fps and duration, which a still image skips), the quantization installed on the host (only
+   for hosts whose installed quantizations the core passes in: the local model store), an online worker on
+   the host that serves the engine model, calibration not `wont_run`
 3. cost: local hosts cost 0 EUR; other hosts have no price yet, so their cost is unknown
 4. runtime: `seconds_per_step * steps` when calibrated, else unknown
 
@@ -25,6 +26,7 @@ from typing import Any
 from cinewright.api.schemas import (
     CalibrationResult,
     CalibrationStatus,
+    Capability,
     DataClass,
     HostKind,
     JobParams,
@@ -37,6 +39,9 @@ from cinewright.api.schemas import (
 EU_COUNTRIES = frozenset("AT BE BG CY CZ DE DK EE ES FI FR GR HR HU IE IT LT LU LV MT NL PL PT RO SE SI SK".split())
 _DATA_CLASS_RANK = {DataClass.PUBLIC: 0, DataClass.PRIVATE: 1, DataClass.BIOMETRIC: 2}
 _STATUS_RANK = {CalibrationStatus.RUNS: 0, CalibrationStatus.SLOW: 1, None: 2}
+# Jobs that return one still image. Wan2GP's image mode renders the model's shortest clip and keeps its first frame, so
+# frames, fps and duration do not apply: neither the limit checks nor provenance (`core/assets.py`) use them.
+IMAGE_CAPABILITIES = frozenset({Capability.T2I, Capability.I2I})
 
 
 @dataclass(frozen=True)
@@ -99,17 +104,37 @@ def effective_params(request: JobRequest, model: ModelDescriptor, seed: int | No
     return JobParams.model_validate({**params, "extra": extra})
 
 
-def _limit_problem(params: JobParams, model: ModelDescriptor) -> str | None:
+def _limit_problem(params: JobParams, model: ModelDescriptor, capability: Capability) -> str | None:
     limits = model.limits
     if params.resolution and limits.resolutions and params.resolution not in limits.resolutions:
         return f"{model.id} does not support {params.resolution} (supported: {', '.join(limits.resolutions)})"
+    if capability in IMAGE_CAPABILITIES:  # the engine ignores frames, fps and duration for a still image
+        return None
     if params.frames and limits.max_frames and params.frames > limits.max_frames:
         return f"{model.id} renders at most {limits.max_frames} frames, {params.frames} requested"
+    if params.frames:
+        problem = _frame_grid_problem(params.frames, model)
+        if problem:
+            return problem
     if params.fps and limits.fps and params.fps not in limits.fps:
         return f"{model.id} does not support {params.fps} fps"
     if params.duration_s and limits.max_duration_s and params.duration_s > limits.max_duration_s:
         return f"{model.id} renders at most {limits.max_duration_s:g} s, {params.duration_s:g} s requested"
     return None
+
+
+def _frame_grid_problem(frames: int, model: ModelDescriptor) -> str | None:
+    """Why a clip of `frames` frames is off the model's grid (`min_frames + n * frames_step`); None when it is on it."""
+    first, step = model.limits.min_frames, model.limits.frames_step
+    if first is None or step is None:
+        return None
+    if frames < first:
+        return f"{model.id} renders at least {first} frames, {frames} requested"
+    if (frames - first) % step == 0:
+        return None
+    lower = frames - (frames - first) % step
+    nearest = [lower, lower + step] if model.limits.max_frames is None or lower + step <= model.limits.max_frames else [lower]
+    return f"{model.id} renders {first} + a multiple of {step} frames, {frames} requested (nearest: {' or '.join(str(n) for n in nearest)})"
 
 
 def _calibration(
@@ -189,7 +214,7 @@ def plan(
             reasons.append(f"feasibility: {model.id} has no quantization {request.quant}")
             continue
         params = effective_params(request, model)
-        problem = _limit_problem(params, model)
+        problem = _limit_problem(params, model, request.capability)
         if problem:
             reasons.append(f"feasibility: {problem}")
             continue

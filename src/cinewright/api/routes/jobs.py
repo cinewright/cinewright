@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any, get_args
 
 from fastapi import APIRouter, Header, Query, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 
 from cinewright.api.deps import Core
 from cinewright.api.problems import PROBLEM_RESPONSE
-from cinewright.api.schemas import ClientKind, Estimate, EventKind, Job, JobEvent, JobList, JobRequest, JobState, SystemEvent
+from cinewright.api.schemas import (
+    API_VERSION,
+    ClientKind,
+    Estimate,
+    EventKind,
+    Job,
+    JobEvent,
+    JobList,
+    JobRequest,
+    JobState,
+    SystemEvent,
+)
 
 router = APIRouter(tags=["jobs"], responses={404: PROBLEM_RESPONSE, 409: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501: PROBLEM_RESPONSE})
 
@@ -18,6 +32,34 @@ SSE_KEEPALIVE_SECONDS = 15
 CLIENT_HEADER = "X-Cinewright-Client"
 AGENT_HEADER = "X-Cinewright-Agent"
 AGENT_PATTERN = r"^[A-Za-z0-9 ._-]{1,64}$"
+# The `data:` object of one SSE message; `stream_event_schemas` registers both models as OpenAPI components.
+StreamEvent = JobEvent | SystemEvent
+STREAM_DESCRIPTION = (
+    "Server-sent events. Each message has an `event:` line with the event's kind and a `data:` line with one JSON "
+    "object: a JobEvent for the job event kinds (`state`, `progress`, `preview`, `log`), a SystemEvent for the other "
+    "kinds (`engine`: engine provisioning, `model`: model install progress, installs, removals and evictions). "
+    "Stored job events have an `id:` line (`<job_id>:<seq>`). A stream first replays the stored events after "
+    "`Last-Event-ID`; with `job_id` and without `Last-Event-ID`, the job's whole history. Previews and system events "
+    "have no id and are never replayed: after its replay a stream sends the latest preview of each running job it "
+    "covers once, and system events only while it is open. With `job_id` the stream carries only that job's events "
+    "and ends after its final state; only a stream without `job_id` carries system events. A comment line "
+    "(`: keepalive`) follows after 15 s without an event."
+)
+
+
+def stream_event_schemas() -> dict[str, Any]:
+    """OpenAPI component schemas of the stream's `data:` objects and of every schema they refer to.
+
+    FastAPI registers a model as a component only when a route takes or returns it as JSON, and naming it as the 200
+    response model would describe the stream as `application/json`. So the schemas come from a throwaway document of
+    one route that returns them, which FastAPI renders like every other component; the route is never served.
+    """
+    route = APIRoute("/", _schema_only, response_model=StreamEvent)
+    return get_openapi(title="stream events", version=API_VERSION, routes=[route])["components"]["schemas"]
+
+
+def _schema_only() -> None:
+    """Endpoint of the throwaway route in `stream_event_schemas`; never served."""
 
 
 def sse_frame(event: JobEvent | SystemEvent) -> bytes:
@@ -76,10 +118,12 @@ def cancel_job(job_id: str, core: Core) -> Job:
     response_class=StreamingResponse,
     responses={
         200: {
-            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` "
-            "(engine provisioning) and `model` (model install progress, installs and removals) carry a SystemEvent, "
-            "without an id and never replayed.",
-            "content": {"text/event-stream": {}},
+            "description": STREAM_DESCRIPTION,
+            "content": {
+                "text/event-stream": {
+                    "schema": {"oneOf": [{"$ref": f"#/components/schemas/{model.__name__}"} for model in get_args(StreamEvent)]}
+                }
+            },
         }
     },
 )

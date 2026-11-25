@@ -1,6 +1,6 @@
 # Cinewright web UI
 
-React 18 + TypeScript + Vite. `npm run build` writes the UI to `../src/cinewright/web_dist/`, which the core serves at `/`. Routing uses the URL hash (`#/queue`), so the server needs no history fallback.
+React 18 + TypeScript + Vite. `npm run build` writes the UI to `../src/cinewright/web_dist/`, which the core serves at `/`. Routing uses the URL hash (`#/queue`), so the server needs no history fallback. `#/library/<sha256>` opens the Library with that asset selected.
 
 | Script | Does |
 | --- | --- |
@@ -14,6 +14,6 @@ React 18 + TypeScript + Vite. `npm run build` writes the UI to `../src/cinewrigh
 
 Generated files are committed: `src/styles/tokens.css`, `src/styles/components.css`, `src/api/schema.d.ts` and `public/logos/`. Change the design system or the API contract, then run the matching script.
 
-Component tests sit next to the code they test (`src/**/*.test.tsx`). They run in jsdom with Vitest and Testing Library and import the test APIs from `vitest`. The type check covers them like the rest of `src`. `src/test/` holds the setup and `stubApi`, which stubs `fetch` with fixed answers per route and records each request.
+Component tests sit next to the code they test (`src/**/*.test.tsx`). They run in jsdom with Vitest and Testing Library and import the test APIs from `vitest`. The type check covers them like the rest of `src`. `src/test/` holds the setup, `stubApi`, which stubs `fetch` with fixed answers per route and records each request with its headers and body, and `stubEventSource`, an event stream the test opens and feeds by hand.
 
 Fonts (Geist, Geist Mono) come from the `@fontsource-variable` packages and are registered in `src/styles/fonts.css` under the names the tokens use; the UI makes no third-party requests.
