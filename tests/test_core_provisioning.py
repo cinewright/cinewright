@@ -21,6 +21,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -400,7 +401,8 @@ def test_an_archive_with_the_wrong_hash_is_refused(setup):
     status = finish(provisioner)
     assert status.state == "failed"
     assert (status.error.code, status.error.action) == ("hash_mismatch", "retry")
-    assert "WanGP" in status.error.message and "github.com" in status.error.message
+    assert "WanGP" in status.error.message
+    assert f" from {urlsplit(ARCHIVE_URL).hostname} did not match" in status.error.message  # names the host it came from
     assert setup.events[-1] == status
     assert list((setup.engine_dir / "downloads").iterdir()) == []  # the bytes were deleted
     assert not setup.root.exists() and not (setup.engine_dir / "provisioning.json").exists()
