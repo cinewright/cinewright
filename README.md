@@ -5,7 +5,7 @@
 
 Cinewright is a platform for generating images, video and audio on your own computer with open-weight models. A local core decides which model, quantization and computer runs a job. Workers run the generation engines; the first engine is WanGP (Wan2GP). You use Cinewright in your browser, and AI agents can use it through its MCP server. Cinewright is free software under the MIT licence.
 
-> **Status: scaffold.** Cinewright cannot generate real images or videos yet. This build sets up the contracts, the structure and a walking skeleton that runs jobs on a mock engine. Real generation arrives with phase 1.
+> **Status: phase 1 in progress.** Models can be installed and jobs run on WanGP, but generation has not been checked on real hardware yet. The walking skeleton still runs jobs on a mock engine for tests and the tutorial below.
 
 ## What works now
 
@@ -162,9 +162,9 @@ While Cinewright runs, with at least one model installed:
 4. For `i2v` and `i2i`, use **Choose image** to pick a PNG, JPEG or WebP file. Cinewright uploads it right away, with the selected data class, and shows a small preview. If you choose a stricter data class afterwards, Cinewright uploads the image again, so the Library keeps it under the stricter class. A looser class never loosens the stored one. **Replace image** and **Remove image** change the image. The uploaded image also appears in the Library.
 5. Set **Resolution**, **Frames** and **Frame rate**, or leave them at **Model default** (an empty **Frames** field). They offer what the model can render: the pinned model, or the model the estimate names, and stay disabled until one of them is known. A frame count off the model's frame grid moves to the nearest valid count when you leave the field. For example, LTX-2 2.3 Distilled renders 17, 25, 33 and so on, so 30 becomes 33. Still images (`t2i`, `i2i`) have no frames or frame rate. Changing the capability, or removing the pinned model before the router has picked one, sets all three back to the model defaults.
 6. Choose **Generate**. While something is missing, the button says what, for example **Add a start image**.
-7. The Job panel shows the progress and the latest preview frame. If the job fails, the panel shows the full cause. When the job is done, choose **Open in Library**. The Library opens with the result selected and shows its provenance: model, seed and parameters (resolution, frames, fps, steps).
+7. The Job panel shows the progress and the latest preview frame. If the job fails, the panel shows the full cause. When the job is done, choose **Open in Library**. The Library opens with the result selected and shows its provenance: model, seed and parameters (resolution, frames, fps, steps, guidance). A still image shows no frames or fps.
 
-If a change makes the router pick another model, for example a different data class, the fields switch to that model's choices. A resolution or frame rate it does not offer goes back to the model default, and the frame count moves to its grid. Any link of the form `http://127.0.0.1:8737/#/library/<sha256>` opens the Library with that asset selected.
+If a change makes the router pick another model, for example a different data class, the fields switch to that model's choices. A resolution or frame rate it does not offer goes back to the model default, and the frame count moves to its grid. Any link of the form `http://127.0.0.1:8737/#/library/<sha256>` opens the Library with that asset selected. Selecting another asset changes the address to that asset's link, so you can copy it.
 
 ### Switch the text encoder variant
 
@@ -306,7 +306,7 @@ The core keeps one long-running worker on your computer, so WanGP's models stay 
 
 ### Routing
 
-For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a quantization installed on your computer, a registered worker for the engine model, and calibration. The limits come from the model's registry entry, also in `GET /api/v1/capabilities`: resolutions, frames, fps and duration. A clip's frame count must lie on the model's frame grid, `min_frames + n * frames_step`: 17, 25, 33 and so on for LTX-2 2.3 Distilled, 5, 9, 13 and so on for Wan 2.2. The estimate names the nearest valid counts. Text-to-image and image-to-image jobs are not checked against the grid, because they make one still image. Then come cost (local jobs cost €0.00) and runtime. When several routes remain, the cheapest wins; among equally cheap ones, a model the registry prefers comes first (Z-Image Turbo for text-to-image, as a model made for images), then calibration, runtime and registry order. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
+For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a quantization installed on your computer, a registered worker for the engine model, and calibration. The limits come from the model's registry entry, also in `GET /api/v1/capabilities`: resolutions, frames, fps and duration. A clip's frame count must lie on the model's frame grid, `min_frames + n * frames_step`: 17, 25, 33 and so on for LTX-2 2.3 Distilled, 5, 9, 13 and so on for Wan 2.2. The estimate names the nearest valid counts. Text-to-image and image-to-image jobs are checked only against the resolutions: they make one still image, so their frames, fps and duration do not apply (see [Images from video models](#images-from-video-models)). Then come cost (local jobs cost €0.00) and runtime. When several routes remain, the cheapest wins; among equally cheap ones, a model the registry prefers comes first (Z-Image Turbo for text-to-image, as a model made for images), then calibration, runtime and registry order. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
 
 ### Local only
 
@@ -322,7 +322,7 @@ Every output asset has a provenance record: prompt, seed, the requested paramete
 
 ### Images from video models
 
-LTX-2 2.3 Distilled and Wan 2.2 Text-to-Video can also make still images. For a text-to-image or image-to-image job on them, the worker switches WanGP to its image mode. WanGP then renders the shortest clip the model can make and keeps its first frame, so the job's frames, fps and duration do not apply, and provenance records no frames or fps. The image comes back as a JPEG, WanGP's default image format.
+LTX-2 2.3 Distilled and Wan 2.2 Text-to-Video can also make still images. For a text-to-image or image-to-image job on them, the worker switches WanGP to its image mode. WanGP then renders the shortest clip the model can make and keeps its first frame, so the job's frames, fps and duration do not apply: the router does not check them against the model's limits, and provenance records no frames or fps. The image comes back as a JPEG, WanGP's default image format.
 
 An image-to-image job on LTX-2 hands its image to WanGP as the control image, the input WanGP's image mode offers for this model. The model setting `denoising_strength` (in `params.extra`, default 1.0) sets how strongly the image steers the result. A text-to-image job takes no input image; an image-to-image job takes exactly one.
 

@@ -1,5 +1,6 @@
 // Library: asset grid with media previews and the provenance panel of the selected asset.
-// `#/library/<sha256>` opens it with that asset selected, loaded by itself when it is not on the first page.
+// The hash is the selection: `#/library/<sha256>` opens it with that asset selected, loaded by itself when it is not on
+// the first page, and selecting a card replaces the hash, so links and clicks take one path.
 
 import { AudioLines, File } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
@@ -11,7 +12,7 @@ import { EmptyState, ErrorBanner, RetryButton } from '../components/Feedback';
 import { Hash } from '../components/Hash';
 import { ProvenancePanel } from '../components/ProvenancePanel';
 import { formatBytes, formatTimestamp } from '../lib/format';
-import { useHashSegments } from '../lib/route';
+import { replaceHash, useHashSegments } from '../lib/route';
 import { useApi } from '../lib/useApi';
 
 const REFRESH_DELAY_MS = 1000;
@@ -40,16 +41,21 @@ function linkedAsset(segments: string[]): string | null {
   return isSha256(value) ? value : 'invalid';
 }
 
+/** Select an asset, or none, by replacing the hash; the hash change selects it. */
+function select(sha256: string | null): void {
+  replaceHash(sha256 ? `#/library/${sha256}` : '#/library');
+}
+
 export function LibraryView() {
   const link = linkedAsset(useHashSegments());
-  const linkedSha = link === 'invalid' ? null : link;
+  const selected = link === 'invalid' ? null : link;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(linkedSha);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<unknown>();
-  const [linkLoading, setLinkLoading] = useState(false);
-  const [linkError, setLinkError] = useState<unknown>();
+  // The asset being loaded by itself, and the failed load; each counts only while that asset is selected.
+  const [linkLoading, setLinkLoading] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<{ sha256: string; error: unknown }>();
   const requestedLink = useRef<string | null>(null);
   const refreshTimer = useRef<number>();
 
@@ -67,24 +73,26 @@ export function LibraryView() {
     refreshTimer.current = window.setTimeout(list.reload, REFRESH_DELAY_MS);
   });
 
-  // A link selects its asset; one that is not on the first page is loaded by itself (identical bytes keep their
-  // first, older record, so a new job's output can sit further down the list).
+  // A selected asset that is not on the first page is loaded by itself (identical bytes keep their first, older
+  // record, so a new job's output can sit further down the list). Once per selection: a new list page does not load
+  // it again, but selecting it anew, for example by following the same link after another card, does.
   useEffect(() => {
-    setLinkError(undefined);
-    if (linkedSha) setSelected(linkedSha);
-  }, [linkedSha]);
+    requestedLink.current = null;
+  }, [selected]);
 
   useEffect(() => {
-    if (!linkedSha || !list.data || requestedLink.current === linkedSha) return;
-    if (assets.some((item) => item.sha256 === linkedSha)) return;
-    requestedLink.current = linkedSha;
-    setLinkLoading(true);
+    if (!selected || !list.data || requestedLink.current === selected) return;
+    if (assets.some((item) => item.sha256 === selected)) return;
+    const sha256 = selected;
+    requestedLink.current = sha256;
+    setLinkLoading(sha256);
+    setLinkError(undefined);
     api
-      .asset(linkedSha)
+      .asset(sha256)
       .then((item) => setAssets((current) => merge(current, [item])))
-      .catch(setLinkError)
-      .finally(() => setLinkLoading(false));
-  }, [linkedSha, list.data]);
+      .catch((error: unknown) => setLinkError({ sha256, error }))
+      .finally(() => setLinkLoading((current) => (current === sha256 ? null : current)));
+  }, [selected, list.data]);
 
   const loadMore = () => {
     if (!cursor) return;
@@ -113,9 +121,9 @@ export function LibraryView() {
       {link === 'invalid' ? (
         <ErrorBanner title="Could not open the linked asset" error="The link names no asset; an asset id is 64 lowercase hex characters." />
       ) : null}
-      {linkError ? <ErrorBanner title="Could not open the linked asset" error={linkError} /> : null}
+      {linkError && linkError.sha256 === selected ? <ErrorBanner title="Could not open the linked asset" error={linkError.error} /> : null}
 
-      {!list.loading && !list.error && !linkLoading && assets.length === 0 ? (
+      {!list.loading && !list.error && linkLoading === null && assets.length === 0 ? (
         <EmptyState title="No assets yet">
           <p>Finished jobs store their outputs here, each with its provenance record.</p>
         </EmptyState>
@@ -131,7 +139,7 @@ export function LibraryView() {
                   type="button"
                   className="asset"
                   aria-pressed={item.sha256 === selected}
-                  onClick={() => setSelected(item.sha256 === selected ? null : item.sha256)}
+                  onClick={() => select(item.sha256 === selected ? null : item.sha256)}
                 >
                   <span className="asset__frame">
                     <Media asset={item} controls={false} />
@@ -168,7 +176,7 @@ export function LibraryView() {
                   </div>
                 </ProvenancePanel>
               </div>
-            ) : linkLoading ? (
+            ) : linkLoading !== null && linkLoading === selected ? (
               <p className="cw-muted">Loading the linked asset</p>
             ) : (
               <p className="cw-muted">Select an asset to see its provenance.</p>

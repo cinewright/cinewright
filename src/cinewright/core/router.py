@@ -5,10 +5,10 @@ Pure functions over snapshots the core passes in. Check order for every candidat
 
 1. policy: the host accepts the job's data class (biometric data never leaves local hosts), and
    the model licence has no geo exclusion for the configured country (`EU` covers EU members)
-2. feasibility: capability, pinned quantization, model limits (for every capability but a still image,
-   a frame count on the model's grid), the quantization installed on the host (only for hosts whose
-   installed quantizations the core passes in: the local model store), an online worker on the host
-   that serves the engine model, calibration not `wont_run`
+2. feasibility: capability, pinned quantization, model limits (resolution; for a clip also frames, on the
+   model's grid, fps and duration, which a still image skips), the quantization installed on the host (only
+   for hosts whose installed quantizations the core passes in: the local model store), an online worker on
+   the host that serves the engine model, calibration not `wont_run`
 3. cost: local hosts cost 0 EUR; other hosts have no price yet, so their cost is unknown
 4. runtime: `seconds_per_step * steps` when calibrated, else unknown
 
@@ -40,7 +40,7 @@ EU_COUNTRIES = frozenset("AT BE BG CY CZ DE DK EE ES FI FR GR HR HU IE IT LT LU 
 _DATA_CLASS_RANK = {DataClass.PUBLIC: 0, DataClass.PRIVATE: 1, DataClass.BIOMETRIC: 2}
 _STATUS_RANK = {CalibrationStatus.RUNS: 0, CalibrationStatus.SLOW: 1, None: 2}
 # Jobs that return one still image. Wan2GP's image mode renders the model's shortest clip and keeps its first frame, so
-# frames, fps and duration do not apply: neither the frame grid nor provenance (`core/assets.py`) uses them.
+# frames, fps and duration do not apply: neither the limit checks nor provenance (`core/assets.py`) use them.
 IMAGE_CAPABILITIES = frozenset({Capability.T2I, Capability.I2I})
 
 
@@ -108,9 +108,11 @@ def _limit_problem(params: JobParams, model: ModelDescriptor, capability: Capabi
     limits = model.limits
     if params.resolution and limits.resolutions and params.resolution not in limits.resolutions:
         return f"{model.id} does not support {params.resolution} (supported: {', '.join(limits.resolutions)})"
+    if capability in IMAGE_CAPABILITIES:  # the engine ignores frames, fps and duration for a still image
+        return None
     if params.frames and limits.max_frames and params.frames > limits.max_frames:
         return f"{model.id} renders at most {limits.max_frames} frames, {params.frames} requested"
-    if params.frames and capability not in IMAGE_CAPABILITIES:
+    if params.frames:
         problem = _frame_grid_problem(params.frames, model)
         if problem:
             return problem

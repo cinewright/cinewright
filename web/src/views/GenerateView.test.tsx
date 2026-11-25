@@ -414,6 +414,68 @@ describe('GenerateView', () => {
     expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toHaveLength(1);
   });
 
+  /** Submit a t2v job; the stream then drops and opens again while the reload of the job waits for `answer`. */
+  async function reopenWithHeldReload(before: (source: FakeEventSource) => void = () => undefined) {
+    let submitted: Job | undefined;
+    let answer: (state: Partial<Job>) => void = () => undefined;
+    const { calls, source } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/jobs': (body) => (submitted = job(body as JobRequest)),
+      [`GET /api/v1/jobs/${JOB_ID}`]: () => new Promise((resolve) => (answer = (fields) => resolve({ ...submitted, ...fields }))),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
+    const panel = await screen.findByRole('region', { name: 'Job' });
+    act(() => before(source()));
+    act(() => source().onerror?.(new Event('error')));
+    act(() => source().open());
+    await waitFor(() => expect(calls.some((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toBe(true));
+    const bar = () => within(panel).getByRole('progressbar');
+    /** Answer the reload and let the view take it. */
+    const reload = async (fields: Partial<Job>) => {
+      answer(fields);
+      await act(() => new Promise((resolve) => window.setTimeout(resolve, 50)));
+    };
+    return { source, bar, reload };
+  }
+
+  it('keeps a live state that arrived while the reload after a reopen was on its way', async () => {
+    const { source, bar, reload } = await reopenWithHeldReload((stream) => stream.emit('state', event('state', 2, { state: 'leased' })));
+    expect(bar().getAttribute('aria-label')).toBe('Starting');
+
+    act(() => source().emit('state', event('state', 3, { state: 'running' })));
+    expect(bar().getAttribute('aria-label')).toBe('Running');
+    // The core read the job before it started running.
+    await reload({ state: 'leased' });
+    expect(bar().getAttribute('aria-label')).toBe('Running');
+
+    act(() => source().emit('state', event('state', 4, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    expect(bar().getAttribute('aria-label')).toBe('Done');
+  });
+
+  it('takes the reloaded state but keeps live progress that arrived while the reload was on its way', async () => {
+    const { source, bar, reload } = await reopenWithHeldReload();
+    expect(bar().getAttribute('aria-label')).toBe('Queued');
+
+    // The stream that opened anew missed "leased" and "running"; progress follows live.
+    act(() => source().emit('progress', event('progress', 7, { phase: 'denoise', step: 7, total_steps: 8, percent: 87.5 })));
+    await reload({ state: 'running', progress: { phase: 'denoise', step: 5, total_steps: 8, percent: 62.5 } });
+    expect(bar().getAttribute('aria-label')).toBe('Step 7/8');
+    expect(bar().getAttribute('aria-valuenow')).toBe('88');
+  });
+
+  it('takes a reload that finds the job queued again when no event arrived meanwhile', async () => {
+    const { bar, reload } = await reopenWithHeldReload((stream) => stream.emit('state', event('state', 3, { state: 'running' })));
+    expect(bar().getAttribute('aria-label')).toBe('Running');
+
+    // The worker was lost while the stream was down, and the scheduler queued the job again.
+    await reload({ state: 'queued' });
+    expect(bar().getAttribute('aria-label')).toBe('Queued');
+  });
+
   it('shows readable upload refusals', async () => {
     let answer: unknown = new StatusAnswer(413);
     renderView({

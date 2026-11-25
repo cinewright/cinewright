@@ -42,6 +42,8 @@ export interface TrackedJob {
   preview: string | null;
   /** Highest seq of the stored events applied; replayed events at or below it are skipped. */
   lastSeq: number;
+  /** Seq of the latest state event applied, so a reload answered after a newer state event does not undo it. */
+  lastStateSeq: number;
 }
 
 function fromJob(job: Job): TrackedJob {
@@ -53,6 +55,7 @@ function fromJob(job: Job): TrackedJob {
     outputs: job.outputs ?? [],
     preview: null,
     lastSeq: 0,
+    lastStateSeq: 0,
   };
 }
 
@@ -100,7 +103,7 @@ export function applyEvent(job: TrackedJob, event: JobEvent): TrackedJob {
     if (typeof raw !== 'string' || !(raw in JOB_STATES)) return next;
     const state = raw as JobState;
     const outputs = Array.isArray(event.data.outputs) ? event.data.outputs.filter(isSha256) : job.outputs;
-    return { ...next, state, outputs, error: readError(state, event.data) };
+    return { ...next, state, outputs, error: readError(state, event.data), lastStateSeq: event.seq };
   }
   return next;
 }
@@ -125,16 +128,20 @@ export function useTrackedJob() {
     }
   });
 
-  // A stream the provider had to open anew sends no replay; load the job again whenever the stream opens.
+  // A stream the provider had to open anew sends no replay; load the job again whenever the stream opens. The answer
+  // may predate events that arrive while it is on its way: after a state event the live state wins, after a progress
+  // event the live progress. Without them the answer is the newest word, also for a job that was queued again.
   useEffect(() => {
     const tracked = current.current;
     if (!connected || !tracked || TERMINAL.has(tracked.state)) return;
+    const { lastSeq, lastStateSeq } = tracked;
     api
       .job(tracked.id)
       .then((loaded) =>
         setJob((value) => {
-          if (!value || value.id !== loaded.id || TERMINAL.has(value.state)) return value;
-          return { ...value, state: loaded.state, progress: loaded.progress ?? value.progress, error: loaded.error ?? null, outputs: loaded.outputs ?? [] };
+          if (!value || value.id !== loaded.id || TERMINAL.has(value.state) || value.lastStateSeq > lastStateSeq) return value;
+          const progress = value.lastSeq > lastSeq ? value.progress : (loaded.progress ?? value.progress);
+          return { ...value, state: loaded.state, progress, error: loaded.error ?? null, outputs: loaded.outputs ?? [] };
         }),
       )
       .catch(() => undefined); // the next event brings the state

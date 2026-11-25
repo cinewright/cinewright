@@ -145,10 +145,10 @@ def test_an_i2v_job_runs_the_installed_int8_and_its_provenance_records_it(served
 def test_a_t2i_job_pinned_to_ltx_runs_in_image_mode_and_returns_a_jpeg(served, tmp_path, monkeypatch):
     core = served
     with wan2gp_worker(core, tmp_path, monkeypatch, "bf16") as sessions:
-        # The registry fills fps 24 (and the request asks for 121 frames); image mode must not receive either.
-        request = JobRequest.model_validate(
-            {"capability": "t2i", "prompt": "A lighthouse at dusk", "model": LTX, "params": {"frames": 121}}
-        )
+        # Frames, fps and duration beyond LTX-2.3's clip limits: the router lets a still image through, and image
+        # mode must receive none of them.
+        ignored = {"frames": 2000, "fps": 30, "duration_s": 99.0}
+        request = JobRequest.model_validate({"capability": "t2i", "prompt": "A lighthouse at dusk", "model": LTX, "params": ignored})
         wait_for(lambda: core.estimate(request).feasible, "the worker to register")
         job = core.submit_job(request, ClientKind.UI, None)
         assert (job.route.model_id, job.route.quant) == (LTX, "bf16")

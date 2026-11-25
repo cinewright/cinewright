@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Asset } from '../api/client';
@@ -63,6 +63,18 @@ function provenance(term: string): string | null {
   return within(detail).getByText(term, { selector: 'dt' }).nextElementSibling?.textContent ?? null;
 }
 
+/** The asset card that shows `timestamp` (the provenance panel may show it too). */
+function card(timestamp: string): HTMLElement {
+  const button = screen.getAllByRole('button').find((element) => element.classList.contains('asset') && element.textContent?.includes(timestamp));
+  if (!button) throw new Error(`No asset card shows ${timestamp}`);
+  return button;
+}
+
+/** The timestamps of the pressed asset cards. */
+function pressedTimestamps(): string[] {
+  return screen.queryAllByRole('button', { pressed: true }).map((button) => button.querySelector('.cw-mono')?.textContent ?? '');
+}
+
 afterEach(() => {
   window.location.hash = '';
 });
@@ -104,6 +116,59 @@ describe('LibraryView', () => {
 
     const alert = await screen.findByRole('alert');
     expect(within(alert).getByText('Could not open the linked asset')).toBeTruthy();
+    expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
+  });
+
+  it('keeps the hash in step with a card click, which clears the banner of a link that failed', async () => {
+    const missing = '4'.repeat(64);
+    const calls = renderAt(`#/library/${missing}`);
+    await screen.findByRole('alert');
+
+    fireEvent.click(card('2026-11-24T12:00:00Z'));
+    await waitFor(() => expect(provenance('Seed')).toBe('2814033'));
+    expect(window.location.hash).toBe(`#/library/${OLD_SHA}`);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(pressedTimestamps()).toStrictEqual(['2026-11-24T12:00:00Z']);
+
+    // Following the failed link again loads the asset again and says so again.
+    window.location.hash = `#/library/${missing}`;
+    expect(within(await screen.findByRole('alert')).getByText('Could not open the linked asset')).toBeTruthy();
+    expect(calls.filter((call) => call.path === `/api/v1/assets/${missing}`)).toHaveLength(2);
+    expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
+  });
+
+  it('clears the banner of a link that is not an asset id when a card is selected', async () => {
+    renderAt('#/library/not-an-asset');
+    await screen.findByRole('alert');
+
+    fireEvent.click(card('2026-11-25T12:00:00Z'));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(window.location.hash).toBe(`#/library/${NEW_SHA}`);
+    expect(pressedTimestamps()).toStrictEqual(['2026-11-25T12:00:00Z']);
+  });
+
+  it('selects the linked asset again when its link is followed after another card was selected', async () => {
+    const calls = renderAt(`#/library/${LINKED_SHA}`);
+    await waitFor(() => expect(provenance('Parameters')).toBe('1280x704 · 241 frames · 24 fps · 8 steps'));
+    const historyLength = window.history.length;
+
+    fireEvent.click(card('2026-11-25T12:00:00Z'));
+    await waitFor(() => expect(pressedTimestamps()).toStrictEqual(['2026-11-25T12:00:00Z']));
+    expect(window.location.hash).toBe(`#/library/${NEW_SHA}`);
+    expect(provenance('Parameters')).toBe('–');
+    expect(window.history.length).toBe(historyLength); // a selection replaces the entry, it adds none
+
+    // "Open in Library" in the Generate view links to the job's output.
+    window.location.hash = `#/library/${LINKED_SHA}`;
+    await waitFor(() => expect(pressedTimestamps()).toStrictEqual(['2026-11-01T08:00:00Z']));
+    expect(provenance('Parameters')).toBe('1280x704 · 241 frames · 24 fps · 8 steps');
+    // It is in the list by now, so it is not loaded again.
+    expect(calls.filter((call) => call.path === `/api/v1/assets/${LINKED_SHA}`)).toHaveLength(1);
+
+    // Clicking the selected card selects none.
+    fireEvent.click(card('2026-11-01T08:00:00Z'));
+    await screen.findByText('Select an asset to see its provenance.');
+    expect(window.location.hash).toBe('#/library');
     expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
   });
 });

@@ -163,6 +163,26 @@ def test_still_images_are_not_checked_against_the_frame_grid():
             assert run_grid(capability, frames).feasible, (capability, frames)
 
 
+def test_still_images_skip_frame_fps_and_duration_limits_but_not_the_resolution():
+    # Image mode ignores frames, fps and duration, so limits on them cannot refuse a still image; a clip keeps them.
+    timed = GRID_VIDEO.model_copy(update={"limits": GRID_VIDEO.limits.model_copy(update={"max_duration_s": 5.0})})
+
+    def limited(capability: str, params: dict):
+        return run(request(capability=capability, model="test-video", params=params), workers=[worker()], models=[timed])
+
+    ignored = {"frames": 2000, "fps": 30, "duration_s": 99.0}
+    for capability in ("t2i", "i2i"):
+        assert limited(capability, ignored).feasible, (capability, limited(capability, ignored).reasons)
+        for key, value in ignored.items():
+            assert limited(capability, {key: value}).feasible, (capability, key)
+        assert limited(capability, {"resolution": "640x640"}).reasons == [
+            "feasibility: test-video does not support 640x640 (supported: 832x480)"
+        ]
+    assert limited("t2v", {"frames": 2000}).reasons == ["feasibility: test-video renders at most 81 frames, 2000 requested"]
+    assert limited("i2v", {"fps": 30}).reasons == ["feasibility: test-video does not support 30 fps"]
+    assert limited("i2v", {"duration_s": 99.0}).reasons == ["feasibility: test-video renders at most 5 s, 99 s requested"]
+
+
 def test_ltx_frame_grid_from_the_registry_applies_to_clips_only():
     models = Registry.load().all()
     ltx = next(m for m in models if m.id == "ltx-2.3-distilled-22b")
@@ -180,6 +200,10 @@ def test_ltx_frame_grid_from_the_registry_applies_to_clips_only():
     ]
     for capability in ("t2i", "i2i"):
         assert ltx_run(capability, 1).feasible and ltx_run(capability, 120).feasible
+        # Beyond max_frames (737), with an fps and a duration LTX-2.3 does not offer: image mode ignores all three.
+        still = request(capability=capability, model="ltx-2.3-distilled-22b", params={"frames": 2000, "fps": 30, "duration_s": 99.0})
+        assert run(still, workers=[worker(models=served)], installed=installed, models=models).feasible
+    assert ltx_run("t2v", 745).reasons == ["feasibility: ltx-2.3-distilled-22b renders at most 737 frames, 745 requested"]
 
 
 def test_models_without_frames_are_unaffected_by_the_frame_grid():
