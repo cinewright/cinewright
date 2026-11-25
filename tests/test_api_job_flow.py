@@ -137,6 +137,7 @@ def test_full_job_flow_as_a_worker(client):
     assert [e.seq for e in history] == list(range(1, len(history) + 1))
     assert [e.data.get("state") for e in history if e.kind == "state"] == ["queued", "leased", "running", "succeeded"]
     assert [e.kind for e in history] == ["state", "state", "state", "progress", "log", "log", "state"]
+    assert history[5].data == {"message": "Uploaded output image.png"}  # the upload itself is recorded in job_outputs
     assert history[-1].data["outputs"] == [output_sha]
     replayed = read_sse(client, params={"job_id": job.id}, headers={"Last-Event-ID": f"{job.id}:4"})
     assert [e.seq for e in replayed] == [5, 6, 7]
@@ -144,13 +145,27 @@ def test_full_job_flow_as_a_worker(client):
 
 def test_identical_outputs_of_two_jobs_are_one_asset(client):
     auth = register_worker(client)
-    first, second = submit(client, params={"seed": 1}), submit(client, params={"seed": 1})
+    first = submit(client, prompt="a lighthouse at dusk", params={"seed": 1})
+    second = submit(client, prompt="a lighthouse at dawn", params={"seed": 2})
     _, sha_a = run_job(client, auth)
     _, sha_b = run_job(client, auth)
     assert sha_a == sha_b
+    assert client.get(f"{API}/jobs/{first.id}").json()["outputs"] == [sha_a]
     assert client.get(f"{API}/jobs/{second.id}").json()["outputs"] == [sha_a]
-    assert client.get(f"{API}/assets/{sha_a}").json()["job_id"] == first.id
+    asset = Asset.model_validate(client.get(f"{API}/assets/{sha_a}").json())
+    assert (asset.job_id, asset.provenance.job_id, asset.provenance.seed) == (first.id, first.id, 1)  # the asset keeps its first record
     assert len(client.get(f"{API}/assets").json()["items"]) == 1
+
+    # Each job keeps its own output record and provenance.
+    rows = client.app.state.core.db.query("SELECT * FROM job_outputs WHERE sha256 = ? ORDER BY created_at", (sha_a,))
+    assert [(row["job_id"], row["name"], row["position"]) for row in rows] == [(first.id, "image.png", 0), (second.id, "image.png", 0)]
+    provenances = [Provenance.model_validate_json(row["provenance"]) for row in rows]
+    assert [(p.job_id, p.seed, p.prompt) for p in provenances] == [
+        (first.id, 1, "a lighthouse at dusk"),
+        (second.id, 2, "a lighthouse at dawn"),
+    ]
+    assert provenances[0] == asset.provenance
+    assert provenances[1].asset == asset.provenance.asset
 
 
 def test_worker_protocol_refusals(client):
@@ -273,6 +288,42 @@ def test_completion_cannot_change_the_uploaded_media_type(client):
     assert complete("application/octet-stream").status_code == 204
     asset = Asset.model_validate(client.get(f"{API}/assets/{sha}").json())
     assert asset.media_type == asset.provenance.asset.media_type == "application/octet-stream"
+
+
+def test_the_last_upload_of_an_output_name_wins(client):
+    auth = register_worker(client)
+    job = submit(client)
+    granted = lease(client, auth).job
+    shas = []
+    for content in (OUTPUT, OUTPUT + b"-retake"):
+        put = client.put(f"{API}/worker/jobs/{job.id}/outputs/image.png", content=content, headers={**auth, "Content-Type": "image/png"})
+        assert put.status_code == 201, put.text
+        shas.append(put.json()["sha256"])
+
+    def complete(sha: str):
+        body = {"lease_id": granted.lease_id, "outputs": [{"sha256": sha, "media_type": "image/png", "name": "image.png"}]}
+        return client.post(f"{API}/worker/jobs/{job.id}/complete", json=body, headers=auth)
+
+    assert_problem(complete(shas[0]), 409)
+    assert complete(shas[1]).status_code == 204
+    assert client.get(f"{API}/jobs/{job.id}").json()["outputs"] == [shas[1]]
+    rows = client.app.state.core.db.query("SELECT name, sha256, size_bytes, position FROM job_outputs WHERE job_id = ?", (job.id,))
+    assert [tuple(row) for row in rows] == [("image.png", shas[1], len(OUTPUT) + len(b"-retake"), 0)]
+
+
+def test_a_completion_lists_each_output_name_once(client):
+    auth = register_worker(client)
+    job = submit(client)
+    granted = lease(client, auth).job
+    put = client.put(f"{API}/worker/jobs/{job.id}/outputs/image.png", content=OUTPUT, headers={**auth, "Content-Type": "image/png"})
+    sha = put.json()["sha256"]
+    output = {"sha256": sha, "media_type": "image/png", "name": "image.png"}
+    twice = client.post(
+        f"{API}/worker/jobs/{job.id}/complete", json={"lease_id": granted.lease_id, "outputs": [output, output]}, headers=auth
+    )
+    assert "image.png" in assert_problem(twice, 422).detail
+    assert client.get(f"{API}/jobs/{job.id}").json()["state"] == "running"
+    assert_problem(client.get(f"{API}/assets/{sha}"), 404)  # nothing was recorded
 
 
 def test_asset_content_outside_the_allow_list_is_only_a_download(client):

@@ -105,17 +105,13 @@ LOCAL_HOST_NAME = "Local"
 WORKER_STALE_SECONDS = 120.0  # a worker without contact for this long serves no new routes
 WORKER_POLL_SECONDS = 1.0
 MAINTENANCE_INTERVAL_S = 5.0
-# Uploaded outputs are recorded as log events carrying this key; `complete_job` checks against them.
-# The 0001 schema has no table for job outputs (see the core agent's contract notes).
+# Cores before migration 0002 recorded uploads as log events carrying this key; uploads now live in
+# `job_outputs`. Workers still may not send it, so the old records stay distinguishable from worker data.
 UPLOAD_RECORD_KEY = "output"
 
 Detector = Callable[[Path, str], HardwareProfile]
 
-_JOB_SELECT = (
-    "SELECT jobs.*, agents.name AS agent_name, "
-    "(SELECT data FROM job_events e WHERE e.job_id = jobs.id AND e.kind = 'state' ORDER BY e.seq DESC LIMIT 1) AS last_state "
-    "FROM jobs LEFT JOIN agents ON agents.id = jobs.agent_id"
-)
+_JOB_SELECT = "SELECT jobs.*, agents.name AS agent_name FROM jobs LEFT JOIN agents ON agents.id = jobs.agent_id"
 _STATUS_RANK = {CalibrationStatus.RUNS: 0, CalibrationStatus.SLOW: 1, CalibrationStatus.WONT_RUN: 2}
 
 
@@ -137,7 +133,7 @@ def _token_hash(token: str) -> str:
 
 
 class _Upload(NamedTuple):
-    """An output upload as `store_output` recorded it, including the checked media type."""
+    """An output upload as `store_output` recorded it in `job_outputs`, including the checked media type."""
 
     sha256: str
     size_bytes: int
@@ -551,11 +547,19 @@ class Core:
         tx.conn.execute("INSERT INTO agents (id, name, token_hash, created_at) VALUES (?, ?, '', ?)", (agent_id, name, to_iso(tx.now)))
         return agent_id
 
+    def _job_outputs(self, job_ids: list[str]) -> dict[str, list[str]]:
+        """Output hashes of the given jobs in completion order; only a completed output has a position."""
+        rows = self.db.query(
+            "SELECT job_id, position, sha256 FROM job_outputs WHERE position IS NOT NULL AND job_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(job_ids),),
+        )
+        outputs: dict[str, list[str]] = {}
+        for row in sorted(rows, key=lambda r: (r["job_id"], r["position"])):
+            outputs.setdefault(row["job_id"], []).append(row["sha256"])
+        return outputs
+
     @staticmethod
-    def _job(row: sqlite3.Row) -> Job:
-        outputs: list[str] = []
-        if row["state"] == JobState.SUCCEEDED.value and row["last_state"]:
-            outputs = json.loads(row["last_state"]).get("outputs", [])
+    def _job(row: sqlite3.Row, outputs: list[str]) -> Job:
         return Job(
             id=row["id"],
             state=JobState(row["state"]),
@@ -565,7 +569,7 @@ class Core:
             eta_seconds=row["eta_seconds"],
             client=ClientKind(row["client"]),
             agent=row["agent_name"],
-            outputs=outputs,
+            outputs=outputs if row["state"] == JobState.SUCCEEDED.value else [],
             error=JobError.model_validate_json(row["error"]) if row["error"] else None,
             created_at=from_iso(row["created_at"]),
             started_at=from_iso(row["started_at"]),
@@ -585,13 +589,14 @@ class Core:
         sql = _JOB_SELECT + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY jobs.created_at DESC, jobs.id DESC LIMIT ?"
         rows = self.db.query(sql, [*params, limit + 1])
         next_cursor = _encode_cursor(rows[limit - 1]["created_at"], rows[limit - 1]["id"]) if len(rows) > limit else None
-        return JobList(items=[self._job(row) for row in rows[:limit]], next_cursor=next_cursor)
+        outputs = self._job_outputs([row["id"] for row in rows[:limit]])
+        return JobList(items=[self._job(row, outputs.get(row["id"], [])) for row in rows[:limit]], next_cursor=next_cursor)
 
     def get_job(self, job_id: str) -> Job:
         row = self.db.query_one(_JOB_SELECT + " WHERE jobs.id = ?", (job_id,))
         if row is None:
             raise NotFound(f"Job {job_id} does not exist.")
-        return self._job(row)
+        return self._job(row, self._job_outputs([job_id]).get(job_id, []))
 
     def cancel_job(self, job_id: str) -> Job:
         with self._tx() as tx:
@@ -899,24 +904,21 @@ class Core:
         with self._tx() as tx:
             row = self._active_job(tx.conn, worker_id, job_id)
             self._mark_running(tx, row)
-            output = {"name": name, "sha256": sha256, "media_type": media_type, "size_bytes": upload.size_bytes}
-            tx.emit(job_id, EventKind.LOG, {"message": f"Uploaded output {name}", UPLOAD_RECORD_KEY: output})
+            tx.conn.execute(
+                "INSERT INTO job_outputs (job_id, name, sha256, media_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (job_id, name) DO UPDATE SET sha256 = excluded.sha256, media_type = excluded.media_type, "
+                "size_bytes = excluded.size_bytes, position = NULL, provenance = NULL, created_at = excluded.created_at",
+                (job_id, name, sha256, media_type, upload.size_bytes, to_iso(tx.now)),
+            )
+            tx.emit(job_id, EventKind.LOG, {"message": f"Uploaded output {name}"})
             self.scheduler.extend(tx, worker_id, job_id)
         return OutputUploaded(sha256=sha256, size_bytes=upload.size_bytes)
 
     @staticmethod
     def _uploaded_outputs(conn: sqlite3.Connection, job_id: str) -> dict[str, _Upload]:
-        """Outputs uploaded for a job, by name, from the core's upload log events (the last upload of a name wins)."""
-        uploaded: dict[str, _Upload] = {}
-        for row in conn.execute("SELECT data FROM job_events WHERE job_id = ? AND kind = 'log' ORDER BY seq", (job_id,)):
-            record = json.loads(row["data"]).get(UPLOAD_RECORD_KEY)
-            if isinstance(record, dict) and isinstance(record.get("name"), str) and isinstance(record.get("media_type"), str):
-                try:
-                    checked = OutputUploaded(sha256=record.get("sha256"), size_bytes=record.get("size_bytes"))
-                except ValidationError:
-                    continue
-                uploaded[record["name"]] = _Upload(checked.sha256, checked.size_bytes, record["media_type"])
-        return uploaded
+        """Outputs uploaded for a job, by name (the last upload of a name wins)."""
+        rows = conn.execute("SELECT name, sha256, size_bytes, media_type FROM job_outputs WHERE job_id = ?", (job_id,))
+        return {row["name"]: _Upload(row["sha256"], row["size_bytes"], row["media_type"]) for row in rows}
 
     def complete_job(self, worker_id: str, job_id: str, completion: JobCompletion) -> None:
         with self._tx() as tx:
@@ -926,8 +928,12 @@ class Core:
             worker = self._worker_record(tx.conn, worker_id)
             host = tx.conn.execute("SELECT * FROM hosts WHERE id = ?", (route.host_id,)).fetchone()
             agent = tx.conn.execute("SELECT name FROM agents WHERE id = ?", (row["agent_id"],)).fetchone() if row["agent_id"] else None
+            names = [output.name for output in completion.outputs]
+            if len(set(names)) < len(names):
+                twice = sorted({name for name in names if names.count(name) > 1})
+                raise Invalid(f"The completion lists output {', '.join(twice)} more than once; list each output name once.")
             uploaded = self._uploaded_outputs(tx.conn, job_id)
-            for output in completion.outputs:
+            for position, output in enumerate(completion.outputs):
                 record = uploaded.get(output.name)
                 if record is None or record.sha256 != output.sha256 or not self.blobs.exists(output.sha256):
                     raise Conflict(f"Output {output.name} with this hash was not uploaded for job {job_id}.")
@@ -951,6 +957,11 @@ class Core:
                     created_at=tx.now,
                 )
                 record_asset(tx.conn, provenance, DataClass(row["data_class"]), job_id, tx.now)
+                # The asset keeps the provenance of the first job that produced these bytes; this job's own is here.
+                tx.conn.execute(
+                    "UPDATE job_outputs SET position = ?, provenance = ? WHERE job_id = ? AND name = ?",
+                    (position, provenance.model_dump_json(by_alias=True), job_id, output.name),
+                )
             transition(
                 tx,
                 job_id,

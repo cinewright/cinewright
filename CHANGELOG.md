@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4](https://github.com/cinewright/cinewright/compare/v0.0.3...v0.0.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* keep per-job output records so identical outputs keep each job's provenance ([#78](https://github.com/cinewright/cinewright/issues/78)) ([73da90c](https://github.com/cinewright/cinewright/commit/73da90ca3e1d62f9170b82dd638c0657a182da7f)), closes [#38](https://github.com/cinewright/cinewright/issues/38)
+
 ## [0.0.3](https://github.com/cinewright/cinewright/compare/v0.0.2...v0.0.3) (2026-11-24)
 
 
