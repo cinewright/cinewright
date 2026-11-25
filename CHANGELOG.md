@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0](https://github.com/cinewright/cinewright/compare/v0.0.4...v0.1.0) (2026-11-25)
+
+
+### Features
+
+* provision the Wan2GP engine on first start ([#81](https://github.com/cinewright/cinewright/issues/81)) ([df3093f](https://github.com/cinewright/cinewright/commit/df3093f772aefe2cbf87320afe54b254643a01ff))
+
 ## [0.0.4](https://github.com/cinewright/cinewright/compare/v0.0.3...v0.0.4) (2026-11-25)
 
 
