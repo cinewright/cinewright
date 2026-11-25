@@ -18,15 +18,20 @@ An install (`prepare_install`, then `run_install`):
 2. checks before any byte moves: allowed file types, paths inside the store, pinned sizes; the quota, planning
    the eviction of least recently used quantizations no waiting or running job needs; the free space of the
    store's drive, counting what that eviction frees. Both count what the installs in progress still add and
-   download. Only then it evicts;
+   download. When the drive holds the download while the planned quantizations are still there, they stay
+   installed; when it holds it only after removing them, they are removed now, and only if the caller confirmed
+   each one (`EvictionNeeded` names them otherwise). Unreferenced files nothing needs go now in both cases;
 3. downloads the missing files into `.downloads/` with the `Downloader` of engine provisioning: resumable `.part`
    files, SHA-256 and size checked before a file is used, HTTPS to the registry's hosts and their download CDNs
    only (`DOWNLOAD_HOSTS`, every redirect included);
 4. once every file verified, moves them into place and registers them with their references in one
-   transaction, then merges `checkpoints_paths` and `text_encoder_quantization` into `wgp_config.json`.
+   transaction, then merges `checkpoints_paths` and `text_encoder_quantization` into `wgp_config.json`;
+5. then the caller runs the quota step (`evict_for_quota`), which removes the least recently used quantizations
+   the quota needs with the new install registered.
 
-A failed or cancelled install registers no file: its quantization stays `failed`, and its verified and partial
-downloads stay in `.downloads/` for the next try until a removal deletes them. After an install or a removal the
+A failed or cancelled install registers no file and removes nothing for the quota: its quantization stays `failed`,
+every quantization installed before stays installed, and its verified and partial downloads stay in `.downloads/`
+for the next try until a removal deletes them. After an install or a removal the
 caller restarts the local worker, so it re-announces its models. Wan2GP defines the MVP model types itself
 (`<wan2gp root>/defaults/<model_type>.json`); a finetune definition is written only for a model type it does not
 define that `architectures` maps to an architecture. No such map ships yet, since every registry type is a Wan2GP
@@ -50,9 +55,9 @@ import shutil
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
@@ -95,14 +100,28 @@ class ModelStoreError(Exception):
     """An install or removal that cannot go ahead: cause and consequence in one sentence, and a stable `code`.
 
     Codes: `unknown_model`, `unknown_quant`, `unknown_variant`, `file_type`, `unsafe_path`, `size_missing`,
-    `engine_type_unknown`, `quota_exceeded`, `not_enough_space`, `installing`, `switching`, `in_use`, `not_installed`,
-    `hash_mismatch`, `download_failed`, `cancelled`, `io_error`, `install_failed`, `config_invalid`.
+    `engine_type_unknown`, `quota_exceeded`, `eviction_needed` (`EvictionNeeded`), `not_enough_space`, `installing`,
+    `switching`, `in_use`, `not_installed`, `hash_mismatch`, `download_failed`, `cancelled`, `io_error`,
+    `install_failed`, `config_invalid`.
     """
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class EvictionNeeded(ModelStoreError):
+    """An install that fits on the store's drive only after removing installed quantizations the caller did not confirm.
+
+    `evictions` are the quantizations the quota plan removes, in removal order. `frees_bytes` is what removing all of
+    them frees: less than the sum of their sizes when they share files with quantizations that stay.
+    """
+
+    def __init__(self, message: str, evictions: tuple[Eviction, ...], frees_bytes: int) -> None:
+        super().__init__("eviction_needed", message)
+        self.evictions = evictions
+        self.frees_bytes = frees_bytes
 
 
 @dataclass(frozen=True)
@@ -132,8 +151,23 @@ class InstallProgress:
 
 
 @dataclass(frozen=True)
+class Eviction:
+    """A quantization removed, or to be removed, to keep the store within its quota, as `installed_models` held it."""
+
+    model_id: str
+    quant: str
+    name: str  # the registry model name; the model id when the registry no longer has the model
+    size_bytes: int  # installed size, its shared files included
+
+    @property
+    def key(self) -> InstallKey:
+        return (self.model_id, self.quant)
+
+
+@dataclass(frozen=True)
 class Install:
-    """A prepared install: checked, with its eviction done; `run_install` downloads and registers it."""
+    """A prepared install: checked, with what it had to remove before its download removed; `run_install` downloads
+    and registers it, then the quota step (`evict_for_quota`) removes what the quota still needs."""
 
     model_id: str
     quant: str
@@ -142,11 +176,16 @@ class Install:
     files: tuple[PlannedFile, ...]
     missing: tuple[PlannedFile, ...]  # files the store does not hold yet
     download_bytes: int  # what remains to download, partial downloads deducted
-    evicted: tuple[InstallKey, ...]
+    # Removed for the quota before the download, which only a confirmation allows; `install()` adds the quota step's.
+    evictions: tuple[Eviction, ...] = ()
 
     @property
     def key(self) -> InstallKey:
         return (self.model_id, self.quant)
+
+    @property
+    def evicted(self) -> tuple[InstallKey, ...]:
+        return tuple(eviction.key for eviction in self.evictions)
 
 
 @dataclass(frozen=True)
@@ -162,6 +201,18 @@ class VariantSwitch:
     @property
     def label(self) -> str:
         return f"the {self.variant} text encoder"
+
+
+@dataclass(frozen=True)
+class _EvictionPlan:
+    """What the quota needs removed: see `ModelStore._plan_eviction`."""
+
+    victims: tuple[Eviction, ...]  # installed quantizations, least recently used first
+    freed: int  # bytes removing the victims and the unreferenced files frees
+    freed_files: int  # of `freed`, the unreferenced files nothing needs
+    total: int  # the store, with what the installs in progress still add
+    quota: int | None
+    excess: int  # bytes the store stays above the quota after the plan; 0 when it fits
 
 
 @dataclass(frozen=True)
@@ -358,6 +409,19 @@ def disk_free(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
+def _eviction_needed(label: str, plan: _EvictionPlan) -> EvictionNeeded:
+    """The refusal of an install that fits on the drive only after removing `plan.victims`, naming each with its size."""
+    names = [f"{victim.name} {victim.quant} ({format_size(victim.size_bytes)})" for victim in plan.victims]
+    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    pronoun = "it" if len(names) == 1 else "them"
+    return EvictionNeeded(
+        f"{label} fits on the drive of the model store only after removing {listed}, so nothing was installed or removed; "
+        f"name {pronoun} in `evict` to remove {pronoun} first.",
+        plan.victims,
+        plan.freed - plan.freed_files,
+    )
+
+
 def _cancelled(label: str) -> ModelStoreError:
     return ModelStoreError("cancelled", f"The install of {label} stopped before it finished; install it again to continue its downloads.")
 
@@ -512,16 +576,30 @@ class ModelStore:
         model_id: str,
         quant: str,
         *,
+        evict: Collection[InstallKey] = (),
         progress: Callable[[InstallProgress], None] | None = None,
         cancelled: Callable[[], bool] = lambda: False,
     ) -> Install:
-        """`prepare_install`, then `run_install`; returns the prepared install. `run_install` also returns the config merge result."""
-        install = self.prepare_install(model_id, quant)
-        self.run_install(install, progress=progress, cancelled=cancelled)
-        return install
+        """`prepare_install`, `run_install`, then the quota step (`evict_for_quota`).
 
-    def prepare_install(self, model_id: str, quant: str) -> Install:
-        """Plan and check an install, then evict what the quota needs; refuses before any byte is downloaded or removed.
+        Returns the prepared install with `evictions` extended by what the quota step removed. A config merge that
+        fails after the registration raises once the quota step ran.
+        """
+        install = self.prepare_install(model_id, quant, evict=evict)
+        try:
+            self.run_install(install, progress=progress, cancelled=cancelled)
+        finally:
+            removed = self.evict_for_quota(install)  # removes nothing unless the install registered
+        return replace(install, evictions=install.evictions + tuple(removed))
+
+    def prepare_install(self, model_id: str, quant: str, *, evict: Collection[InstallKey] = ()) -> Install:
+        """Plan and check an install; refuses before any byte is downloaded or removed.
+
+        The quota plan names the least recently used quantizations to remove. When the store's drive holds the download
+        while they are still there, they stay installed and routable during the download, and the quota step removes
+        what the quota then needs once the install registered (`evict_for_quota`). When the drive holds it only after
+        removing them, they are removed now, and only if `evict` names every one of them; otherwise this raises
+        `EvictionNeeded`, which lists them. Unreferenced files nothing needs that the plan counts go now in both cases.
 
         Marks the quantization `downloading` (unless it is installed and complete) and reserves its files until
         `run_install` ends.
@@ -558,8 +636,18 @@ class ModelStore:
             growth = sum(self._growth(file, stored) for file in own)
             pending_download = sum(file.size_bytes - self._staged_bytes(file) for file in pending.values())
             pending_growth = sum(self._growth(file, stored) for file in pending.values())
-            evicted, freed = self._plan_eviction(key, files, growth, label, pending=pending_growth)
-            available = self._free_bytes(self.root) + freed - pending_download
+            plan = self._plan_eviction(key, files, growth, pending=pending_growth)
+            if plan.excess > 0:
+                assert plan.quota is not None  # only a quota leaves an excess
+                including = " (the installs in progress included)" if pending_growth else ""
+                raise ModelStoreError(
+                    "quota_exceeded",
+                    f"Installing {label} needs {format_size(plan.excess)} more room within the model store quota of "
+                    f"{format_size(plan.quota)}: it adds {format_size(growth)} to {format_size(plan.total)}{including}, and removing "
+                    f"the least recently used models that no queued or running job needs frees only {format_size(plan.freed)}.",
+                )
+            free = self._free_bytes(self.root)
+            available = free + plan.freed - pending_download
             if download > available:
                 after = ", after what the installs in progress still download" if pending_download else ""
                 raise ModelStoreError(
@@ -567,10 +655,17 @@ class ModelStore:
                     f"Installing {label} needs {format_size(download - available)} more free space on the drive of the model store: "
                     f"it downloads {format_size(download)}, and only {format_size(max(available, 0))} are free{after}.",
                 )
-            if evicted or freed:
-                for victim in evicted:
-                    log.info("Removing %s %s, the least recently used model, to keep the model store within its quota.", *victim)
-                    self._unregister(victim)
+            removing: tuple[Eviction, ...] = ()
+            if plan.victims and download > free - pending_download + plan.freed_files:
+                # The drive holds the download only after removing them, and they stay removed if the download fails.
+                confirmed = set(evict)
+                if any(victim.key not in confirmed for victim in plan.victims):
+                    raise _eviction_needed(label, plan)
+                removing = plan.victims
+            for victim in removing:
+                log.info("Removing %s %s, the least recently used model, to keep the model store within its quota.", *victim.key)
+                self._unregister(victim.key)
+            if removing or plan.freed_files:
                 self._collect_garbage(files)
             row = self.db.query_one("SELECT state FROM installed_models WHERE model_id = ? AND quant = ?", key)
             if missing or row is None or row["state"] != "installed":
@@ -579,7 +674,7 @@ class ModelStore:
                     "ON CONFLICT (model_id, quant) DO UPDATE SET state = 'downloading', error = NULL",
                     key,
                 )
-            install = Install(model_id, quant, label, variant, tuple(files), tuple(missing), download, tuple(evicted))
+            install = Install(model_id, quant, label, variant, tuple(files), tuple(missing), download, removing)
             self._active[key] = install
             self._reserved.update(file.key for file in files)
             return install
@@ -629,6 +724,45 @@ class ModelStore:
                 self._active.pop(install.key, None)
                 self._release(install.files)
         return self.register_in_wan2gp()
+
+    def evict_for_quota(self, install: Install) -> list[Eviction]:
+        """The quota step: remove what the quota needs now that `install` registered; returns what it removed, in order.
+
+        Call it after every install whose `run_install` registered the files, a failing config merge included. It
+        removes nothing unless the quantization is installed, so never after a failed or cancelled download. It plans
+        against the registered store with the quota as it is now, the new install included: least recently used first,
+        never `install` itself, an install in progress or a quantization a waiting or running job needs, and a shared
+        file only with its last reference. The growth of installs in progress is not counted; each runs this step once
+        it registered. It never refuses and never fails the install: with no candidate left the store stays above the
+        quota, and an error goes to the log, with what was removed until then returned. It removes nothing while a text
+        encoder switch runs, since removals and a switch exclude each other; the next install's quota check counts the
+        whole store.
+        """
+        removed: list[Eviction] = []
+        try:
+            with self._lock:
+                row = self.db.query_one("SELECT state FROM installed_models WHERE model_id = ? AND quant = ?", install.key)
+                if row is None or row["state"] != "installed":
+                    return removed
+                if self._switching is not None:
+                    log.info("The text encoder is being switched, so nothing was removed for the quota after installing %s.", install.label)
+                    return removed
+                plan = self._plan_eviction(install.key, list(install.files), 0)
+                for victim in plan.victims:
+                    log.info("Removing %s %s, the least recently used model, to keep the model store within its quota.", *victim.key)
+                    self._unregister(victim.key)
+                    removed.append(victim)
+                if plan.victims or plan.freed_files:
+                    self._collect_garbage(install.files)
+                if plan.excess > 0:
+                    log.info(
+                        "The model store stays %s above its quota after installing %s: every other model is in use or being installed.",
+                        format_size(plan.excess),
+                        install.label,
+                    )
+        except Exception:  # noqa: BLE001 - the install stays installed; the next install's quota check counts the whole store
+            log.exception("Removing models for the quota after installing %s failed", install.label)
+        return removed
 
     def _download(
         self,
@@ -971,31 +1105,30 @@ class ModelStore:
         """What placing `file` adds to the store: its size, less a registered file of other content at its path."""
         return file.size_bytes - (stored[file.key][1] if file.key in stored else 0)
 
-    def _plan_eviction(
-        self, key: InstallKey, files: list[PlannedFile], growth: int, label: str, *, pending: int = 0
-    ) -> tuple[list[InstallKey], int]:
-        """What to evict so the store stays within its quota after growing by `growth`: (victims, bytes freed).
+    def _plan_eviction(self, key: InstallKey, files: list[PlannedFile], growth: int, *, pending: int = 0) -> _EvictionPlan:
+        """What to evict so the store stays within its quota after growing by `growth`; refuses nothing.
 
-        `pending` is what the installs in progress still add. Unreferenced files nothing needs go first, then the files
-        of installed quantizations from the least recently used on, skipping this one, those being installed and those
-        a waiting or running job needs. A shared file is freed only when its last reference goes. Refuses when even
-        that does not make room.
+        `pending` is what the installs in progress still add. Unreferenced files nothing needs go first (`freed_files`),
+        then the files of installed quantizations from the least recently used on, skipping `key`, those being installed
+        and those a waiting or running job needs. A shared file is freed only when its last reference goes. Reads each
+        victim's name and installed size before anything is unregistered. `excess` is what stays above the quota.
         """
         quota = self._quota_bytes()
         stored = self.db.query("SELECT path, size_bytes FROM store_files")
         total = sum(row["size_bytes"] for row in stored) + pending
         if quota is None or total + growth <= quota:
-            return [], 0
+            return _EvictionPlan((), 0, 0, total, quota, 0)
         sizes = {row["path"].casefold(): row["size_bytes"] for row in stored}
         owners: dict[str, set[InstallKey]] = {path: set() for path in sizes}
         for row in self.db.query("SELECT model_id, quant, path FROM installed_model_files"):
             owners.setdefault(row["path"].casefold(), set()).add((row["model_id"], row["quant"]))
         keep = self._kept(files)
-        freed = sum(sizes[path] for path, users in owners.items() if not users and path not in keep and path in sizes)
+        freed_files = sum(sizes[path] for path, users in owners.items() if not users and path not in keep and path in sizes)
+        freed = freed_files
         needed = self.needed_by_jobs()
-        victims: list[InstallKey] = []
+        victims: list[Eviction] = []
         candidates = self.db.query(
-            "SELECT model_id, quant FROM installed_models WHERE state = 'installed' "
+            "SELECT model_id, quant, size_bytes FROM installed_models WHERE state = 'installed' "
             "ORDER BY COALESCE(last_used_at, installed_at, ''), model_id, quant"
         )
         for row in candidates:
@@ -1004,21 +1137,14 @@ class ModelStore:
             victim = (row["model_id"], row["quant"])
             if victim == key or victim in needed or victim in self._active:
                 continue
-            victims.append(victim)
+            model = self.registry.get(row["model_id"])
+            victims.append(Eviction(*victim, model.name if model is not None else row["model_id"], row["size_bytes"] or 0))
             for path, users in owners.items():
                 if victim in users:
                     users.discard(victim)
                     if not users and path not in keep:
                         freed += sizes.get(path, 0)
-        if total - freed + growth > quota:
-            including = " (the installs in progress included)" if pending else ""
-            raise ModelStoreError(
-                "quota_exceeded",
-                f"Installing {label} needs {format_size(total - freed + growth - quota)} more room within the model store quota of "
-                f"{format_size(quota)}: it adds {format_size(growth)} to {format_size(total)}{including}, and removing the least "
-                f"recently used models that no queued or running job needs frees only {format_size(freed)}.",
-            )
-        return victims, freed
+        return _EvictionPlan(tuple(victims), freed, freed_files, total, quota, max(total - freed + growth - quota, 0))
 
     def _unregister(self, key: InstallKey) -> None:
         """Drop the quantization's row; its references go with it (ON DELETE CASCADE)."""

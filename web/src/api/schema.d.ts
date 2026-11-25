@@ -1383,6 +1383,33 @@ export interface components {
             revision?: string | null;
         };
         /**
+         * ModelStoreEviction
+         * @description What the storage quota removed for one install.
+         */
+        ModelStoreEviction: {
+            /**
+             * At
+             * Format: date-time
+             * @description When the last of them was removed
+             */
+            at: string;
+            /**
+             * Evicted
+             * @description Removed quantizations in removal order: those removed before the download, then those removed once the install registered
+             */
+            evicted: components["schemas"]["QuotaEviction"][];
+            /**
+             * Model Id
+             * @description Model of the install that needed the room
+             */
+            model_id: string;
+            /**
+             * Quant
+             * @description Quantization of that install
+             */
+            quant: string;
+        };
+        /**
          * ModelStoreUsage
          * @description The model store (`<data dir>/models`) as the Models view shows it.
          */
@@ -1392,6 +1419,8 @@ export interface components {
              * @description Free space of the drive that holds the model store, measured for this answer
              */
             free_bytes: number;
+            /** @description What the quota removed for the most recent install that removed any, also when that install failed afterwards; kept since the core started, null while there was none */
+            last_eviction?: components["schemas"]["ModelStoreEviction"] | null;
             /**
              * Quota Bytes
              * @description `settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota
@@ -1617,6 +1646,26 @@ export interface components {
             resolution?: string | null;
             /** Steps */
             steps?: number | null;
+        };
+        /**
+         * QuotaEviction
+         * @description An installed quantization the storage quota removes, or removed, to make room for an install.
+         */
+        QuotaEviction: {
+            /** Model Id */
+            model_id: string;
+            /**
+             * Name
+             * @description The registry model name; the model id when the registry no longer has the model
+             */
+            name: string;
+            /** Quant */
+            quant: string;
+            /**
+             * Size Bytes
+             * @description Installed disk space of the quantization, its shared files included, as `GET /models` showed it
+             */
+            size_bytes: number;
         };
         /** RecipeList */
         RecipeList: {

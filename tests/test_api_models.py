@@ -28,6 +28,7 @@ from cinewright.app import create_app
 from cinewright.config import Config
 from cinewright.core.clock import to_iso
 from cinewright.core.core import Core
+from cinewright.core.errors import Conflict
 from cinewright.core.modelstore import GB, STAGING_DIR, plan_files
 from cinewright.core.supervisor import SupervisorStatus
 from cinewright.db.database import Database
@@ -180,7 +181,7 @@ def test_installing_z_image_int8_places_its_files_merges_wgp_config_and_reports_
     assert state["size_bytes"] == size
     models = store.client.get(f"{API}/models").json()
     assert next(m for m in models["items"] if m["id"] == "z-image-turbo")["installed_bytes"] == size
-    assert models["store"] == {"total_bytes": size, "quota_bytes": None, "free_bytes": store.free}
+    assert models["store"] == {"total_bytes": size, "quota_bytes": None, "free_bytes": store.free, "last_eviction": None}
     assert store.local_host()["text_encoder_variant"] == "int8"  # the first install stores its variant
     # Progress as `model` events, then the result; the worker restarts once to announce the model.
     downloading = [e for e in store.events if e.install_state == "downloading"]
@@ -359,8 +360,221 @@ def test_quota_eviction_removes_the_least_recently_used_model_but_never_one_a_qu
     victim, kept = ("wan-2.2-t2v-14b", "z-image-turbo") if protected else ("z-image-turbo", "wan-2.2-t2v-14b")
     assert state["install_state"] == "installed"
     assert store.quant(victim, "int8")["install_state"] == "absent" and store.quant(kept, "int8")["install_state"] == "installed"
-    assert (victim, "int8", "absent") in {(e.model_id, e.quant, e.install_state) for e in store.events}
-    assert store.supervisor.restarts == restarts + 2  # after the eviction, and after the install
+    # Ample free disk: the victim goes once the install registered, and one restart announces both changes.
+    states = [(e.model_id, e.quant, e.install_state) for e in store.events if e.install_state != "downloading"]
+    assert states[-2:] == [("ltx-2.3-distilled-22b", "Q4_K_M", "installed"), (victim, "int8", "absent")]
+    assert store.supervisor.restarts == restarts + 1
+
+
+# Z-Image int8 (least recently used) and Wan T2V int8 installed, and a quota that holds LTX-2 Q4_K_M only without
+# Z-Image. Free disk is ample unless a test says otherwise, so the drive holds the download with Z-Image still there (#90).
+LTX_Q4 = ("ltx-2.3-distilled-22b", "Q4_K_M")
+LTX_Q4_URL_NAME = "ltx-2.3-22b-distilled-Q4_K_M_light.gguf"
+
+
+def two_installed_and_a_quota_for_ltx(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    store.install("z-image-turbo", "int8")
+    store.clock.advance(60)
+    store.install("wan-2.2-t2v-14b", "int8")
+    used = store.client.get(f"{API}/models").json()["store"]["total_bytes"]
+    monkeypatch.setattr(store.core.models, "_quota_bytes", lambda: used + store.size(*LTX_Q4) - 1)
+
+
+def ltx_q4_url(store: Store) -> str:
+    model = store.registry.get(LTX_Q4[0])
+    assert model is not None
+    return next(f.url for q in model.quantizations if q.id == LTX_Q4[1] for f in q.files if f.name == LTX_Q4_URL_NAME)
+
+
+def queue_job(store: Store, model_id: str, quant: str) -> None:
+    route = json.dumps({"model_id": model_id, "quant": quant, "host_id": "local", "engine": "wan2gp", "reasons": []})
+    store.core.db.execute(
+        "INSERT INTO jobs (id, state, priority, capability, data_class, request, route, client, created_at) "
+        "VALUES (?, 'queued', 'interactive', 't2i', 'private', '{}', ?, 'ui', ?)",
+        (uuid4().hex, route, to_iso(store.clock())),
+    )
+
+
+def z_image_eviction(store: Store) -> dict[str, Any]:
+    return {"model_id": "z-image-turbo", "quant": "int8", "name": "Z-Image Turbo 6B", "size_bytes": store.size("z-image-turbo", "int8")}
+
+
+def model_states(store: Store, since: int = 0) -> list[tuple[str, str, str]]:
+    """The `model` events since index `since`, without download progress."""
+    return [(e.model_id, e.quant, e.install_state) for e in store.events[since:] if e.install_state != "downloading"]
+
+
+@pytest.mark.parametrize("break_off", [True, False], ids=["broken-off", "corrupted"])
+def test_a_failed_download_leaves_the_model_the_quota_would_remove_installed(store, monkeypatch, break_off):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    url = ltx_q4_url(store)
+    if break_off:
+        store.hub.cut[url] = 5
+    else:
+        store.hub.files[url] = store.hub.files[url][:-1] + b"!"
+    placed, events, restarts = store.placed(), len(store.events), store.supervisor.restarts
+
+    state = store.install(*LTX_Q4)
+
+    assert state["install_state"] == "failed"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
+    assert Z_IMAGE_INT8_FILES <= store.placed() and store.placed() == placed
+    assert model_states(store, events) == [(*LTX_Q4, "failed")]  # no `absent` event for Z-Image
+    assert store.client.get(f"{API}/models").json()["store"]["last_eviction"] is None
+    assert store.supervisor.restarts == restarts
+
+
+def test_closing_the_core_during_an_install_leaves_the_model_the_quota_would_remove_installed(store, config, clock, monkeypatch):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.gate = threading.Event()
+    assert store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}).status_code == 202
+
+    closing = threading.Thread(target=store.core.close)
+    closing.start()
+    wait_for(lambda: store.core._closed, "the core to start closing")
+    store.gate.set()
+    closing.join(TIMEOUT_S)
+    assert not closing.is_alive()
+
+    restarted = Store(config, clock)  # the next core start
+    try:
+        assert restarted.quant("z-image-turbo", "int8")["install_state"] == "installed"
+        assert restarted.quant(*LTX_Q4)["install_state"] == "failed"
+        assert Z_IMAGE_INT8_FILES <= restarted.placed()
+    finally:
+        restarted.core.close()
+
+
+def test_with_room_on_the_drive_the_quota_removes_the_least_recently_used_model_after_the_install(store, monkeypatch):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.gate = threading.Event()
+    restarts, events, started = store.supervisor.restarts, len(store.events), store.clock()
+
+    assert store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}).status_code == 202
+    # While the download waits at the gate, the least recently used model is still installed with its files.
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed" and Z_IMAGE_INT8_FILES <= store.placed()
+    assert model_states(store, events) == [] and store.supervisor.restarts == restarts
+    store.gate.set()
+    store.idle()
+
+    assert store.quant(*LTX_Q4)["install_state"] == "installed"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "absent" and not Z_IMAGE_INT8_FILES & store.placed()
+    assert model_states(store, events) == [(*LTX_Q4, "installed"), ("z-image-turbo", "int8", "absent")]
+    usage = store.client.get(f"{API}/models").json()["store"]
+    assert usage["total_bytes"] <= usage["quota_bytes"]
+    assert store.supervisor.restarts == restarts + 1
+    eviction = usage["last_eviction"]
+    assert (eviction["model_id"], eviction["quant"], eviction["evicted"]) == (*LTX_Q4, [z_image_eviction(store)])
+    assert started < datetime.fromisoformat(eviction["at"]) < store.clock()
+
+
+@pytest.mark.parametrize("merge", ["unwritable", "invalid"])
+def test_when_the_config_merge_fails_the_quota_still_removes_the_least_recently_used_model(store, monkeypatch, merge):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    if merge == "unwritable":
+        store.write_config(OTHER_KEYS)  # not merged yet, so this install writes it
+
+        def refuse(path: Path, data: object) -> None:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr("cinewright.core.modelstore._write_json", refuse)
+    else:
+        store.core.models.config_path.parent.mkdir(parents=True, exist_ok=True)
+        store.core.models.config_path.write_bytes(b"[]")
+    restarts, events = store.supervisor.restarts, len(store.events)
+
+    state = store.install(*LTX_Q4)
+
+    assert state["install_state"] == "installed"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "absent"
+    assert model_states(store, events) == [(*LTX_Q4, "installed"), ("z-image-turbo", "int8", "absent")]
+    assert store.client.get(f"{API}/models").json()["store"]["last_eviction"]["evicted"] == [z_image_eviction(store)]
+    assert store.supervisor.restarts == restarts + 1
+
+
+@pytest.mark.parametrize("busy", [("z-image-turbo",), ("z-image-turbo", "wan-2.2-t2v-14b")], ids=["victim", "every-model"])
+def test_a_job_queued_during_the_download_keeps_its_model_and_the_next_one_goes(store, monkeypatch, busy):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.gate = threading.Event()
+    events = len(store.events)
+    assert store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}).status_code == 202
+    for model_id in busy:
+        queue_job(store, model_id, "int8")
+    store.gate.set()
+    store.idle()
+
+    assert store.quant(*LTX_Q4)["install_state"] == "installed"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
+    usage = store.client.get(f"{API}/models").json()["store"]
+    if len(busy) == 1:  # the next least recently used model without a job goes instead
+        assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "absent"
+        assert model_states(store, events)[-1] == ("wan-2.2-t2v-14b", "int8", "absent")
+        assert usage["total_bytes"] <= usage["quota_bytes"]
+    else:  # none is left: the store stays above the quota
+        assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "installed"
+        assert model_states(store, events) == [(*LTX_Q4, "installed")]
+        assert usage["total_bytes"] > usage["quota_bytes"] and usage["last_eviction"] is None
+
+
+def test_an_install_that_fits_on_the_drive_only_after_removing_a_model_is_refused_naming_it(store, monkeypatch):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.free = store.size(*LTX_Q4) - 1  # the download fits only once Z-Image is gone
+    requests, placed = len(store.hub.requests), store.placed()
+
+    problem = assert_problem(store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}), 409)
+
+    assert problem.model_extra["code"] == "eviction_needed"
+    assert problem.model_extra["evictions"] == [z_image_eviction(store)]
+    assert problem.model_extra["frees_bytes"] == store.size("z-image-turbo", "int8")  # Z-Image shares no file
+    assert problem.detail == (
+        "LTX-2 2.3 Distilled 1.0 22B Q4_K_M fits on the drive of the model store only after removing Z-Image Turbo 6B int8 (1.2 KB), "
+        "so nothing was installed or removed; name it in `evict` to remove it first."
+    )
+    assert len(store.hub.requests) == requests and store.placed() == placed
+    assert store.quant(*LTX_Q4)["install_state"] == "absent"  # not downloading
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
+
+
+def test_naming_another_quantization_than_the_planned_one_removes_nothing(store, monkeypatch):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.free = store.size(*LTX_Q4) - 1
+
+    with pytest.raises(Conflict) as refused:
+        store.core.install_model(*LTX_Q4, evict=[("wan-2.2-t2v-14b", "int8"), ("z-image-turbo", "bf16")])
+
+    assert refused.value.extensions["code"] == "eviction_needed"
+    assert refused.value.extensions["evictions"] == [z_image_eviction(store)]
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
+    assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "installed"
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["installs", "download-fails"])
+def test_a_confirmed_removal_happens_before_the_download_and_stays_when_it_fails(store, monkeypatch, fails):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.free = store.size(*LTX_Q4) - 1
+    if fails:
+        store.hub.cut[ltx_q4_url(store)] = 5
+    seen: list[set[tuple[str, str]]] = []
+    handler = store.hub.handler
+
+    def first_request(request: httpx.Request) -> httpx.Response:
+        if "ltx-2.3" in request.url.path and not seen:
+            seen.append(store.core.models.installed())
+        return handler(request)
+
+    monkeypatch.setattr(store.hub, "handler", first_request)
+    restarts, events = store.supervisor.restarts, len(store.events)
+
+    store.core.install_model(*LTX_Q4, evict=[("z-image-turbo", "int8")])
+    store.idle()
+
+    assert seen and ("z-image-turbo", "int8") not in seen[0]  # removed before the first request for LTX-2
+    assert model_states(store, events) == [("z-image-turbo", "int8", "absent"), (*LTX_Q4, "failed" if fails else "installed")]
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "absent" and not Z_IMAGE_INT8_FILES & store.placed()
+    assert store.quant(*LTX_Q4)["install_state"] == ("failed" if fails else "installed")
+    eviction = store.client.get(f"{API}/models").json()["store"]["last_eviction"]
+    assert (eviction["model_id"], eviction["quant"], eviction["evicted"]) == (*LTX_Q4, [z_image_eviction(store)])
+    assert store.supervisor.restarts == restarts + (1 if fails else 2)  # after the removal, and after the install
 
 
 def test_the_models_view_data_follows_the_quota_setting_and_measures_free_space_now(store):
@@ -369,7 +583,7 @@ def test_the_models_view_data_follows_the_quota_setting_and_measures_free_space_
     store.free = 12345
     second = store.client.get(f"{API}/models").json()["store"]
 
-    assert first == {"total_bytes": 0, "quota_bytes": 50 * GB, "free_bytes": 10**12}
+    assert first == {"total_bytes": 0, "quota_bytes": 50 * GB, "free_bytes": 10**12, "last_eviction": None}
     assert second["free_bytes"] == 12345
 
 

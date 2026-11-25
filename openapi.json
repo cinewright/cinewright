@@ -1966,6 +1966,44 @@
         "title": "ModelSource",
         "type": "object"
       },
+      "ModelStoreEviction": {
+        "additionalProperties": false,
+        "description": "What the storage quota removed for one install.",
+        "properties": {
+          "at": {
+            "description": "When the last of them was removed",
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "evicted": {
+            "description": "Removed quantizations in removal order: those removed before the download, then those removed once the install registered",
+            "items": {
+              "$ref": "#/components/schemas/QuotaEviction"
+            },
+            "title": "Evicted",
+            "type": "array"
+          },
+          "model_id": {
+            "description": "Model of the install that needed the room",
+            "title": "Model Id",
+            "type": "string"
+          },
+          "quant": {
+            "description": "Quantization of that install",
+            "title": "Quant",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_id",
+          "quant",
+          "evicted",
+          "at"
+        ],
+        "title": "ModelStoreEviction",
+        "type": "object"
+      },
       "ModelStoreUsage": {
         "additionalProperties": false,
         "description": "The model store (`<data dir>/models`) as the Models view shows it.",
@@ -1974,6 +2012,17 @@
             "description": "Free space of the drive that holds the model store, measured for this answer",
             "title": "Free Bytes",
             "type": "integer"
+          },
+          "last_eviction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelStoreEviction"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the quota removed for the most recent install that removed any, also when that install failed afterwards; kept since the core started, null while there was none"
           },
           "quota_bytes": {
             "anyOf": [
@@ -2646,6 +2695,38 @@
           }
         },
         "title": "ProvenanceParams",
+        "type": "object"
+      },
+      "QuotaEviction": {
+        "additionalProperties": false,
+        "description": "An installed quantization the storage quota removes, or removed, to make room for an install.",
+        "properties": {
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "name": {
+            "description": "The registry model name; the model id when the registry no longer has the model",
+            "title": "Name",
+            "type": "string"
+          },
+          "quant": {
+            "title": "Quant",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Installed disk space of the quantization, its shared files included, as `GET /models` showed it",
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model_id",
+          "quant",
+          "name",
+          "size_bytes"
+        ],
+        "title": "QuotaEviction",
         "type": "object"
       },
       "RecipeList": {
