@@ -76,7 +76,7 @@ dependencies = [
     'scipy',
     'pycocotools',
     'segment-anything',
-    'rembg[gpu]==2.0.65; platform_system != "Darwin"',
+    'rembg[gpu]==2.0.82; platform_system != "Darwin"',
     'rembg==2.0.65; platform_system == "Darwin"',
     'onnxruntime-gpu==1.22.0; python_version < "3.11" and platform_system != "Darwin"',
     'onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11" and platform_system != "Darwin"',
