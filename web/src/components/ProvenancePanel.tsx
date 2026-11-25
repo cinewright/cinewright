@@ -1,5 +1,6 @@
 // An asset's provenance record with sidecar JSON export (design/components/ProvenancePanel).
-// Field order follows the specification; missing values stay "–" so records remain comparable.
+// The design's fields come first in the specification's order; the rows after Parents are additions of this app.
+// Missing values stay "–" so records remain comparable.
 
 import { Download } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
@@ -27,12 +28,6 @@ function parameters(params: Provenance['params']): string {
   return parts.filter(Boolean).join(' · ') || DASH;
 }
 
-/** The model settings the worker passed on to the engine as asked (`params.extra`). */
-function extras(params: Provenance['params']): string {
-  const entries = Object.entries(params?.extra ?? {});
-  return entries.map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`).join(' · ') || DASH;
-}
-
 function rows(p: Provenance): Row[] {
   const model = p.model;
   const modelHashes = model?.file_sha256 ?? [];
@@ -52,8 +47,6 @@ function rows(p: Provenance): Row[] {
     },
     { label: 'Recipe', value: p.recipe ? `${p.recipe.id}@${p.recipe.version}` : DASH },
     { label: 'Seed', value: p.seed != null ? String(p.seed) : DASH },
-    { label: 'Parameters', value: parameters(p.params) },
-    { label: 'Extras', value: extras(p.params) },
     { label: 'LoRAs', value: loras.map((l) => `${l.name} (${l.weight})`).join(' · ') || DASH },
     { label: 'Host', value: p.host ? [p.host.name, p.host.gpu].filter(Boolean).join(' · ') : DASH },
     { label: 'Timestamp', value: formatTimestamp(p.created_at) },
@@ -63,6 +56,7 @@ function rows(p: Provenance): Row[] {
       title: parents.map(fullHash).join('\n') || undefined,
       hash: parents.length > 0,
     },
+    { label: 'Parameters', value: parameters(p.params) },
     { label: 'Prompt', value: p.prompt ?? DASH, title: p.prompt ?? undefined },
     { label: 'Job', value: p.job_id ? truncateMiddle(p.job_id) : DASH, title: p.job_id ?? undefined },
     { label: 'Client', value: p.client ? [p.client.kind, p.client.agent].filter(Boolean).join(' · ') : DASH },

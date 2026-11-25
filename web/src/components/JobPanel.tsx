@@ -15,6 +15,7 @@ import {
 } from '../api/client';
 import { useEventsConnected, useJobEvents } from '../api/events';
 import { truncateMiddle } from '../lib/format';
+import { ErrorBanner } from './Feedback';
 
 const JOB_STATES = {
   awaiting_approval: true,
@@ -174,17 +175,33 @@ function stateLabel(job: TrackedJob): string {
     case 'succeeded':
       return 'Done';
     case 'failed':
-      return job.error?.message ?? 'Failed';
+      return 'Failed'; // the cause shows in full below the progress bar
     case 'cancelled':
-      return job.error?.message ?? 'Cancelled';
+      return 'Cancelled';
   }
 }
 
-function announcement(job: TrackedJob): string {
-  if (job.state === 'succeeded') return 'Job done';
-  if (job.state === 'failed') return 'Job failed';
-  if (job.state === 'cancelled') return 'Job cancelled';
-  return '';
+/**
+ * The job's state in words for a live status region that exists before the job does (a region added with its text
+ * is often not read). Progress and frames change too often to announce; a failure speaks through its error banner.
+ */
+export function jobAnnouncement(job: TrackedJob): string {
+  switch (job.state) {
+    case 'awaiting_approval':
+      return 'Job submitted, awaiting approval';
+    case 'queued':
+      return 'Job queued';
+    case 'leased':
+      return 'Job starting';
+    case 'running':
+      return 'Job running';
+    case 'succeeded':
+      return 'Job done';
+    case 'failed':
+      return '';
+    case 'cancelled':
+      return job.error ? `Job cancelled: ${job.error.message}` : 'Job cancelled';
+  }
 }
 
 export function JobPanel({ job }: { job: TrackedJob }) {
@@ -204,10 +221,6 @@ export function JobPanel({ job }: { job: TrackedJob }) {
           {truncateMiddle(job.id)}
         </span>
       </div>
-      {/* Only the outcome is announced; progress and frames change too often. */}
-      <p className="sr-only" role="status">
-        {announcement(job)}
-      </p>
       <div className="asset__frame">
         {job.preview ? (
           <img src={job.preview} alt="Latest preview frame" />
@@ -234,6 +247,8 @@ export function JobPanel({ job }: { job: TrackedJob }) {
           <span>{value} %</span>
         </div>
       </div>
+      {job.state === 'failed' ? <ErrorBanner title="The job failed" error={job.error?.message ?? 'The core gave no reason.'} /> : null}
+      {job.state === 'cancelled' && job.error ? <p className="job__reason">{job.error.message}</p> : null}
       <p className="job-links">
         {outputs.map((sha256, index) => (
           <a key={sha256} href={`#/library/${sha256}`}>

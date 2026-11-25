@@ -35,7 +35,10 @@ export class StatusAnswer {
   constructor(readonly status: number) {}
 }
 
-/** Each route returns the JSON body of a 200 answer (or a ProblemAnswer or StatusAnswer), given the parsed request body. */
+/**
+ * Each route returns the JSON body of a 200 answer (or a ProblemAnswer or StatusAnswer), given the parsed request body,
+ * or a Promise of one to hold the answer until the test resolves it.
+ */
 export type Routes = Record<string, (body: unknown) => unknown>;
 
 /** Headers with the names as the client spelled them (a plain object), or lower-cased (a Headers instance or pairs). */
@@ -62,7 +65,7 @@ export function stubApi(routes: Routes): ApiCall[] {
     calls.push({ method, path, query, headers, body, rawBody: init.body });
     const route = routes[`${method} ${path}`];
     if (!route) return json(404, { type: 'about:blank', title: 'Not Found', status: 404 });
-    const answer = route(body);
+    const answer: unknown = await route(body);
     if (answer instanceof ProblemAnswer) {
       return json(answer.status, { type: 'about:blank', title: answer.title, status: answer.status, detail: answer.detail });
     }

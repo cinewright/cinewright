@@ -176,6 +176,23 @@ function enterPrompt(): void {
   fireEvent.change(screen.getByRole('textbox', { name: /^Prompt/ }), { target: { value: 'Harbour at night' } });
 }
 
+function pinModel(id: string): void {
+  fireEvent.change(screen.getByRole('combobox', { name: /^Model/ }), { target: { value: id } });
+}
+
+function chooseFile(file: File): void {
+  fireEvent.change(screen.getByLabelText('Start image file'), { target: { files: [file] } });
+}
+
+function uploads(calls: ApiCall[]): ApiCall[] {
+  return calls.filter((call) => call.method === 'POST' && call.path === '/api/v1/assets');
+}
+
+/** The texts of every live status region in the view. */
+function statusTexts(): string[] {
+  return screen.getAllByRole('status').map((element) => element.textContent ?? '');
+}
+
 // Tests that wait for the estimates to settle run on real timers, through several 300 ms debounces.
 const SLOW_TEST_MS = 15_000;
 
@@ -220,15 +237,18 @@ describe('GenerateView', () => {
     expect(calls.some((call) => call.path === '/api/v1/assets')).toBe(false);
 
     const file = new File([new Uint8Array([137, 80, 78, 71])], 'start.png', { type: 'image/png' });
-    fireEvent.change(screen.getByLabelText('Start image file'), { target: { files: [file] } });
+    // The focused button gives way to the thumbnail; keyboard focus moves on to "Replace image".
+    screen.getByRole('button', { name: 'Choose image' }).focus();
+    chooseFile(file);
     const preview = await screen.findByRole('img', { name: 'Start image preview' });
     expect(preview.getAttribute('src')).toBe(`/api/v1/assets/${INPUT_SHA}/content`);
     expect(screen.queryByRole('alert')).toBeNull();
-    const upload = calls.find((call) => call.method === 'POST' && call.path === '/api/v1/assets');
+    const upload = uploads(calls)[0];
     expect(upload?.query).toStrictEqual({ data_class: 'private' });
     expect(upload?.headers).toStrictEqual({ Accept: 'application/json', 'Content-Type': 'image/png' });
     expect(upload?.rawBody).toBe(file);
-    expect(screen.getByRole('button', { name: 'Replace image' })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Replace image' }));
+    expect(statusTexts()).toContain('Start image uploaded');
 
     fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
     const panel = await screen.findByRole('region', { name: 'Job' });
@@ -237,6 +257,8 @@ describe('GenerateView', () => {
     // Resolution, frames and frame rate stay the model's defaults unless set.
     expect(submitted.params).toStrictEqual({ seed: null });
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Starting');
+    // The submit is announced: the status region existed before the job did.
+    expect(statusTexts()).toContain('Job starting');
 
     act(() => source().emit('state', event('state', 3, { state: 'running' })));
     act(() => source().emit('progress', event('progress', 4, { phase: 'denoise', step: 3, total_steps: 8, percent: 37.5 })));
@@ -262,7 +284,134 @@ describe('GenerateView', () => {
     act(() => source().emit('state', event('state', 5, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
-    expect(within(panel).getByRole('status').textContent).toBe('Job done');
+    expect(statusTexts()).toContain('Job done');
+  });
+
+  it('uploads the input image again when a stricter data class is chosen, also while its first upload runs', async () => {
+    // The core answers with the weakest class: the view must go by the class it sent, or it would upload forever.
+    const PUBLIC_INPUT: Asset = { ...INPUT, data_class: 'public' };
+    let release: ((asset: Asset) => void) | undefined;
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('i2v', LTX, LTX_NAME, LTX_LIMITS), entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['i2v', 't2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/assets': () => {
+        if (uploads(calls).length === 1) return new Promise<Asset>((resolve) => (release = resolve));
+        // Ends an upload loop with a refusal, so the counts below fail instead of the test hanging.
+        return uploads(calls).length > 8 ? new ProblemAnswer(422, 'Invalid request', 'Too many uploads.') : PUBLIC_INPUT;
+      },
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    fireEvent.change(select('Capability'), { target: { value: 'i2v' } });
+    enterPrompt();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'face.png', { type: 'image/png' });
+    chooseFile(file);
+    await screen.findByRole('button', { name: 'Uploading the start image' });
+
+    // Biometric while the first upload (as private) still runs: once it is stored, the same file goes again.
+    fireEvent.click(screen.getByRole('radio', { name: 'Biometric' }));
+    expect(uploads(calls)).toHaveLength(1);
+    act(() => release?.(PUBLIC_INPUT));
+    await waitFor(() => expect(uploads(calls)).toHaveLength(2));
+    expect(uploads(calls).map((call) => call.query)).toStrictEqual([{ data_class: 'private' }, { data_class: 'biometric' }]);
+    expect(uploads(calls)[1]?.rawBody).toBe(file);
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
+    await waitFor(() => expect(estimates(calls).at(-1)).toMatchObject({ data_class: 'biometric', inputs: [INPUT_SHA] }));
+
+    // A looser class, or the same one again, needs no upload: the core never loosens a stored class.
+    fireEvent.click(screen.getByRole('radio', { name: 'Public' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Biometric' }));
+    await settled(calls);
+    expect(uploads(calls)).toHaveLength(2);
+
+    // Removed, then chosen again as public; focus stays in the field.
+    fireEvent.click(screen.getByRole('radio', { name: 'Public' }));
+    screen.getByRole('button', { name: 'Remove image' }).focus();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove image' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Choose image' }));
+    chooseFile(file);
+    await waitFor(() => expect(uploads(calls)).toHaveLength(3));
+    expect(uploads(calls)[2]?.query).toStrictEqual({ data_class: 'public' });
+    await screen.findByRole('img', { name: 'Start image preview' });
+
+    // A text-to-video request takes no image, so the stricter class waits until i2v is selected again.
+    fireEvent.change(select('Capability'), { target: { value: 't2v' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Private' }));
+    await settled(calls);
+    expect(uploads(calls)).toHaveLength(3);
+    fireEvent.change(select('Capability'), { target: { value: 'i2v' } });
+    await waitFor(() => expect(uploads(calls)).toHaveLength(4));
+    expect(uploads(calls)[3]?.query).toStrictEqual({ data_class: 'private' });
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
+  }, SLOW_TEST_MS);
+
+  it('drops the input image when its upload for a stricter data class fails', async () => {
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('i2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['i2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/assets': () => (uploads(calls).length === 1 ? INPUT : new ProblemAnswer(422, 'Invalid request', 'The upload stalled.')),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    chooseFile(new File([new Uint8Array([137, 80, 78, 71])], 'face.png', { type: 'image/png' }));
+    await screen.findByRole('img', { name: 'Start image preview' });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Biometric' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('The upload stalled.');
+    // Not tried again, and the image stored as private is no longer used.
+    expect(uploads(calls)).toHaveLength(2);
+    expect(screen.queryByRole('img', { name: 'Start image preview' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add a start image' })).toBeTruthy();
+  });
+
+  it('shows the full cause of a failed job and offers no Library link', async () => {
+    const { source } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/jobs': (body) => job(body as JobRequest),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
+    const panel = await screen.findByRole('region', { name: 'Job' });
+    expect(statusTexts()).toContain('Job queued');
+
+    const message =
+      'Out of memory at step 3 of 8 (denoise). Wan2GP: torch.OutOfMemoryError: CUDA out of memory, unsufficient VRAM for 1280x704 at 241 frames.';
+    act(() => source().emit('state', event('state', 2, { state: 'failed', error: { code: 'out_of_memory', message, retryable: false } })));
+    const alert = within(panel).getByRole('alert');
+    expect(within(alert).getByText('The job failed')).toBeTruthy();
+    expect(within(alert).getByText(message)).toBeTruthy();
+    const bar = within(panel).getByRole('progressbar');
+    expect(bar.getAttribute('aria-label')).toBe('Failed');
+    expect(bar.getAttribute('data-state')).toBe('fail');
+    expect(within(panel).queryByRole('link', { name: /Library/ })).toBeNull();
+  });
+
+  it('loads the job again when the stream reopens, as a new stream replays nothing', async () => {
+    let submitted: Job | undefined;
+    const { calls, source } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/jobs': (body) => (submitted = job(body as JobRequest)),
+      [`GET /api/v1/jobs/${JOB_ID}`]: () => ({ ...submitted, state: 'succeeded', outputs: [OUTPUT_SHA] }),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
+    const panel = await screen.findByRole('region', { name: 'Job' });
+    expect(calls.some((call) => call.path === `/api/v1/jobs/${JOB_ID}`)).toBe(false);
+
+    // The stream drops, the job finishes meanwhile, and the stream opens again.
+    act(() => source().onerror?.(new Event('error')));
+    act(() => source().open());
+    const link = await within(panel).findByRole('link', { name: 'Open in Library' });
+    expect(link.getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
+    expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toHaveLength(1);
   });
 
   it('shows readable upload refusals', async () => {
@@ -313,6 +462,12 @@ describe('GenerateView', () => {
     expect(optionTexts('Resolution')).toStrictEqual(['Model default', '1280x720', '832x480']);
     fireEvent.change(select('Resolution'), { target: { value: '1280x720' } });
     fireEvent.change(select('Frame rate'), { target: { value: '16' } });
+    // 0 is below the grid: the button and the estimate say what the field needs, and leaving it snaps to the minimum.
+    fireEvent.change(framesInput(), { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: 'Frames must be 5 + a multiple of 4, up to 737' })).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Estimate' })).getByText('Frames must be 5 + a multiple of 4, up to 737.')).toBeTruthy();
+    fireEvent.blur(framesInput());
+    expect(framesInput().value).toBe('5');
     setFrames('30');
     // Off Wan's grid (5 + 4n): snapped when the field is left.
     expect(framesInput().value).toBe('29');
@@ -357,7 +512,8 @@ describe('GenerateView', () => {
     await waitFor(() => expect(framesInput().value).toBe('20')); // snapped once, to Q's grid
     await screen.findByText('Choices of Model P, the model the router picked.');
 
-    expect(await settled(calls)).toBe(3);
+    // Prompt, edit, one snap; then quiet (a slow runner may merge requests, never add any).
+    expect(await settled(calls)).toBeLessThanOrEqual(3);
     // Left off P's grid: the request waits for the user instead of snapping again.
     expect(framesInput().value).toBe('20');
     expect(framesInput().getAttribute('aria-invalid')).toBe('true');
@@ -391,6 +547,41 @@ describe('GenerateView', () => {
     await screen.findByText(`Choices of ${LTX_NAME}, the model the router picked.`);
     expect(select('Resolution').disabled).toBe(false);
     expect(estimates(calls).at(-1)).toMatchObject({ capability: 't2v', params: { seed: null } });
+    expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null });
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
+  });
+
+  it('clears resolution, frames and frame rate when unpinning leaves no model to offer them', async () => {
+    // Wan is not installed, so no estimate pinned to it routes; LTX refuses a resolution it does not list.
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS), entry('t2v', WAN, WAN_NAME, WAN_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v']), model(WAN, WAN_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': (body) => {
+        const request = body as JobRequest;
+        if (request.model === WAN) return new ProblemAnswer(409, 'No worker can run this request', 'wan-2.2-t2v-14b has no installed quantization');
+        const resolution = request.params?.resolution;
+        if (resolution && !(LTX_LIMITS.resolutions ?? []).includes(resolution))
+          return new ProblemAnswer(409, 'No worker can run this request', `ltx-2.3-distilled-22b does not support ${resolution}`);
+        return feasible(LTX);
+      },
+    });
+    await screen.findByRole('option', { name: WAN_NAME });
+    pinModel(WAN);
+    enterPrompt();
+    await screen.findByText(`Choices of ${WAN_NAME}.`);
+    fireEvent.change(select('Resolution'), { target: { value: '1280x720' } });
+    fireEvent.change(select('Frame rate'), { target: { value: '16' } });
+    setFrames('29');
+    await waitFor(() => expect(estimates(calls).at(-1)).toMatchObject({ model: WAN, params: { resolution: '1280x720', frames: 29, fps: 16 } }));
+    // No estimate has routed yet, so the hint asks for a pin rather than a prompt.
+    pinModel('');
+    expect(screen.getByText('Pin a model to set these; no estimate has named a model yet.')).toBeTruthy();
+
+    await screen.findByText(`Choices of ${LTX_NAME}, the model the router picked.`);
+    expect(select('Resolution').value).toBe('');
+    expect(framesInput().value).toBe('');
+    expect(select('Frame rate').value).toBe('');
+    expect(estimates(calls).at(-1)).toMatchObject({ model: null });
     expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null });
     expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
   });

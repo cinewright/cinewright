@@ -38,7 +38,6 @@ const LINKED = asset(LINKED_SHA, '2026-11-01T08:00:00Z', {
   frames: 241,
   fps: 24,
   steps: 8,
-  extra: { denoising_strength: 0.8 },
 });
 const FIRST_PAGE = [asset(NEW_SHA, '2026-11-25T12:00:00Z'), asset(OLD_SHA, '2026-11-24T12:00:00Z')];
 
@@ -73,7 +72,6 @@ describe('LibraryView', () => {
     const calls = renderAt(`#/library/${LINKED_SHA}`);
 
     await waitFor(() => expect(provenance('Parameters')).toBe('1280x704 · 241 frames · 24 fps · 8 steps'));
-    expect(provenance('Extras')).toBe('denoising_strength=0.8');
     expect(provenance('Seed')).toBe('2814033');
     expect(calls.filter((call) => call.path === `/api/v1/assets/${LINKED_SHA}`)).toHaveLength(1);
     // The list's first page came first; the asset was then loaded by itself.

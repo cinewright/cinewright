@@ -567,7 +567,7 @@ class JobEvent(Contract):
         "`progress`: a Progress (`phase`, `step`, `total_steps`, `percent`). "
         "`preview`: `media_type` and `data_base64` (the frame as base64), as the worker sent them; the core does not "
         "check them, the shipped worker sends `image/png`, `image/jpeg` or `image/webp` of at most 256 KiB. "
-        "`log`: `message`, a sentence for people. Log rows that releases 0.0.1 to 0.0.3 stored for an upload also "
+        "`log`: `message`, a sentence for people. Log rows that cores before migration 0002 stored for an upload also "
         "carry `output` (`name`, `sha256`, `media_type`, `size_bytes`), and replay still sends them as stored; uploads "
         "are now the job's outputs, and workers may not send `output`."
     )

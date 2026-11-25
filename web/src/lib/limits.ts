@@ -45,11 +45,14 @@ export function describeGrid(grid: FrameGrid): string {
   return grid.max === null ? base : `${base}, up to ${grid.max}`;
 }
 
-/** A whole number of frames from the field's text: null when empty (model default), undefined when not a whole number. */
+/**
+ * A whole number of frames from the field's text: null when empty (model default), undefined when not a whole number.
+ * 0 is a whole number too; the grid refuses it, and leaving the field snaps it to the grid's minimum.
+ */
 export function parseFrames(text: string): number | null | undefined {
   const trimmed = text.trim();
   if (trimmed === '') return null;
   if (!/^\d+$/.test(trimmed)) return undefined;
   const value = Number(trimmed);
-  return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+  return Number.isSafeInteger(value) ? value : undefined;
 }

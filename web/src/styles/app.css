@@ -530,6 +530,11 @@ a.cw-btn {
   margin-left: auto;
 }
 
+.job__reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .job-links {
   display: flex;
   flex-wrap: wrap;

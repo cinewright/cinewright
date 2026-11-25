@@ -6,6 +6,9 @@
 // A snapped value changes the request, so the estimate, the route and the limits can change again. The request
 // therefore holds only what the user set (empty = model default), and a route change adjusts it at most once per
 // user edit (see `snapArmed`); a frame count left off the grid blocks the request instead of snapping again.
+//
+// The input image is uploaded when chosen, with the data class selected then. A stricter class chosen later uploads
+// the same file again, because the core tightens an existing asset's class on a repeat upload and never loosens it.
 
 import { Play } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
@@ -26,7 +29,7 @@ import {
 import { DATA_CLASSES, DataClassTag } from '../components/DataClassTag';
 import { ErrorBanner } from '../components/Feedback';
 import { ImageInputField } from '../components/ImageInputField';
-import { JobPanel, useTrackedJob } from '../components/JobPanel';
+import { JobPanel, jobAnnouncement, useTrackedJob } from '../components/JobPanel';
 import { Light } from '../components/StatusLight';
 import { DASH, formatDuration, formatEur } from '../lib/format';
 import { IMAGE_CAPABILITIES, IMAGE_INPUT_CAPABILITIES, describeGrid, frameGrid, onGrid, parseFrames, snapFrames } from '../lib/limits';
@@ -47,6 +50,17 @@ const DATA_CLASS_ORDER: DataClass[] = ['public', 'private', 'biometric'];
 const ESTIMATE_DELAY_MS = 300;
 
 type EstimateState = { status: 'idle' } | { status: 'loading' } | { status: 'done'; estimate: Estimate } | { status: 'error'; error: unknown };
+
+/** An uploaded input image, the file it came from, and the strictest data class it is stored with. */
+interface InputImage {
+  asset: Asset;
+  file: File;
+  dataClass: DataClass;
+}
+
+function stricter(a: DataClass, b: DataClass): DataClass {
+  return DATA_CLASS_ORDER.indexOf(a) >= DATA_CLASS_ORDER.indexOf(b) ? a : b;
+}
 
 function parseSeed(text: string): number | null | undefined {
   const trimmed = text.trim();
@@ -73,7 +87,7 @@ export function GenerateView() {
   // A number field reports text it cannot read as an empty value; `badInput` tells the two apart.
   const [framesUnreadable, setFramesUnreadable] = useState(false);
   const [fps, setFps] = useState('');
-  const [image, setImage] = useState<Asset | null>(null);
+  const [image, setImage] = useState<InputImage | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
   const [imageError, setImageError] = useState<unknown>();
   const [dataClass, setDataClass] = useState<DataClass>('private');
@@ -128,7 +142,10 @@ export function GenerateView() {
   let framesBlocker: string | null = null; // still images have no frames
   if (!stillImage && (frames === undefined || framesUnreadable)) framesBlocker = 'Frames must be a whole number';
   else if (!stillImage && typeof frames === 'number' && grid && !onGrid(frames, grid)) framesBlocker = `Frames must be ${describeGrid(grid)}`;
+  else if (!stillImage && frames === 0) framesBlocker = 'Frames must be 1 or more'; // no grid known (JobParams: frames >= 1)
   const trimmedPrompt = prompt.trim();
+  // An image stored with a weaker class than the selected one waits for its repeat upload.
+  const imageTooLoose = image !== null && stricter(image.dataClass, dataClass) !== image.dataClass;
 
   const request: JobRequest | null = useMemo(() => {
     // A frame count off the grid stops the estimate rather than being snapped again (no route loop).
@@ -145,7 +162,7 @@ export function GenerateView() {
       model: pinned || null,
       priority,
       data_class: dataClass,
-      inputs: needsImage && image ? [image.sha256] : [],
+      inputs: needsImage && image ? [image.asset.sha256] : [],
       params,
     };
   }, [trimmedPrompt, seed, framesBlocker, resolution, stillImage, frames, fps, selectedCapability, pinned, priority, dataClass, needsImage, image]);
@@ -180,9 +197,17 @@ export function GenerateView() {
 
   // When the fields' model changes, drop choices it does not offer. Resolution and frame rate fall back to the model
   // default, which every model accepts, so they settle at once. Frames snap to the new grid at most once per user edit.
+  // With no model known (a pin removed before any estimate routed) the fields are disabled, so nothing kept from the
+  // previous model may stay in the request: the user could neither see nor clear it.
   const limitsKey = limits ? `${selectedCapability}:${limitsModelId}` : '';
   useEffect(() => {
-    if (!limits) return;
+    if (!limits) {
+      setResolution('');
+      setFramesText('');
+      setFramesUnreadable(false);
+      setFps('');
+      return;
+    }
     setResolution((value) => (value && !(limits.resolutions ?? []).includes(value) ? '' : value));
     setFps((value) => (value && !(limits.fps ?? []).includes(Number(value)) ? '' : value));
     if (!snapArmed.current || stillImage || !grid) return;
@@ -209,6 +234,27 @@ export function GenerateView() {
     if (typeof value === 'number' && grid && !onGrid(value, grid)) setFramesText(String(snapFrames(value, grid)));
   };
 
+  /** Upload `file` with `uploadClass`; only the latest upload counts. A failed repeat upload drops the image. */
+  const upload = (file: File, uploadClass: DataClass, repeat: boolean) => {
+    const count = ++uploadCount.current;
+    setImageError(undefined);
+    setUploading(file.name);
+    api
+      .uploadImage(file, uploadClass)
+      .then((asset) => {
+        // The answer names the stored class, which may be stricter already; the class sent is stored at least.
+        if (count === uploadCount.current) setImage({ asset, file, dataClass: stricter(uploadClass, asset.data_class) });
+      })
+      .catch((error: unknown) => {
+        if (count !== uploadCount.current) return;
+        if (repeat) setImage(null);
+        setImageError(error);
+      })
+      .finally(() => {
+        if (count === uploadCount.current) setUploading(null);
+      });
+  };
+
   const chooseImage = (file: File) => {
     snapArmed.current = true;
     const problem = imageTypeProblem(file);
@@ -216,20 +262,7 @@ export function GenerateView() {
       setImageError(new Error(problem));
       return;
     }
-    const count = ++uploadCount.current;
-    setImageError(undefined);
-    setUploading(file.name);
-    api
-      .uploadImage(file, dataClass)
-      .then((asset) => {
-        if (count === uploadCount.current) setImage(asset);
-      })
-      .catch((error: unknown) => {
-        if (count === uploadCount.current) setImageError(error);
-      })
-      .finally(() => {
-        if (count === uploadCount.current) setUploading(null);
-      });
+    upload(file, dataClass, false);
   };
   const removeImage = () => {
     snapArmed.current = true;
@@ -237,11 +270,19 @@ export function GenerateView() {
     setImageError(undefined);
   };
 
+  // A class stricter than the image is stored with: once no upload runs, and while the request takes the image, upload
+  // the same file again (the core tightens the stored class). Its answer stores at least the selected class, so the
+  // condition ends; a failed repeat upload drops the image, so nothing retries in a loop.
+  useEffect(() => {
+    if (needsImage && image && imageTooLoose && uploading === null) upload(image.file, dataClass, true);
+    // `upload` is a new closure on every render; these values decide when to upload.
+  }, [needsImage, image, imageTooLoose, uploading, dataClass]);
+
   let blocker: string | null = null;
   if (!trimmedPrompt) blocker = 'Enter a prompt';
   else if (seed === undefined) blocker = 'Seed must be a whole number';
   else if (framesBlocker) blocker = framesBlocker;
-  else if (needsImage && uploading !== null) blocker = `Uploading the ${imageLabel.toLowerCase()}`;
+  else if (needsImage && (uploading !== null || imageTooLoose)) blocker = `Uploading the ${imageLabel.toLowerCase()}`;
   else if (needsImage && !image) blocker = `Add ${selectedCapability === 'i2v' ? 'a start' : 'an input'} image`;
   else if (submitting) blocker = 'Submitting';
   else if (estimate.status === 'loading' || estimate.status === 'idle') blocker = 'Estimating';
@@ -266,11 +307,15 @@ export function GenerateView() {
       .finally(() => setSubmitting(false));
   };
 
-  const limitsNote = !limitsEntry
-    ? 'Pin a model, or enter a prompt so the router picks one; the choices follow its limits.'
-    : pinned
-      ? `Choices of ${limitsEntry.model_name}.`
-      : `Choices of ${limitsEntry.model_name}, the model the router picked.`;
+  let limitsNote = 'Pin a model, or enter a prompt so the router picks one; the choices follow its limits.';
+  if (limitsEntry) limitsNote = pinned ? `Choices of ${limitsEntry.model_name}.` : `Choices of ${limitsEntry.model_name}, the model the router picked.`;
+  else if (trimmedPrompt) limitsNote = 'Pin a model to set these; no estimate has named a model yet.';
+
+  // What the estimate waits for while there is no request, in the button's order.
+  let requestHint: string | undefined;
+  if (!trimmedPrompt) requestHint = 'Enter a prompt to get an estimate.';
+  else if (seed === undefined) requestHint = 'Seed must be a whole number, 0 or more.';
+  else if (framesBlocker) requestHint = `${framesBlocker}.`;
 
   return (
     <div className="view">
@@ -326,8 +371,28 @@ export function GenerateView() {
             </label>
           </div>
 
+          <fieldset className="choice">
+            <legend className="cw-field__label">Data class</legend>
+            <div className="choice__options">
+              {DATA_CLASS_ORDER.map((value) => (
+                <label key={value} className="choice__option">
+                  <input type="radio" name="data-class" value={value} checked={dataClass === value} onChange={() => edit(setDataClass)(value)} />
+                  <DataClassTag value={value} />
+                </label>
+              ))}
+            </div>
+            <span className="cw-field__hint">{DATA_CLASSES[dataClass].hint}</span>
+          </fieldset>
+
           {needsImage ? (
-            <ImageInputField label={imageLabel} image={image} uploading={uploading} error={imageError} onChoose={chooseImage} onRemove={removeImage} />
+            <ImageInputField
+              label={imageLabel}
+              image={image?.asset ?? null}
+              uploading={uploading}
+              error={imageError}
+              onChoose={chooseImage}
+              onRemove={removeImage}
+            />
           ) : null}
 
           <div className="stack stack--tight">
@@ -398,19 +463,6 @@ export function GenerateView() {
             <p className="cw-field__hint">{limitsNote}</p>
           </div>
 
-          <fieldset className="choice">
-            <legend className="cw-field__label">Data class</legend>
-            <div className="choice__options">
-              {DATA_CLASS_ORDER.map((value) => (
-                <label key={value} className="choice__option">
-                  <input type="radio" name="data-class" value={value} checked={dataClass === value} onChange={() => edit(setDataClass)(value)} />
-                  <DataClassTag value={value} />
-                </label>
-              ))}
-            </div>
-            <span className="cw-field__hint">{DATA_CLASSES[dataClass].hint}</span>
-          </fieldset>
-
           <div className="form-row">
             <label className="cw-field">
               <span className="cw-field__label">Priority</span>
@@ -446,7 +498,11 @@ export function GenerateView() {
         </form>
 
         <div className="stack">
-          <EstimatePanel state={estimate} hasRequest={request !== null} />
+          <EstimatePanel state={estimate} hasRequest={request !== null} hint={requestHint} />
+          {/* Present before any job, so the first announcement ("Job queued") is read. */}
+          <p className="sr-only" role="status">
+            {tracked.job ? jobAnnouncement(tracked.job) : ''}
+          </p>
           {tracked.job ? <JobPanel job={tracked.job} /> : null}
         </div>
       </div>
@@ -454,8 +510,8 @@ export function GenerateView() {
   );
 }
 
-/** Exported for the component tests. */
-export function EstimatePanel({ state, hasRequest }: { state: EstimateState; hasRequest: boolean }) {
+/** Exported for the component tests. `hint` says what the estimate waits for while there is no request. */
+export function EstimatePanel({ state, hasRequest, hint = 'Enter a prompt to get an estimate.' }: { state: EstimateState; hasRequest: boolean; hint?: string }) {
   // The only live text: the outcome, not the whole panel (cost and ETA change with every keystroke).
   let outcome = '';
   if (state.status === 'error') outcome = 'Estimate unavailable';
@@ -468,7 +524,7 @@ export function EstimatePanel({ state, hasRequest }: { state: EstimateState; has
       <p className="sr-only" role="status">
         {outcome}
       </p>
-      {!hasRequest ? <p className="cw-muted">Enter a prompt to get an estimate.</p> : null}
+      {!hasRequest ? <p className="cw-muted">{hint}</p> : null}
       {hasRequest && state.status === 'loading' ? <p className="cw-muted">Estimating</p> : null}
       {state.status === 'error' ? <ErrorBanner title="Estimate unavailable" error={state.error} /> : null}
       {state.status === 'done' ? <EstimateDetails estimate={state.estimate} /> : null}
