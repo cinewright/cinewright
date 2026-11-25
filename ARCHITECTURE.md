@@ -64,7 +64,7 @@ Internal API routes (scaffold status in brackets; `501` answers with problem typ
 
 - **Repository workflow**: pull requests to `main` with one required check, `ci` (`.github/workflows/ci.yml`); release-please keeps a release PR open on `main`, and the owner merges it to release (`.github/workflows/release.yml`). Decisions live here, the roadmap as issues. This replaces the spec's own operating model (two apps, merge to Nightly, 3-day auto-promotion, ROADMAP.md/DECISIONS.md). (2026-11-25)
 - **Repository**: `cinewright/cinewright` in its own organisation, not `nullthrone/cinewright` as the spec assumed. (2026-11-22)
-- **Release channel**: stable releases from `main` as GitHub releases with the Windows installer as asset and build provenance attestation, so the in-app update channel is `stable` only. (2026-11-22)
+- **Release channel**: stable releases from `main` as GitHub releases with the Windows installer as asset and build provenance attestation; the in-app update channel is `stable` only. (2026-11-22)
 - **Distribution**: a real Windows installer for end users, no command line. No PyPI package. Linux follows later. (2026-11-22)
 - **Code signing**: installers are not Authenticode-signed yet (paid certificate = owner cost decision); provenance comes from GitHub attestations. (2026-11-22)
 - **Scope of the first build**: Phase 0 and the scaffold (contracts, structure, walking skeleton with a mock engine). Phase 1 to 4 are issues; tracking issues #24 (Phase 1, Gate 1) to #27 (Phase 4). (2026-11-22)
