@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/cinewright/cinewright/compare/v0.1.0...v0.2.0) (2026-11-25)
+
+
+### Features
+
+* complete the Wan2GP generation path for installed quantizations and still images ([#88](https://github.com/cinewright/cinewright/issues/88)) ([dee9791](https://github.com/cinewright/cinewright/commit/dee979132ae09466d1f4ac092eb6b97c5c6759a9))
+* create images and clips in the Generate view and open them in the Library ([#89](https://github.com/cinewright/cinewright/issues/89)) ([f219e0a](https://github.com/cinewright/cinewright/commit/f219e0a80cdc0f4885d52ffcf2147c2c962704e8))
+* install and remove models from the Models view with hash-checked downloads ([#86](https://github.com/cinewright/cinewright/issues/86)) ([35458d7](https://github.com/cinewright/cinewright/commit/35458d7dca4b7e75887cfef3fa2e9c37c2271907))
+
 ## [0.1.0](https://github.com/cinewright/cinewright/compare/v0.0.4...v0.1.0) (2026-11-25)
 
 
