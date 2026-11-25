@@ -4,8 +4,8 @@
   python -m cinewright.devtools surface                   print the public surface, one sorted line per item
   python -m cinewright.devtools upstream-check [--json]   report a Wan2GP commit eligible for a pin update
 
-The surface (routes, request and response schemas, MCP tools) is what governance's
-classification check compares between base and head: a change there is a `feat`.
+The surface (routes, request and response schemas, MCP tools) is the public contract;
+compare it between base and head: a change there is a `feat`.
 
 upstream-check exits 0 when no upstream commit is eligible (and prints nothing), 10 when one
 is, and 1 when the check failed (see cinewright.upstream_check).

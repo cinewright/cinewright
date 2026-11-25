@@ -66,5 +66,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.vulture]
-# Protocol parameter called positionally by the approvals routes (housekeeping dead_code prefilter).
+# Protocol parameter called positionally by the approvals routes (vulture would report it as unused).
 ignore_names = ["approve"]
