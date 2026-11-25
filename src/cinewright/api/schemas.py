@@ -96,6 +96,8 @@ class ClientKind(StrEnum):
 
 
 class EventKind(StrEnum):
+    """Kind of a job event, also its SSE event name; `JobEvent` describes the `data` of each kind."""
+
     STATE = "state"
     PROGRESS = "progress"
     PREVIEW = "preview"
@@ -199,8 +201,20 @@ class HardwareProfile(Contract):
 class Limits(Contract):
     resolutions: list[str] = Field(default_factory=list, description="`WIDTHxHEIGHT` values the model supports")
     max_frames: int | None = None
+    min_frames: int | None = Field(default=None, ge=1, description="Fewest frames of a clip; null for a model without frames (images only)")
+    frames_step: int | None = Field(
+        default=None,
+        ge=1,
+        description="A clip has `min_frames + n * frames_step` frames (n >= 0); null for a model without frames",
+    )
     fps: list[int] = Field(default_factory=list)
     max_duration_s: float | None = None
+
+    @model_validator(mode="after")
+    def _frame_grid(self) -> Self:
+        if (self.min_frames is None) != (self.frames_step is None):
+            raise ValueError("min_frames and frames_step are set together, or both are null")
+        return self
 
 
 class License(Contract):
@@ -533,14 +547,36 @@ class JobList(Contract):
 
 
 class JobEvent(Contract):
+    """A job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
+
+    Stored events (`state`, `progress`, `log`) have the SSE id `<job_id>:<seq>`. A reconnecting browser resends the
+    last one as `Last-Event-ID`, and the stream replays the stored events after it. Previews are not stored in
+    `job_events` and never replayed: a `preview` has no `id:` line and repeats the `seq` of the job's latest stored
+    event, so `Last-Event-ID` always names a stored event. After a stream opens or reconnects (after its replay), the
+    core sends the latest kept preview of each running job the stream covers once; later previews follow live.
+    """
+
     job_id: str
-    seq: int = Field(description="Per-job sequence number, starting at 1")
+    seq: int = Field(description="Per-job sequence number of the stored events, starting at 1; a `preview` repeats the latest one")
     kind: EventKind
-    data: dict[str, Any]
+    data: dict[str, Any] = Field(
+        description="By `kind`. "
+        "`state`: `state` (a JobState), plus where set: `worker_id` (`leased`), `reason` (why the job was queued again, "
+        "cancelled or failed after its last attempt), `outputs` (`succeeded`: the output SHA-256 values in completion "
+        "order) and `error` (a JobError: `failed`, or `cancelled` while running). "
+        "`progress`: a Progress (`phase`, `step`, `total_steps`, `percent`). "
+        "`preview`: `media_type` and `data_base64` (the frame as base64), as the worker sent them; the core does not "
+        "check them, the shipped worker sends `image/png`, `image/jpeg` or `image/webp` of at most 256 KiB. "
+        "`log`: `message`, a sentence for people. Log rows that releases 0.0.1 to 0.0.3 stored for an upload also "
+        "carry `output` (`name`, `sha256`, `media_type`, `size_bytes`), and replay still sends them as stored; uploads "
+        "are now the job's outputs, and workers may not send `output`."
+    )
     created_at: datetime
 
 
 class SystemEventKind(StrEnum):
+    """Kind of a non-job event, also its SSE event name and the `SystemEvent` field that carries its payload."""
+
     ENGINE = "engine"
     MODEL = "model"
 
@@ -560,8 +596,10 @@ class ModelInstall(Contract):
 
 
 class SystemEvent(Contract):
-    """A non-job event of `GET /events`: the SSE event name is `kind`; it has no id and is never replayed.
+    """A non-job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
 
+    Only a stream without `job_id` carries them. They have no id, are not stored and never replayed, so a stream
+    gets only those published while it is open; reload `GET /system` or `GET /models` whenever the stream opens.
     `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
     `model`: progress or a state change of a model install, also a removal or an eviction (`absent`).
     """

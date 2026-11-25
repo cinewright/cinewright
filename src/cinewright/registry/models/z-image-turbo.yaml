@@ -18,7 +18,10 @@ limits:
     544x960, 832x624, 624x832, 720x720, 832x480, 480x832, 672x384, 384x672, 512x512, 576x320,
     320x576, 448x448, 448x256, 256x448, 320x320,
   ]
+  # Images only: Wan2GP's z_image has no frames_minimum or frames_steps.
   max_frames: null
+  min_frames: null
+  frames_step: null
   fps: []
   max_duration_s: null
 license:

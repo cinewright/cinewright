@@ -21,8 +21,11 @@ limits:
     512x960, 832x576, 576x832, 704x704, 832x448, 448x832, 640x384, 384x640, 512x512, 576x320,
     320x576, 448x448, 448x256, 256x448, 320x320,
   ]
-  # Wan2GP frame slider maximum for sliding-window models (737). Frame counts are 17 + 8n.
+  # Wan2GP frame slider maximum for sliding-window models (737).
   max_frames: 737
+  # Wan2GP frames_minimum and frames_steps of ltx2_22B_distilled: frame counts are 17 + 8n.
+  min_frames: 17
+  frames_step: 8
   fps: [24]
   # 737 frames / 24 fps, rounded down.
   max_duration_s: 30.7
