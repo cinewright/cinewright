@@ -855,16 +855,64 @@ def test_unreferenced_files_the_plan_counts_go_before_the_download_and_need_no_c
     assert install.evicted == (T2V,) and store_total(env) <= env.quota
 
 
-def test_the_quota_step_removes_nothing_while_the_text_encoder_is_switched(env):
+def test_a_text_encoder_switch_waits_for_the_quota_step_of_an_install_that_registered(env):
     install_three(env)
     quota_without_t2v(env)
     install = env.store.prepare_install(*LTX)
     env.store.run_install(install)
-    switch = env.store.prepare_switch("bf16")  # accepted between the registration and the quota step
 
-    assert env.store.evict_for_quota(install) == []
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("bf16")  # between the registration and the quota step
+    assert failure.value.code == "installing"
 
-    assert T2V in env.store.installed()
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    assert store_total(env) <= env.quota
+    env.store.run_switch(env.store.prepare_switch("bf16"))
+    assert env.store.text_encoder_variant() == "bf16"
+
+
+def test_a_switch_waits_for_the_quota_step_also_when_the_config_merge_fails(env, monkeypatch):
+    install_three(env)
+    quota_without_t2v(env)
+    env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."]})
+    install = env.store.prepare_install(*LTX)
+
+    def unwritable(path: object, data: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("cinewright.core.modelstore._write_json", unwritable)
+    with pytest.raises(PermissionError):
+        env.store.run_install(install)  # registered: only the merge failed
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("bf16")
+    assert failure.value.code == "installing"
+
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    monkeypatch.undo()
+    env.store.run_switch(env.store.prepare_switch("bf16"))
+
+
+def test_a_failed_download_leaves_switches_open_without_a_quota_step(env):
+    env.hub.files[env.url("z-image-turbo", "ZImageTurbo_quanto_bf16_int8.safetensors")] = b"broken"
+    install = env.store.prepare_install("z-image-turbo", "int8")
+    with pytest.raises(ModelStoreError):
+        env.store.run_install(install)
+
+    env.store.run_switch(env.store.prepare_switch("bf16"))  # nothing registered, so nothing waits for a quota step
+
+
+def test_the_quota_step_removes_nothing_while_a_switch_runs_that_started_without_waiting_for_it(env):
+    install_three(env)
+    quota_without_t2v(env)
+    install = env.store.prepare_install(*LTX)
+    env.store.run_install(install)
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    env.quota = store_total(env) - 1  # lowered after the quota step
+    switch = env.store.prepare_switch("bf16")
+
+    assert env.store.evict_for_quota(install) == []  # called again, without `run_install`, while the switch runs
+
+    assert env.store.installed() == {Z_IMAGE, I2V, LTX}
     env.store.run_switch(switch)
 
 
@@ -967,6 +1015,7 @@ def test_a_variant_switch_excludes_installs_removals_and_running_jobs(env):
         env.store.prepare_switch("bf16")
     assert failure.value.code == "installing"
     env.store.run_install(install)
+    env.store.evict_for_quota(install)  # the install ends for a switch with its quota step
 
     switch = env.store.prepare_switch("bf16")
     for refused in (lambda: env.store.prepare_install("wan-2.2-i2v-14b", "int8"), lambda: env.store.remove("z-image-turbo")):
@@ -1094,10 +1143,11 @@ def test_merging_wgp_config_keeps_every_other_key(tmp_path):
         "text_encoder_quantization": "bf16",
     }
 
-    config.write_bytes(b"[1, 2]")
-    with pytest.raises(ModelStoreError) as failure:
-        merge_wgp_config(config, store, "int8")
-    assert failure.value.code == "config_invalid"
+    for invalid in (b"[1, 2]", b'{"profile": "\xff"}'):  # not an object; not UTF-8
+        config.write_bytes(invalid)
+        with pytest.raises(ModelStoreError) as failure:
+            merge_wgp_config(config, store, "int8")
+        assert failure.value.code == "config_invalid"
 
 
 def test_an_install_reports_whether_wan2gp_sees_the_store(env):

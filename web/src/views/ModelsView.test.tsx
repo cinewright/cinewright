@@ -282,6 +282,10 @@ describe('ModelsView', () => {
       'This frees 40.0 GB. They are removed before the download starts and stay removed if the download fails or is cancelled; ' +
         'using them again means downloading them again.',
     );
+    // A screen reader reads the list and the consequence as the dialog opens, not only the title and the focused Cancel.
+    expect(screen.getByRole('dialog', { description: /Wan 2\.2 Text-to-Video 14B int8 · 28\.0 GB.*stay removed if the download fails/ })).toBe(
+      dialog,
+    );
     expect(screen.queryByRole('alert')).toBeNull(); // a question, not an error
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
@@ -335,6 +339,42 @@ describe('ModelsView', () => {
     ]);
   });
 
+  it('asks about a second install refused meanwhile only once the first question is answered', async () => {
+    const server: Server = { models: [I2V, T2V, zImage('absent')], store: STORE, variant: 'int8' };
+    const answers: Record<string, (answer: unknown) => void> = {};
+    const held = (name: string) => () => new Promise((resolve) => (answers[name] = resolve));
+    const { calls } = renderView(server, {
+      'POST /api/v1/models/z-image-turbo/install': held('z-image'),
+      'POST /api/v1/models/wan-2.2-t2v-14b/install': held('t2v'),
+    });
+
+    // Both installs are sent before either answer arrives.
+    fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Install Wan 2.2 Text-to-Video 14B bf16' }));
+    await waitFor(() => expect(Object.keys(answers)).toHaveLength(2));
+    answers['z-image']?.(evictionNeeded([evicted(T2V)], 28 * GiB));
+    const first = await screen.findByRole('dialog', { name: 'Remove a model to install Z-Image Turbo 6B int8?' });
+    answers['t2v']?.(evictionNeeded([evicted(I2V)], 30.5 * GiB));
+    await waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2));
+    await act(async () => {}); // the second refusal is handled
+
+    expect(screen.getByRole('dialog')).toBe(first); // still the question the user is answering, with its own list
+    expect(first.textContent).toContain('Wan 2.2 Text-to-Video 14B int8 · 28.0 GB');
+    fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
+
+    const second = await screen.findByRole('dialog', { name: 'Remove a model to install Wan 2.2 Text-to-Video 14B bf16?' });
+    expect(second.textContent).toContain('Wan 2.2 Image-to-Video 14B int8 · 30.5 GB');
+    fireEvent.click(within(second).getByRole('button', { name: 'Remove and install' }));
+
+    await waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(3));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(calls.filter((call) => call.method === 'POST').map(callSummary)).toStrictEqual([
+      { method: 'POST', path: '/api/v1/models/z-image-turbo/install', query: { quant: 'int8' }, body: undefined },
+      { method: 'POST', path: '/api/v1/models/wan-2.2-t2v-14b/install', query: { quant: 'bf16' }, body: undefined },
+      { method: 'POST', path: '/api/v1/models/wan-2.2-t2v-14b/install', query: { quant: 'bf16', evict: 'wan-2.2-i2v-14b:int8' }, body: undefined },
+    ]);
+  });
+
   it('shows an eviction refusal without a list of models in the error banner', async () => {
     const detail = 'Z-Image Turbo 6B int8 fits on the drive of the model store only after removing models, so nothing was installed.';
     renderView({ models: [zImage('absent')], store: STORE, variant: 'int8' }, {
@@ -361,7 +401,14 @@ describe('ModelsView', () => {
     act(() => source().emit('model', modelEvent({ model_id: 'wan-2.2-t2v-14b', quant: 'int8', install_state: 'absent' })));
 
     const line = await within(panel).findByText(/Removed to make room/);
-    expect(line.textContent).toBe('Removed to make room for Z-Image Turbo 6B int8 within the quota: Wan 2.2 Text-to-Video 14B int8 · 28.0 GB.');
+    const reason = 'Removed to make room for Z-Image Turbo 6B int8 within the quota: Wan 2.2 Text-to-Video 14B int8 · 28.0 GB.';
+    expect(line.textContent).toBe(reason);
+    // The removal's event follows the install's at once; one announcement keeps both, then the reason from the reload.
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        `Z-Image Turbo 6B int8 is installed. Wan 2.2 Text-to-Video 14B int8 was removed. ${reason}`,
+      ),
+    );
   });
 
   it('names the install by its id when the model list no longer has it', async () => {
@@ -373,6 +420,7 @@ describe('ModelsView', () => {
       'Removed to make room for ltx-2.3-22b-distilled Q4_K_M within the quota: Wan 2.2 Image-to-Video 14B int8 · 30.5 GB, ' +
         'Wan 2.2 Text-to-Video 14B int8 · 28.0 GB.',
     );
+    expect(screen.getByRole('status').textContent).toBe(''); // an earlier removal is shown, not announced as news
   });
 
   it('shows why an install failed and offers to try again or remove its downloads', async () => {

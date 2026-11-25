@@ -41,7 +41,8 @@ A text encoder variant switch (`prepare_switch`, then `run_switch`) checks free 
 variant's files of every installed quantization the same way, re-registers each one's references and stores the
 variant in one transaction, and rewrites `text_encoder_quantization`. The caller then restarts the worker and
 collects the previous variant's files (`collect_garbage`); until then the files a waiting or running job needs
-stay in both variants. Installs, removals and a switch exclude each other.
+stay in both variants. Installs, removals and a switch exclude each other; an install ends for a switch only once
+its quota step ran.
 """
 
 from __future__ import annotations
@@ -312,12 +313,12 @@ def merge_wgp_config(path: Path, store_root: Path, variant: str) -> WgpConfigRes
     change takes effect when the worker restarts.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        data = path.read_bytes()
     except FileNotFoundError:
         return "missing"
     try:
-        config = json.loads(text)
-    except ValueError:
+        config = json.loads(data.decode("utf-8"))
+    except ValueError:  # not UTF-8 or not JSON: only `config_invalid` and `OSError` leave this function
         config = None
     if not isinstance(config, dict):
         raise ModelStoreError("config_invalid", f"{path} is not a JSON object, so the model store is not registered in WanGP.")
@@ -477,6 +478,8 @@ class ModelStore:
         # One install downloads and registers at a time: two may want the same file, and the first moves it into place.
         self._download_lock = threading.Lock()
         self._active: dict[InstallKey, Install] = {}  # installs prepared and not yet ended
+        # Installs that registered and whose quota step has not run yet; a text encoder switch waits for them.
+        self._settling: set[InstallKey] = set()
         self._switching: str | None = None  # the text encoder variant a switch in progress installs
         self._previous_variant: str | None = None  # the variant a switch replaced, until the worker no longer uses it
         self._reserved: Counter[str] = Counter()  # path keys of the files active installs and a switch need
@@ -583,7 +586,8 @@ class ModelStore:
         """`prepare_install`, `run_install`, then the quota step (`evict_for_quota`).
 
         Returns the prepared install with `evictions` extended by what the quota step removed. A config merge that
-        fails after the registration raises once the quota step ran.
+        fails after the registration raises once the quota step ran, without returning what that step removed (the log
+        names each removal); `Core._run_install`, which calls the three steps itself, reports them in that case too.
         """
         install = self.prepare_install(model_id, quant, evict=evict)
         try:
@@ -692,9 +696,11 @@ class ModelStore:
         does not see the store until a merge after its first start. On any failure, a cancellation included, no file of
         the install is registered, the quantization is `failed` with the message, and `ModelStoreError` is raised. A
         config that cannot be merged raises after the registration: the files are installed, but Wan2GP does not see
-        them until the config is fixed.
+        them until the config is fixed. Once the files registered, run the quota step (`evict_for_quota`) whatever this
+        returns or raises: until it ran, `prepare_switch` refuses with `installing`.
         """
         report = progress or (lambda _: None)
+        registered = False
         try:
             with self._download_lock:  # also over the registration: a staged file another install needs moves with it
                 ready = self._download(
@@ -704,6 +710,7 @@ class ModelStore:
                     cancelled,
                 )
                 self._register(install, ready)
+                registered = True
         except ModelStoreError as exc:
             self._fail(install, exc.message)
             raise
@@ -723,6 +730,8 @@ class ModelStore:
             with self._lock:
                 self._active.pop(install.key, None)
                 self._release(install.files)
+                if registered:  # in the same step, so that no switch starts before the quota step
+                    self._settling.add(install.key)
         return self.register_in_wan2gp()
 
     def evict_for_quota(self, install: Install) -> list[Eviction]:
@@ -734,13 +743,14 @@ class ModelStore:
         never `install` itself, an install in progress or a quantization a waiting or running job needs, and a shared
         file only with its last reference. The growth of installs in progress is not counted; each runs this step once
         it registered. It never refuses and never fails the install: with no candidate left the store stays above the
-        quota, and an error goes to the log, with what was removed until then returned. It removes nothing while a text
-        encoder switch runs, since removals and a switch exclude each other; the next install's quota check counts the
-        whole store.
+        quota, and an error goes to the log, with what was removed until then returned. A text encoder switch cannot
+        start between the registration and this step (`prepare_switch` refuses with `installing` until it ran); one
+        that runs anyway, as when this is called without `run_install`, makes it remove nothing.
         """
         removed: list[Eviction] = []
         try:
             with self._lock:
+                self._settling.discard(install.key)  # first, so that every way out of the step lets a switch start
                 row = self.db.query_one("SELECT state FROM installed_models WHERE model_id = ? AND quant = ?", install.key)
                 if row is None or row["state"] != "installed":
                     return removed
@@ -947,8 +957,9 @@ class ModelStore:
     def prepare_switch(self, variant: str) -> VariantSwitch:
         """Plan and check a switch of the host's text encoder variant to `variant`; refuses before any byte is downloaded.
 
-        Refuses while a job runs on the host, while an install or another switch is in progress, and when the files
-        the installed quantizations need with `variant` do not fit on the store's drive. The quota is not applied:
+        Refuses while a job runs on the host, while an install or another switch is in progress (an install that
+        registered counts until its quota step ran), and when the files the installed quantizations need with
+        `variant` do not fit on the store's drive. The quota is not applied:
         a switch removes nothing but the previous variant's files. Reserves the planned files until `run_switch` ends.
         """
         if variant not in TEXT_ENCODER_VARIANTS:
@@ -957,7 +968,7 @@ class ModelStore:
         with self._lock:
             if self._switching is not None:
                 raise ModelStoreError("switching", f"The text encoder is being switched to {self._switching} already.")
-            if self._active:
+            if self._active or self._settling:
                 raise ModelStoreError(
                     "installing", "A model is being installed, so the text encoder was not switched; switch it afterwards."
                 )

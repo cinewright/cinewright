@@ -103,7 +103,8 @@ function isQuotaEviction(value: unknown): value is QuotaEviction {
  */
 export function evictionNeeded(error: unknown): { evictions: QuotaEviction[]; freesBytes: number } | null {
   if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'eviction_needed' || !error.problem) return null;
-  const { evictions, frees_bytes: freesBytes } = error.problem;
+  // The contract's field names; the body is still checked, since it arrives unchecked.
+  const { evictions, frees_bytes: freesBytes } = error.problem as InstallRefusal;
   if (!Array.isArray(evictions) || evictions.length === 0 || !evictions.every(isQuotaEviction)) return null;
   if (typeof freesBytes !== 'number') return null;
   return { evictions, freesBytes };
