@@ -2,7 +2,8 @@
 
 Per job: download the inputs, `prepare`, `submit`, poll `status` every `poll_interval` seconds and
 post progress and preview events in batches, honour cancel requests (events acknowledgement or
-heartbeat), upload the outputs and complete, or report a failure. A cancelled job is reported as a
+heartbeat), upload the outputs and complete with the `params.extra` keys the adapter reports as applied, or
+report a failure. A cancelled job is reported as a
 failure with code `cancelled`; a job interrupted by the worker's own shutdown as `worker_stopped`
 (retryable). Completing or failing a job is retried with backoff on connection errors and 5xx answers
 until the core accepts it, answers 404/409 (it already closed the job), or `close_timeout` (about the
@@ -231,6 +232,7 @@ class WorkerLoop:
             params=dict(job.get("params") or {}),
             input_paths=tuple(paths),
             output_dir=outputs_dir,
+            capability=str(job.get("capability") or ""),
         )
         try:
             self.adapter.prepare(engine_job.engine_model, engine_job.quant)
@@ -244,7 +246,7 @@ class WorkerLoop:
             return self._fail(job, code, str(exc), retryable=code == "engine_busy")
         status, reason = self._follow(job, engine_job_id)
         if status.state == "succeeded":
-            return self._finish(job, engine_job_id)
+            return self._finish(job, engine_job_id, status.accepted_extra)
         if status.state == "cancelled" or reason is not None:
             code, message, retryable = reason or CANCELLED
             return self._fail(job, code, message, retryable=retryable)
@@ -324,7 +326,7 @@ class WorkerLoop:
             del pending[:-MAX_EVENTS_PER_POST]  # keep the newest for the next attempt
         return cancel
 
-    def _finish(self, job: dict[str, Any], engine_job_id: str) -> None:
+    def _finish(self, job: dict[str, Any], engine_job_id: str, accepted_extra: tuple[str, ...] | None = None) -> None:
         try:
             files = self.adapter.fetch_outputs(engine_job_id)
         except Exception as exc:  # noqa: BLE001
@@ -345,7 +347,11 @@ class WorkerLoop:
             except TRANSIENT_ERRORS as exc:
                 return self._fail(job, "upload_failed", f"Output {name} could not be uploaded: {exc}", retryable=True)
             completed.append({"sha256": uploaded["sha256"], "media_type": media_type, "name": name})
-        self._close(job, "completed", lambda: self.client.complete(job["job_id"], job["lease_id"], completed, self._engine_version))
+        # The contract allows 100 keys of at most 64 characters; a longer list would get the whole completion refused.
+        accepted = None if accepted_extra is None else [key for key in accepted_extra if 0 < len(key) <= 64][:100]
+        self._close(
+            job, "completed", lambda: self.client.complete(job["job_id"], job["lease_id"], completed, self._engine_version, accepted)
+        )
 
     def _fail(self, job: dict[str, Any], code: str, message: str, *, retryable: bool = False) -> None:
         log.warning("Job %s failed: %s", job["job_id"], code)

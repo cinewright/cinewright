@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from cinewright.api import schemas
 from cinewright.api.deps import UPLOAD_MEDIA_TYPES
+from cinewright_worker.adapter import EngineJob, EngineStatus
 from cinewright_worker.client import WorkerClient
 from cinewright_worker.engines.mock import MockAdapter, encode_png, render_png
 from cinewright_worker.loop import WorkerLoop, output_name
@@ -291,6 +292,40 @@ def test_job_runs_to_completion(core, tmp_path, caplog):
     assert previews and previews[0]["media_type"] == "image/png" and previews[0]["data_base64"]
     assert list(tmp_path.iterdir()) == []  # the job's work directory is removed
     assert ENROLLMENT_TOKEN not in caplog.text and WORKER_TOKEN not in caplog.text
+
+
+class ReportingAdapter(MockAdapter):
+    """The mock engine reporting which `params.extra` keys it applied, as the Wan2GP adapter does."""
+
+    def __init__(self, accepted: tuple[str, ...]) -> None:
+        super().__init__(step_seconds=0.002)
+        self.accepted = accepted
+        self.jobs: list[EngineJob] = []
+
+    def submit(self, job: EngineJob) -> str:
+        self.jobs.append(job)
+        return super().submit(job)
+
+    def status(self, engine_job_id: str) -> EngineStatus:
+        status = super().status(engine_job_id)
+        status.accepted_extra = self.accepted
+        return status
+
+
+def test_the_completion_names_the_extras_the_engine_applied(core, tmp_path):
+    adapter = ReportingAdapter(("flow_shift", "x" * 65))  # a key the contract would refuse is left out
+    core.queue.append(make_job(params={"steps": 2, "extra": {"flow_shift": 3.0, "seed_offset": 1}}))
+    _, thread, _ = start_loop(core, tmp_path, adapter=adapter, once=True)
+    wait_closed(core, thread)
+    assert core.completed[0].accepted_extra == ["flow_shift"]
+    assert [(job.capability, job.quant) for job in adapter.jobs] == [("t2i", "bf16")]  # from the WorkerJob
+
+
+def test_an_adapter_that_reports_no_extras_completes_without_them(core, tmp_path):
+    core.queue.append(make_job(params={"steps": 2, "extra": {"flow_shift": 3.0}}))
+    _, thread, _ = start_loop(core, tmp_path, once=True)
+    wait_closed(core, thread)
+    assert core.completed[0].accepted_extra is None  # the mock engine reports none; provenance then records null
 
 
 def test_cancel_from_events_acknowledgement(core, tmp_path):
