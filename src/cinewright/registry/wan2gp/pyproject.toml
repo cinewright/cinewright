@@ -61,7 +61,7 @@ dependencies = [
     'einshape==1.0',
     'jax',
     # UI & interaction
-    'gradio==5.29.0',
+    'gradio==6.16.0',
     'orjson==3.11.6',
     'dashscope',
     'loguru',
