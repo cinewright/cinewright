@@ -13,6 +13,7 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Core and internal API.** The core serves the API under `/api/v1` on `127.0.0.1:8737`. Its contract is [`openapi.json`](openapi.json). The core keeps jobs, events, asset records and settings in SQLite, and stores asset files by their SHA-256.
 - **Hardware detection.** At start, and on request from the Setup view, the core reads the NVIDIA GPUs (through `nvidia-smi`), the driver, RAM and free disk space.
 - **Web UI shell.** It has Setup, Generate, Queue, Library, Hosts, Models and Settings views, plus placeholders for Cast, Recipes and Presets. Fonts and icons ship with the UI, so it makes no third-party requests.
+- **Generate view.** It uploads a start image for image-to-video and image-to-image jobs and offers the resolutions, frame counts and frame rates of the pinned model or of the model the router picks. After you submit, it shows the job's progress and preview frames, then opens the result in the Library with its provenance record. It has not been checked with a real model yet.
 - **MCP server.** It runs over streamable HTTP at `/mcp` and offers seven tools.
 - **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256, including the text encoders, VAEs, upscalers, tokenizer and config files WanGP needs next to the model.
 - **Windows installer.** `scripts/build.py` builds it.
@@ -150,6 +151,19 @@ While Cinewright runs:
 Jobs run only on installed quantizations. If no quantization of the model you choose in the Generate view is installed, the estimate lists the missing ones. A request through the API can pin one quantization with `quant`; if that one is not installed, the estimate names it.
 
 If an install fails, its card says why. An install that was still running when Cinewright closed shows as failed too. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
+
+### Generate an image or a clip
+
+While Cinewright runs, with at least one model installed:
+
+1. Open **Generate**, enter a prompt and choose a capability, for example `i2v` for a clip that starts from an image.
+2. Leave **Model** at **Router chooses**, or pin a model.
+3. For `i2v` and `i2i`, choose **Choose image** and pick a PNG, JPEG or WebP file. Cinewright uploads it right away, with the selected data class, and shows a small preview. **Replace image** and **Remove image** change it. The uploaded image also appears in the Library.
+4. Set **Resolution**, **Frames** and **Frame rate**, or leave them at the model's defaults (empty). They offer what the model can render: the pinned model, or the model the estimate names. A frame count off the model's frame grid moves to the nearest valid count when you leave the field. For example, LTX-2 2.3 Distilled renders 17, 25, 33 and so on, so 30 becomes 33. Still images (`t2i`, `i2i`) have no frames or frame rate.
+5. Choose **Generate**. While something is missing, the button says what, for example **Add a start image**.
+6. The Job panel shows the progress and the latest preview frame. When the job is done, choose **Open in Library**. The Library opens with the result selected and shows its provenance: model, seed, parameters (resolution, frames, fps, steps) and the model settings passed on to WanGP.
+
+If a change makes the router pick another model, for example a different data class, the fields switch to that model's choices. A resolution or frame rate it does not offer goes back to the model default, and the frame count moves to its grid. Any link of the form `http://127.0.0.1:8737/#/library/<sha256>` opens the Library with that asset selected.
 
 ### Switch the text encoder variant
 

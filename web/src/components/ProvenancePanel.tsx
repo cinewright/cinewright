@@ -14,6 +14,25 @@ interface Row {
   hash?: boolean;
 }
 
+/** Resolution, frames, fps, steps and guidance the job requested (registry defaults filled in); null for inputs. */
+function parameters(params: Provenance['params']): string {
+  if (!params) return DASH;
+  const parts = [
+    params.resolution,
+    params.frames != null ? `${params.frames} frames` : null,
+    params.fps != null ? `${params.fps} fps` : null,
+    params.steps != null ? `${params.steps} steps` : null,
+    params.guidance != null ? `guidance ${params.guidance}` : null,
+  ];
+  return parts.filter(Boolean).join(' · ') || DASH;
+}
+
+/** The model settings the worker passed on to the engine as asked (`params.extra`). */
+function extras(params: Provenance['params']): string {
+  const entries = Object.entries(params?.extra ?? {});
+  return entries.map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`).join(' · ') || DASH;
+}
+
 function rows(p: Provenance): Row[] {
   const model = p.model;
   const modelHashes = model?.file_sha256 ?? [];
@@ -33,6 +52,8 @@ function rows(p: Provenance): Row[] {
     },
     { label: 'Recipe', value: p.recipe ? `${p.recipe.id}@${p.recipe.version}` : DASH },
     { label: 'Seed', value: p.seed != null ? String(p.seed) : DASH },
+    { label: 'Parameters', value: parameters(p.params) },
+    { label: 'Extras', value: extras(p.params) },
     { label: 'LoRAs', value: loras.map((l) => `${l.name} (${l.weight})`).join(' · ') || DASH },
     { label: 'Host', value: p.host ? [p.host.name, p.host.gpu].filter(Boolean).join(' · ') : DASH },
     { label: 'Timestamp', value: formatTimestamp(p.created_at) },

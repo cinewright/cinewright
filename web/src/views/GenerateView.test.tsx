@@ -1,9 +1,12 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import { ApiError, type Estimate } from '../api/client';
+import { ApiError, type Asset, type CapabilityEntry, type Estimate, type Job, type JobRequest, type Limits, type ModelSummary } from '../api/client';
+import { EventsProvider } from '../api/events';
 import { formatDuration, formatEur } from '../lib/format';
-import { EstimatePanel } from './GenerateView';
+import { ProblemAnswer, StatusAnswer, stubApi, type ApiCall, type Routes } from '../test/api';
+import { stubEventSource, type FakeEventSource } from '../test/events';
+import { EstimatePanel, GenerateView } from './GenerateView';
 
 const COST_EUR = 3.47;
 const ETA_SECONDS = 754;
@@ -72,5 +75,306 @@ describe('EstimatePanel', () => {
     render(<EstimatePanel state={{ status: 'error', error }} hasRequest />);
 
     expect(liveRegion().textContent).toBe('Estimate unavailable');
+  });
+});
+
+// ------------------------------------------------------------------------------------------- the whole view
+
+const LTX = 'ltx-2.3-distilled-22b';
+const LTX_NAME = 'LTX-2 2.3 Distilled 22B';
+const WAN = 'wan-2.2-t2v-14b';
+const WAN_NAME = 'Wan 2.2 Text-to-Video 14B';
+// Shortened resolution lists; the grids and frame rates are the registry's.
+const LTX_LIMITS: Limits = { resolutions: ['1280x704', '832x448'], max_frames: 737, min_frames: 17, frames_step: 8, fps: [24], max_duration_s: 30 };
+const WAN_LIMITS: Limits = { resolutions: ['1280x720', '832x480'], max_frames: 737, min_frames: 5, frames_step: 4, fps: [16], max_duration_s: 46 };
+const LICENSE = { name: 'Apache-2.0', commercial_use: true, geo_exclusions: [], url: null };
+const CREATED = '2026-11-25T12:00:00Z';
+const INPUT_SHA = 'a'.repeat(64);
+const OUTPUT_SHA = 'b'.repeat(64);
+const JOB_ID = '0193f2a4-7c1e-7b1a-9d3e-5f6a7b8c9d0e';
+
+function entry(capability: CapabilityEntry['capability'], modelId: string, modelName: string, limits: Limits): CapabilityEntry {
+  return { capability, model_id: modelId, model_name: modelName, quant: 'int8', limits, status: null, hosts: ['local'] };
+}
+
+function model(id: string, name: string, capabilities: ModelSummary['capabilities']): ModelSummary {
+  return {
+    id,
+    name,
+    vendor: 'Vendor',
+    family: id,
+    capabilities,
+    license: LICENSE,
+    installed_bytes: 0,
+    quantizations: [{ quant: 'int8', install_state: 'installed', size_bytes: 1 }],
+  };
+}
+
+function feasible(modelId: string): Estimate {
+  return {
+    feasible: true,
+    requires_approval: false,
+    cost_eur: 0,
+    eta_seconds: null,
+    route: { model_id: modelId, quant: 'int8', host_id: 'local', engine: 'wan2gp', reasons: [] },
+    reasons: [],
+  };
+}
+
+const INPUT: Asset = {
+  sha256: INPUT_SHA,
+  media_type: 'image/png',
+  size_bytes: 2048,
+  data_class: 'private',
+  job_id: null,
+  created_at: CREATED,
+  provenance: { schema: 'cinewright.provenance/1', asset: { sha256: INPUT_SHA, media_type: 'image/png', size_bytes: 2048 }, created_at: CREATED },
+};
+
+function job(request: JobRequest): Job {
+  return { id: JOB_ID, state: 'queued', request, client: 'ui', created_at: CREATED, outputs: [] };
+}
+
+function renderView(routes: Routes): { calls: ApiCall[]; source: () => FakeEventSource } {
+  const source = stubEventSource();
+  const calls = stubApi(routes);
+  render(
+    <EventsProvider>
+      <GenerateView />
+    </EventsProvider>,
+  );
+  act(() => source().open());
+  return { calls, source };
+}
+
+function event(kind: string, seq: number, data: Record<string, unknown>, jobId = JOB_ID) {
+  return { job_id: jobId, seq, kind, data, created_at: CREATED };
+}
+
+function estimates(calls: ApiCall[]): JobRequest[] {
+  return calls.filter((call) => call.method === 'POST' && call.path === '/api/v1/estimate').map((call) => call.body as JobRequest);
+}
+
+function framesInput(): HTMLInputElement {
+  return screen.getByRole('spinbutton', { name: 'Frames' }) as HTMLInputElement;
+}
+
+function select(name: string): HTMLSelectElement {
+  return screen.getByRole('combobox', { name }) as HTMLSelectElement;
+}
+
+function optionTexts(name: string): string[] {
+  return [...select(name).options].map((option) => option.text);
+}
+
+function setFrames(value: string): void {
+  fireEvent.change(framesInput(), { target: { value } });
+  fireEvent.blur(framesInput());
+}
+
+function enterPrompt(): void {
+  fireEvent.change(screen.getByRole('textbox', { name: /^Prompt/ }), { target: { value: 'Harbour at night' } });
+}
+
+/** Wait until no new estimate has been requested for `quietMs` (the debounce is 300 ms); returns the count. */
+async function settled(calls: ApiCall[], quietMs = 900): Promise<number> {
+  let count = -1;
+  while (count !== estimates(calls).length) {
+    count = estimates(calls).length;
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, quietMs)));
+  }
+  return count;
+}
+
+describe('GenerateView', () => {
+  it('uploads a start image, submits the job, shows its progress and preview frames, and links the output into the Library', async () => {
+    const holder: { source?: () => FakeEventSource } = {};
+    const { calls, source } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('i2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['i2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/assets': () => INPUT,
+      'POST /api/v1/jobs': (body) => {
+        // The worker reports before the submit answer arrives; the view must not lose this event.
+        holder.source?.().emit('state', event('state', 2, { state: 'leased', worker_id: 'worker-1' }));
+        return job(body as JobRequest);
+      },
+    });
+    holder.source = source;
+
+    // Only i2v is offered, so it is selected; pin the model and enter a prompt.
+    await screen.findByRole('option', { name: LTX_NAME });
+    expect(select('Capability').value).toBe('i2v');
+    fireEvent.change(screen.getByRole('combobox', { name: /^Model/ }), { target: { value: LTX } });
+    enterPrompt();
+    await screen.findByRole('button', { name: 'Add a start image' });
+    expect(screen.getByText(`Choices of ${LTX_NAME}.`)).toBeTruthy();
+
+    // A file without a media type is refused in the view, before any request.
+    const untyped = new File([new Uint8Array([1, 2, 3])], 'scan.heic', { type: '' });
+    fireEvent.change(screen.getByLabelText('Start image file'), { target: { files: [untyped] } });
+    expect(screen.getByRole('alert').textContent).toBe('scan.heic has no known image type, so it is not uploaded; choose a PNG, JPEG or WebP image.');
+    expect(calls.some((call) => call.path === '/api/v1/assets')).toBe(false);
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'start.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText('Start image file'), { target: { files: [file] } });
+    const preview = await screen.findByRole('img', { name: 'Start image preview' });
+    expect(preview.getAttribute('src')).toBe(`/api/v1/assets/${INPUT_SHA}/content`);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const upload = calls.find((call) => call.method === 'POST' && call.path === '/api/v1/assets');
+    expect(upload?.query).toStrictEqual({ data_class: 'private' });
+    expect(upload?.headers).toStrictEqual({ Accept: 'application/json', 'Content-Type': 'image/png' });
+    expect(upload?.rawBody).toBe(file);
+    expect(screen.getByRole('button', { name: 'Replace image' })).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
+    const panel = await screen.findByRole('region', { name: 'Job' });
+    const submitted = calls.find((call) => call.method === 'POST' && call.path === '/api/v1/jobs')?.body as JobRequest;
+    expect(submitted).toMatchObject({ capability: 'i2v', model: LTX, prompt: 'Harbour at night', inputs: [INPUT_SHA] });
+    // Resolution, frames and frame rate stay the model's defaults unless set.
+    expect(submitted.params).toStrictEqual({ seed: null });
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Starting');
+
+    act(() => source().emit('state', event('state', 3, { state: 'running' })));
+    act(() => source().emit('progress', event('progress', 4, { phase: 'denoise', step: 3, total_steps: 8, percent: 37.5 })));
+    // Another job's events do not move this one.
+    act(() => source().emit('progress', event('progress', 9, { phase: 'denoise', step: 7, total_steps: 8, percent: 90 }, 'other-job')));
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Step 3/8');
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-valuenow')).toBe('38');
+
+    // Previews repeat the seq of the latest stored event: each one shows, none is dropped as a repeat.
+    act(() => source().emit('preview', event('preview', 4, { media_type: 'image/webp', data_base64: 'UklGRgAA' })));
+    const frame = () => within(panel).getByRole('img', { name: 'Latest preview frame' }).getAttribute('src');
+    expect(frame()).toBe('data:image/webp;base64,UklGRgAA');
+    act(() => source().emit('preview', event('preview', 4, { media_type: 'image/jpeg', data_base64: '/9j/4AAQ' })));
+    expect(frame()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    // A type outside the allow-list is not rendered.
+    act(() => source().emit('preview', event('preview', 4, { media_type: 'image/svg+xml', data_base64: 'PHN2Zz4=' })));
+    expect(frame()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    // A replayed stored event is applied once.
+    act(() => source().emit('progress', event('progress', 4, { phase: 'denoise', step: 1, total_steps: 8, percent: 12.5 })));
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-valuenow')).toBe('38');
+    expect(within(panel).queryByRole('link', { name: 'Open in Library' })).toBeNull();
+
+    act(() => source().emit('state', event('state', 5, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
+    expect(within(panel).getByRole('status').textContent).toBe('Job done');
+  });
+
+  it('shows readable upload refusals', async () => {
+    let answer: unknown = new StatusAnswer(413);
+    renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('i2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['i2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/assets': () => answer,
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    const choose = (name: string, type: string) =>
+      fireEvent.change(screen.getByLabelText('Start image file'), { target: { files: [new File([new Uint8Array([1])], name, { type })] } });
+
+    choose('big.png', 'image/png');
+    expect((await screen.findByRole('alert')).textContent).toBe('The image is too large for the core, so it was not uploaded.');
+
+    answer = new StatusAnswer(415);
+    choose('odd.png', 'image/png');
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe('The core refused the file type, so the image was not uploaded; choose a PNG, JPEG or WebP image.'),
+    );
+
+    // The core's own refusals (422) carry a readable detail.
+    answer = new ProblemAnswer(422, 'Invalid request', 'Unsupported media type image/png.');
+    choose('odd.png', 'image/png');
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Unsupported media type image/png.'));
+
+    choose('anim.gif', 'image/gif');
+    expect(screen.getByRole('alert').textContent).toBe('anim.gif is image/gif, so it is not uploaded; choose a PNG, JPEG or WebP image.');
+    expect(screen.queryByRole('img', { name: 'Start image preview' })).toBeNull();
+  });
+
+  it('follows a change of the routed model once, fitting the fields to its limits without a loop', async () => {
+    // The router picks Wan for private requests and LTX for public ones.
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS), entry('t2v', WAN, WAN_NAME, WAN_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v']), model(WAN, WAN_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': (body) => feasible((body as JobRequest).data_class === 'public' ? LTX : WAN),
+    });
+    await screen.findByRole('option', { name: WAN_NAME });
+    // No model known yet: the fields wait for one.
+    expect(framesInput().disabled).toBe(true);
+    enterPrompt();
+
+    await screen.findByText(`Choices of ${WAN_NAME}, the model the router picked.`);
+    expect(optionTexts('Frame rate')).toStrictEqual(['Model default', '16 fps']);
+    expect(optionTexts('Resolution')).toStrictEqual(['Model default', '1280x720', '832x480']);
+    fireEvent.change(select('Resolution'), { target: { value: '1280x720' } });
+    fireEvent.change(select('Frame rate'), { target: { value: '16' } });
+    setFrames('30');
+    // Off Wan's grid (5 + 4n): snapped when the field is left.
+    expect(framesInput().value).toBe('29');
+    await settled(calls);
+    expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, resolution: '1280x720', frames: 29, fps: 16 });
+
+    // A public request routes to LTX: its limits replace Wan's; what LTX lacks falls back to its default or snaps.
+    fireEvent.click(screen.getByRole('radio', { name: 'Public' }));
+    await screen.findByText(`Choices of ${LTX_NAME}, the model the router picked.`);
+    await waitFor(() => expect(framesInput().value).toBe('33'));
+    expect(optionTexts('Frame rate')).toStrictEqual(['Model default', '24 fps']);
+    expect(select('Resolution').value).toBe('');
+    expect(select('Frame rate').value).toBe('');
+    expect(screen.getByText('17 + a multiple of 8, up to 737; empty = model default')).toBeTruthy();
+
+    const before = estimates(calls).length;
+    const after = await settled(calls);
+    // At most the public request and the fitted one, then quiet.
+    expect(after - before).toBeLessThanOrEqual(2);
+    expect(estimates(calls).at(-1)).toMatchObject({ data_class: 'public' });
+    expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, frames: 33 });
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
+  });
+
+  it('snaps at most once per edit when every snap moves the route to a model with another grid', async () => {
+    // Two models whose grids share no count, and a router that answers with the other one on every call:
+    // snapping on every route change would never stop.
+    const P: Limits = { resolutions: [], max_frames: 400, min_frames: 8, frames_step: 8, fps: [] };
+    const Q: Limits = { resolutions: [], max_frames: 404, min_frames: 4, frames_step: 8, fps: [] };
+    let call = 0;
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', 'model-p', 'Model P', P), entry('t2v', 'model-q', 'Model Q', Q)] }),
+      'GET /api/v1/models': () => ({ items: [model('model-p', 'Model P', ['t2v']), model('model-q', 'Model Q', ['t2v'])] }),
+      'POST /api/v1/estimate': () => feasible(call++ % 2 === 0 ? 'model-p' : 'model-q'),
+    });
+    await screen.findByRole('option', { name: 'Model Q' });
+    enterPrompt();
+    await screen.findByText('Choices of Model P, the model the router picked.');
+
+    setFrames('16'); // on P's grid
+    await screen.findByText('Choices of Model Q, the model the router picked.');
+    await waitFor(() => expect(framesInput().value).toBe('20')); // snapped once, to Q's grid
+    await screen.findByText('Choices of Model P, the model the router picked.');
+
+    expect(await settled(calls)).toBe(3);
+    // Left off P's grid: the request waits for the user instead of snapping again.
+    expect(framesInput().value).toBe('20');
+    expect(framesInput().getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Frames must be 8 + a multiple of 8, up to 400' })).toBeTruthy();
+  });
+
+  it('hides frames and frame rate for still images and sends neither', async () => {
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2i', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2i'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    await screen.findByText(`Choices of ${LTX_NAME}, the model the router picked.`);
+    expect(screen.queryByRole('spinbutton', { name: 'Frames' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Frame rate' })).toBeNull();
+    expect(screen.queryByLabelText('Start image file')).toBeNull();
+    fireEvent.change(select('Resolution'), { target: { value: '832x448' } });
+    await waitFor(() => expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, resolution: '832x448' }));
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
   });
 });

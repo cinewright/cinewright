@@ -639,7 +639,7 @@ class ProvenanceModel(Contract):
 
 class ProvenanceParams(Contract):
     """The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
-    them, for example to a distilled model's fixed steps or to a frame count the model can render."""
+    them, for example to a distilled model's fixed steps; a clip's frame count lies on the model's frame grid."""
 
     resolution: str | None = None
     steps: int | None = None

@@ -1,15 +1,17 @@
 // Library: asset grid with media previews and the provenance panel of the selected asset.
+// `#/library/<sha256>` opens it with that asset selected, loaded by itself when it is not on the first page.
 
 import { AudioLines, File } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { api, assetContentUrl, type Asset } from '../api/client';
+import { api, assetContentUrl, isSha256, type Asset } from '../api/client';
 import { useJobEvents } from '../api/events';
 import { DataClassTag } from '../components/DataClassTag';
 import { EmptyState, ErrorBanner, RetryButton } from '../components/Feedback';
 import { Hash } from '../components/Hash';
 import { ProvenancePanel } from '../components/ProvenancePanel';
 import { formatBytes, formatTimestamp } from '../lib/format';
+import { useHashSegments } from '../lib/route';
 import { useApi } from '../lib/useApi';
 
 const REFRESH_DELAY_MS = 1000;
@@ -31,12 +33,24 @@ function Media({ asset, controls }: { asset: Asset; controls: boolean }) {
   return <File strokeWidth={1.5} aria-hidden="true" />;
 }
 
+/** The asset a `#/library/<sha256>` link names: its id, `invalid` for anything but 64 lowercase hex characters, or null. */
+function linkedAsset(segments: string[]): string | null {
+  const value = segments[0] === 'library' ? segments[1] : undefined;
+  if (!value) return null;
+  return isSha256(value) ? value : 'invalid';
+}
+
 export function LibraryView() {
+  const link = linkedAsset(useHashSegments());
+  const linkedSha = link === 'invalid' ? null : link;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(linkedSha);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<unknown>();
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkError, setLinkError] = useState<unknown>();
+  const requestedLink = useRef<string | null>(null);
   const refreshTimer = useRef<number>();
 
   const list = useApi(async (signal) => {
@@ -52,6 +66,25 @@ export function LibraryView() {
     window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(list.reload, REFRESH_DELAY_MS);
   });
+
+  // A link selects its asset; one that is not on the first page is loaded by itself (identical bytes keep their
+  // first, older record, so a new job's output can sit further down the list).
+  useEffect(() => {
+    setLinkError(undefined);
+    if (linkedSha) setSelected(linkedSha);
+  }, [linkedSha]);
+
+  useEffect(() => {
+    if (!linkedSha || !list.data || requestedLink.current === linkedSha) return;
+    if (assets.some((item) => item.sha256 === linkedSha)) return;
+    requestedLink.current = linkedSha;
+    setLinkLoading(true);
+    api
+      .asset(linkedSha)
+      .then((item) => setAssets((current) => merge(current, [item])))
+      .catch(setLinkError)
+      .finally(() => setLinkLoading(false));
+  }, [linkedSha, list.data]);
 
   const loadMore = () => {
     if (!cursor) return;
@@ -77,8 +110,12 @@ export function LibraryView() {
 
       {list.error ? <ErrorBanner title="Could not load the library" error={list.error} action={<RetryButton onClick={list.reload} />} /> : null}
       {moreError ? <ErrorBanner title="Could not load more assets" error={moreError} /> : null}
+      {link === 'invalid' ? (
+        <ErrorBanner title="Could not open the linked asset" error="The link names no asset; an asset id is 64 lowercase hex characters." />
+      ) : null}
+      {linkError ? <ErrorBanner title="Could not open the linked asset" error={linkError} /> : null}
 
-      {!list.loading && !list.error && assets.length === 0 ? (
+      {!list.loading && !list.error && !linkLoading && assets.length === 0 ? (
         <EmptyState title="No assets yet">
           <p>Finished jobs store their outputs here, each with its provenance record.</p>
         </EmptyState>
@@ -131,6 +168,8 @@ export function LibraryView() {
                   </div>
                 </ProvenancePanel>
               </div>
+            ) : linkLoading ? (
+              <p className="cw-muted">Loading the linked asset</p>
             ) : (
               <p className="cw-muted">Select an asset to see its provenance.</p>
             )}
