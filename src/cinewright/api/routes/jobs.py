@@ -1,4 +1,4 @@
-"""Estimates, jobs and the job event stream (SSE)."""
+"""Estimates, jobs and the event stream (SSE): job events plus live system events."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from cinewright.api.deps import Core
 from cinewright.api.problems import PROBLEM_RESPONSE
-from cinewright.api.schemas import ClientKind, Estimate, EventKind, Job, JobEvent, JobList, JobRequest, JobState
+from cinewright.api.schemas import ClientKind, Estimate, EventKind, Job, JobEvent, JobList, JobRequest, JobState, SystemEvent
 
 router = APIRouter(tags=["jobs"], responses={404: PROBLEM_RESPONSE, 409: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501: PROBLEM_RESPONSE})
 
@@ -18,6 +18,16 @@ SSE_KEEPALIVE_SECONDS = 15
 CLIENT_HEADER = "X-Cinewright-Client"
 AGENT_HEADER = "X-Cinewright-Agent"
 AGENT_PATTERN = r"^[A-Za-z0-9 ._-]{1,64}$"
+
+
+def sse_frame(event: JobEvent | SystemEvent) -> bytes:
+    """One SSE message named after the event's kind. Only stored job events carry an id (`<job_id>:<seq>`, which the
+    browser resends as Last-Event-ID for replay). A preview (live only, never stored) and a system event have none,
+    so the browser keeps the last stored event's id and Last-Event-ID always names a stored event."""
+    payload = event.model_dump_json()
+    if isinstance(event, JobEvent) and event.kind != EventKind.PREVIEW:
+        return f"id: {event.job_id}:{event.seq}\nevent: {event.kind}\ndata: {payload}\n\n".encode()
+    return f"event: {event.kind}\ndata: {payload}\n\n".encode()
 
 
 @router.post("/estimate", response_model=Estimate, operation_id="estimate")
@@ -64,7 +74,13 @@ def cancel_job(job_id: str, core: Core) -> Job:
     "/events",
     operation_id="streamEvents",
     response_class=StreamingResponse,
-    responses={200: {"description": "Server-sent events; each `data:` line is a JobEvent", "content": {"text/event-stream": {}}}},
+    responses={
+        200: {
+            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` "
+            "carry engine provisioning as a SystemEvent, without an id and never replayed.",
+            "content": {"text/event-stream": {}},
+        }
+    },
 )
 async def stream_events(
     request: Request,
@@ -77,7 +93,7 @@ async def stream_events(
         events = core.events(job_id, last_event_id)
         # One pending wait survives keepalive timeouts: `asyncio.wait_for` would cancel the event
         # generator on timeout, which closes it, so no later event would arrive.
-        pending: asyncio.Task[JobEvent | None] | None = None
+        pending: asyncio.Task[JobEvent | SystemEvent | None] | None = None
         try:
             while True:
                 if pending is None:
@@ -92,7 +108,7 @@ async def stream_events(
                 event, pending = pending.result(), None
                 if event is None or await request.is_disconnected():
                     return
-                yield _sse(event)
+                yield sse_frame(event)
         finally:
             if pending is not None and not pending.done():
                 pending.cancel()  # throws into the generator, whose `finally` unsubscribes
@@ -102,11 +118,5 @@ async def stream_events(
     return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
 
-async def _next_event(events: AsyncIterator[JobEvent]) -> JobEvent | None:
+async def _next_event(events: AsyncIterator[JobEvent | SystemEvent]) -> JobEvent | SystemEvent | None:
     return await anext(events, None)
-
-
-def _sse(event: JobEvent) -> bytes:
-    # A preview is not stored, so it carries no `id:` and Last-Event-ID always names a stored event.
-    event_id = "" if event.kind == EventKind.PREVIEW else f"id: {event.job_id}:{event.seq}\n"
-    return f"{event_id}event: {event.kind}\ndata: {event.model_dump_json()}\n\n".encode()

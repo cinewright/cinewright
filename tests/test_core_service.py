@@ -39,9 +39,10 @@ def test_system_info_discloses_wangp_and_reports_engine_state(core):
         None,
     )
     assert engine.notice == WANGP_NOTICE
+    # The state comes from engine provisioning (tests/test_core_provisioning.py), not from a registered worker.
     core.register_worker(REGISTRATION, core.enrollment_token)
     engine = core.system_info().engines[0]
-    assert (engine.state, engine.version) == ("ready", "abc")
+    assert (engine.state, engine.version) == ("not_installed", None)
 
 
 def test_license_notices_name_cinewright_and_wangp(core):

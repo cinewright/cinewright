@@ -13,11 +13,14 @@ Conventions
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from pathlib import PurePosixPath
+from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 API_VERSION = "1"
 API_PREFIX = "/api/v1"
@@ -131,12 +134,24 @@ PROBLEM_INVALID = "urn:cinewright:problem:invalid"
 # --------------------------------------------------------------------------- system
 
 
+class SetupError(Contract):
+    """Why a setup task (engine provisioning) failed or cannot run."""
+
+    code: str = Field(description="Stable machine code, e.g. `hash_mismatch`, `download_failed`, `install_failed`")
+    message: str = Field(description="Cause and consequence in one sentence")
+    action: Literal["retry"] | None = Field(default=None, description="The one helpful action the UI offers; null when none helps")
+
+
 class EngineInfo(Contract):
     id: str = Field(description="Engine id, e.g. `wan2gp`")
     name: str
     version: str | None = Field(description="Pinned upstream commit or version; null when not provisioned")
-    state: Literal["not_installed", "provisioning", "ready", "failed"]
+    state: Literal["not_installed", "provisioning", "ready", "failed"] = Field(description="From engine provisioning")
     notice: str | None = Field(default=None, description="Licence disclosure shown in the UI (WanGP requires one)")
+    progress: Progress | None = Field(default=None, description="Provisioning progress while `state` is `provisioning`")
+    error: SetupError | None = Field(
+        default=None, description="Why provisioning failed (`failed`) or cannot run here (`not_installed`); null otherwise"
+    )
 
 
 class SystemInfo(Contract):
@@ -194,17 +209,55 @@ class License(Contract):
     geo_exclusions: list[str] = Field(default_factory=list, description="ISO 3166-1 alpha-2 codes or `EU`")
 
 
+REGISTRY_FILE_HOSTS = {"huggingface": "huggingface.co", "civitai": "civitai.com"}
+# Weights are safetensors or GGUF; companion files are non-executable JSON, text or SentencePiece models.
+SHARED_FILE_EXTENSIONS = frozenset({".safetensors", ".gguf", ".json", ".txt", ".model"})
+# One path segment. No trailing `.`: Windows drops it, so `enc.` and `enc` would be one folder.
+# `_check_path_parts` also refuses Windows device names, which the pattern cannot express.
+_PATH_PART = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"
+# Windows opens a device instead of a file for these names, with any extension (`CON.json`, `nul.tar.gz`).
+_WINDOWS_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))})
+
+
+def _check_path_parts(path: str) -> str:
+    for part in path.split("/"):
+        device = part.split(".", 1)[0]
+        if device.upper() in _WINDOWS_DEVICE_NAMES:
+            raise ValueError(f"{path}: {device} is a reserved device name on Windows")
+    return path
+
+
+def _check_download_url(url: str, provider: str) -> None:
+    host = REGISTRY_FILE_HOSTS[provider]
+    parsed = urlparse(url)
+    # The whole netloc, not just the hostname: no user info, no port, no `\@` trick, no other letter case.
+    if parsed.scheme != "https" or parsed.netloc != host:
+        raise ValueError(f"{url}: files of a {provider} source download from https://{host}")
+
+
 class ModelFile(Contract):
-    name: str
+    name: str = Field(pattern=rf"^{_PATH_PART}$", description="File name, as the engine looks it up")
     url: str
     sha256: Sha256
     size_bytes: int | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _no_device_name(cls, name: str) -> str:
+        return _check_path_parts(name)
 
 
 class Quantization(Contract):
     id: str = Field(description="Upstream spelling, e.g. `bf16`, `int8`, `Q6_K`")
     format: Literal["safetensors", "gguf"]
     files: list[ModelFile] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _weights_match_format(self) -> Self:
+        for file in self.files:
+            if PurePosixPath(file.name).suffix.lower() != f".{self.format}":
+                raise ValueError(f"{file.name}: files of a {self.format} quantization end in .{self.format}")
+        return self
 
 
 class PromptDialect(Contract):
@@ -235,10 +288,89 @@ class ModelDescriptor(Contract):
     limits: Limits
     license: License
     quantizations: list[Quantization] = Field(min_length=1)
+    requires: list[ModelId] = Field(
+        default_factory=list, description="Shared components (`registry/shared/<id>.yaml`) every quantization needs"
+    )
     prompt_dialect: PromptDialect = Field(default_factory=PromptDialect)
     defaults: dict[str, Any] = Field(default_factory=dict)
     source: ModelSource
     engines: list[EngineBinding] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _safe_downloads(self) -> Self:
+        for quant in self.quantizations:
+            for file in quant.files:
+                _check_download_url(file.url, self.source.provider)
+        return self
+
+
+class SharedFile(Contract):
+    """One engine file shared by several models (text encoder, VAE, upscaler, tokenizer or config file)."""
+
+    name: str = Field(pattern=rf"^{_PATH_PART}$", description="File name, as the engine looks it up")
+    subfolder: str = Field(
+        default="",
+        pattern=rf"^(?:{_PATH_PART}/)*$",
+        description="Folder below the checkpoint root the engine expects, with trailing `/`; empty for the root",
+    )
+    url: str
+    sha256: Sha256
+    size_bytes: int = Field(gt=0)
+    variant: Literal["bf16", "int8"] | None = Field(
+        default=None, description="Text encoder quantization this file belongs to; null when every variant needs it"
+    )
+
+    @property
+    def path(self) -> str:
+        """Path relative to the checkpoint root."""
+        return self.subfolder + self.name
+
+    @field_validator("name", "subfolder")
+    @classmethod
+    def _no_device_name(cls, path: str) -> str:
+        return _check_path_parts(path)
+
+    @field_validator("name")
+    @classmethod
+    def _allowed_extension(cls, name: str) -> str:
+        if PurePosixPath(name).suffix.lower() not in SHARED_FILE_EXTENSIONS:
+            raise ValueError(f"{name}: only {', '.join(sorted(SHARED_FILE_EXTENSIONS))} files are allowed")
+        return name
+
+
+class SharedComponent(Contract):
+    """Engine files several models need, from one upstream repository at one revision.
+
+    Stored as YAML under `src/cinewright/registry/shared/`; model descriptors name it in `requires`.
+    """
+
+    id: ModelId = Field(description="Equals the file name without `.yaml`")
+    source: ModelSource
+    files: list[SharedFile] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _pinned_downloads(self) -> Self:
+        revision = self.source.revision
+        if revision is None:
+            raise ValueError("source.revision is required: hashes are read at a fixed revision")
+        if self.source.provider == "huggingface" and not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError(f"source.revision {revision!r} is not a commit")
+        host = REGISTRY_FILE_HOSTS[self.source.provider]
+        paths: set[str] = set()
+        for file in self.files:
+            # Windows file systems ignore case, so `Qwen3/x.json` and `qwen3/x.json` are one file.
+            if file.path.casefold() in paths:
+                raise ValueError(f"{file.path} is listed twice (paths ignore case)")
+            paths.add(file.path.casefold())
+            _check_download_url(file.url, self.source.provider)
+            expected = f"https://{host}/{self.source.repo}/resolve/{revision}/{file.path}"
+            if self.source.provider == "huggingface" and file.url != expected:
+                raise ValueError(f"{file.url}: expected {expected}")
+        return self
+
+    def files_for(self, variant: str | None) -> list[SharedFile]:
+        """Files the engine needs with the given text encoder variant; `None` returns every file."""
+        return [file for file in self.files if variant is None or file.variant in (None, variant)]
 
 
 class CalibrationResult(Contract):
@@ -387,6 +519,21 @@ class JobEvent(Contract):
     created_at: datetime
 
 
+class SystemEventKind(StrEnum):
+    ENGINE = "engine"
+
+
+class SystemEvent(Contract):
+    """A non-job event of `GET /events`: the SSE event name is `kind`; it has no id and is never replayed.
+
+    `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
+    """
+
+    kind: SystemEventKind
+    engine: EngineInfo | None = Field(default=None, description="For `engine`: the engine's new state, progress and error")
+    created_at: datetime
+
+
 class Estimate(Contract):
     feasible: bool
     route: Route | None = None
@@ -470,6 +617,13 @@ class AssetList(Contract):
 # --------------------------------------------------------------------------- hosts, approvals
 
 
+class WorkerHealth(Contract):
+    state: Literal["starting", "ready", "busy", "failed"]
+    vram_used_mb: int | None = None
+    vram_total_mb: int | None = None
+    detail: str | None = None
+
+
 class Host(Contract):
     id: str
     name: str
@@ -478,6 +632,11 @@ class Host(Contract):
     online: bool
     last_seen_at: datetime | None = None
     hardware: HardwareProfile | None = None
+    worker_health: WorkerHealth | None = Field(
+        default=None,
+        description="State and VRAM use of the host's worker, as last reported by a worker registered since the core started. "
+        "On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker",
+    )
 
 
 class HostList(Contract):
@@ -568,13 +727,6 @@ class LicenseNotices(Contract):
 
 
 # --------------------------------------------------------------------------- worker protocol (core <-> worker, pull model)
-
-
-class WorkerHealth(Contract):
-    state: Literal["starting", "ready", "busy", "failed"]
-    vram_used_mb: int | None = None
-    vram_total_mb: int | None = None
-    detail: str | None = None
 
 
 class WorkerRegistration(Contract):

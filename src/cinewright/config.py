@@ -20,7 +20,8 @@ from cinewright.paths import DataPaths, default_home
 ENV_HOME = "CINEWRIGHT_HOME"
 ENV_HOST = "CINEWRIGHT_HOST"
 ENV_PORT = "CINEWRIGHT_PORT"
-# The core hands its per-start enrollment token to the worker processes it spawns in this variable.
+# The core hands its URL and its per-start enrollment token to the worker processes it spawns in these variables.
+ENV_CORE_URL = "CINEWRIGHT_CORE_URL"
 ENV_ENROLLMENT_TOKEN = "CINEWRIGHT_ENROLLMENT_TOKEN"  # noqa: S105 - variable name, not a secret
 
 DEFAULT_HOST = "127.0.0.1"

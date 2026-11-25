@@ -11,6 +11,7 @@ export type CalibrationResult = Schemas['CalibrationResult'];
 export type CalibrationStatus = Schemas['CalibrationStatus'];
 export type Capability = Schemas['Capability'];
 export type DataClass = Schemas['DataClass'];
+export type EngineInfo = Schemas['EngineInfo'];
 export type Estimate = Schemas['Estimate'];
 export type HardwareProfile = Schemas['HardwareProfile'];
 export type Host = Schemas['Host'];
@@ -22,14 +23,24 @@ export type Priority = Schemas['Priority'];
 export type Provenance = Schemas['Provenance'];
 export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
+export type WorkerHealth = Schemas['WorkerHealth'];
 
-// The SSE stream is not modelled in openapi.json; these mirror EventKind and JobEvent in api/schemas.py.
+// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind and
+// SystemEvent in api/schemas.py.
 export type EventKind = 'state' | 'progress' | 'preview' | 'log';
 export interface JobEvent {
   job_id: string;
   seq: number;
   kind: EventKind;
   data: Record<string, unknown>;
+  created_at: string;
+}
+/** Non-job events: sent without an id and never replayed. */
+export type SystemEventKind = 'engine';
+export interface SystemEvent {
+  kind: SystemEventKind;
+  /** For `engine`: the engine as GET /system reports it. */
+  engine?: EngineInfo | null;
   created_at: string;
 }
 
@@ -133,6 +144,8 @@ const PAGE = '50';
 
 export const api = {
   system: (signal?: AbortSignal) => request<Schemas['SystemInfo']>('GET', '/api/v1/system', { signal }),
+  provisionEngine: (engineId: string) =>
+    request<EngineInfo>('POST', '/api/v1/engines/{engine_id}/provision', { params: { engine_id: engineId } }),
   licenses: (signal?: AbortSignal) => request<Schemas['LicenseNotices']>('GET', '/api/v1/licenses', { signal }),
   settings: (signal?: AbortSignal) => request<Settings>('GET', '/api/v1/settings', { signal }),
   updateSettings: (patch: SettingsPatch) => request<Settings>('PATCH', '/api/v1/settings', { body: patch }),

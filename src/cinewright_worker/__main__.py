@@ -1,7 +1,8 @@
-"""python -m cinewright_worker --engine mock|wan2gp [--wan2gp-root PATH] [--once]
+"""python -m cinewright_worker --engine mock|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]
 
 The core starts worker processes itself and passes `CINEWRIGHT_ENROLLMENT_TOKEN` (required) and
-`CINEWRIGHT_CORE_URL` (default http://127.0.0.1:8737) in the environment.
+`CINEWRIGHT_CORE_URL` (default http://127.0.0.1:8737) in the environment. It adds `--stop-on-stdin-eof`
+and closes the worker's standard input to ask it to stop; without the flag, standard input is ignored.
 
 `--engine mock` stands in for Wan2GP: it registers as engine `wan2gp` serving the Wan2GP model types
 of the bundled registry, because registry bindings name only real engines. It needs no GPU and is
@@ -45,6 +46,36 @@ def data_dir() -> str:
     return os.path.join(base, "cinewright")
 
 
+def watch_stdin(stop: threading.Event) -> None:
+    """Set `stop` once standard input reaches end of file: the core's supervisor closes it to stop the worker.
+
+    The supervisor's pipe moves to a private, non-inheritable descriptor and standard input becomes the null
+    device. On Windows a pending read on a pipe blocks every other request on it, including the GetFileType
+    call each child process makes on its inherited standard input at start, so engine subprocesses must not
+    inherit the pipe. A missing or unusable standard input counts as closed.
+    """
+    try:
+        fd = os.dup(sys.stdin.fileno())
+        null = os.open(os.devnull, os.O_RDONLY)
+        try:
+            os.dup2(null, sys.stdin.fileno())
+        finally:
+            os.close(null)
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    threading.Thread(target=_stop_at_eof, args=(fd, stop), daemon=True, name="cinewright-stdin").start()
+
+
+def _stop_at_eof(fd: int | None, stop: threading.Event) -> None:
+    try:
+        while fd is not None and os.read(fd, 4096):  # the raw descriptor: no buffered-reader lock at exit
+            pass
+    except OSError:
+        pass
+    logging.getLogger("cinewright_worker").info("Standard input closed; stopping.")
+    stop.set()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m cinewright_worker", description="Cinewright worker: pulls jobs from the core and runs them on one engine."
@@ -52,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", choices=("mock", "wan2gp"), required=True)
     parser.add_argument("--wan2gp-root", help="path of the Wan2GP checkout (required with --engine wan2gp)")
     parser.add_argument("--once", action="store_true", help="exit after one job")
+    parser.add_argument(
+        "--stop-on-stdin-eof",
+        action="store_true",
+        help="stop when standard input reaches end of file; the core starts its worker with this and closes the input to stop it",
+    )
     args = parser.parse_args(argv)
     if args.engine == "wan2gp" and not args.wan2gp_root:
         parser.error("--wan2gp-root is required with --engine wan2gp")
@@ -80,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), request_stop)
+    if args.stop_on_stdin_eof:
+        watch_stdin(stop)
 
     client = WorkerClient(os.environ.get(CORE_URL_ENV) or DEFAULT_CORE_URL)
     return WorkerLoop(adapter, client, token, stop_event=stop, once=args.once).run()

@@ -1,10 +1,12 @@
-// Hosts: the local host (and later remote ones) with state, data class policy and hardware.
+// Hosts: the local host (and later remote ones) with state, worker health, data class policy and hardware.
 
-import { api } from '../api/client';
+import { useEffect } from 'react';
+
+import { api, type WorkerHealth } from '../api/client';
 import { DataClassTag } from '../components/DataClassTag';
 import { ErrorBanner, RetryButton } from '../components/Feedback';
-import { Light } from '../components/StatusLight';
-import { formatTimestamp } from '../lib/format';
+import { Light, PendingLight } from '../components/StatusLight';
+import { DASH, formatMb, formatTimestamp } from '../lib/format';
 import { useApi } from '../lib/useApi';
 import { HardwareList } from './SetupView';
 
@@ -15,9 +17,57 @@ const KIND_LABEL = {
   cloud: 'Cloud',
 } as const;
 
+// Worker health changes while the core starts or restarts the worker; the view follows it.
+const REFRESH_MS = 5000;
+
+function WorkerState({ health }: { health: WorkerHealth | null | undefined }) {
+  if (!health) return <span className="cw-status cw-muted">No worker</span>;
+  switch (health.state) {
+    case 'starting':
+      return <PendingLight word="Starting" />;
+    case 'ready':
+      return <Light state="ok" word="Ready" />;
+    case 'busy':
+      return <Light state="ok" word="Busy" />;
+    case 'failed':
+      return <Light state="fail" word="Failed" />;
+  }
+}
+
+function vramInUse(health: WorkerHealth | null | undefined): string {
+  if (health?.vram_used_mb == null) return DASH;
+  const total = health.vram_total_mb != null ? ` of ${formatMb(health.vram_total_mb)}` : '';
+  return `${formatMb(health.vram_used_mb)}${total}`;
+}
+
+function WorkerList({ health }: { health: WorkerHealth | null | undefined }) {
+  return (
+    <dl className="kv" aria-label="Worker">
+      <dt>Worker</dt>
+      <dd>
+        <WorkerState health={health} />
+      </dd>
+      <dt>VRAM in use</dt>
+      <dd>{vramInUse(health)}</dd>
+      {health?.detail ? (
+        <>
+          <dt>Detail</dt>
+          <dd className="kv__wrap">{health.detail}</dd>
+        </>
+      ) : null}
+    </dl>
+  );
+}
+
 export function HostsView() {
   const hosts = useApi((signal) => api.hosts(signal));
   const items = hosts.data?.items ?? [];
+  const { reload } = hosts;
+
+  useEffect(() => {
+    const timer = window.setInterval(reload, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [reload]);
 
   return (
     <div className="view">
@@ -49,6 +99,7 @@ export function HostsView() {
                 <DataClassTag key={value} value={value} />
               ))}
             </div>
+            <WorkerList health={host.worker_health} />
             {host.hardware ? <HardwareList hardware={host.hardware} /> : <p className="cw-muted">No hardware profile yet.</p>}
           </section>
         ))}

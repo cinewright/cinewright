@@ -23,9 +23,9 @@ wan2gp:
   requirements: requirements.txt
   # Hash-locked engine environment for win_amd64 and Python 3.11 (PEP 751), relative to this file. It records the URL
   # and SHA-256 of every artifact, so installing it needs no extra index option. Its six sdist-only entries
-  # (antlr4-python3-runtime, docopt, iopath, moviepy, openai-whisper, unidic-lite) are built at install time; their
-  # build requirements are resolved outside the lock and not covered by its hashes, so provisioning must supply them
-  # from a pin (README, "Sdist-only lock entries").
+  # (antlr4-python3-runtime, docopt, iopath, moviepy, openai-whisper, unidic-lite) are built at install time, without
+  # build isolation against the lock's own setuptools, which provisioning installs first by hash (README, "Sdist-only
+  # lock entries").
   # Input: wan2gp/pyproject.toml, which is upstream `requirements` at `commit` without its global --extra-index-url,
   # plus `torch` from `torch_index`; torch* and onnxruntime-gpu come from explicit indexes scoped to them.
   # Quarantine: like the commit, the lock takes only files uploaded at least 7 days before it was resolved. The input

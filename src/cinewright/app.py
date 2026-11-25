@@ -4,7 +4,9 @@
 (`cinewright.security`), mounts the MCP server at `/mcp` when it is installed and serves the built
 web UI for every other GET. Building the app has no side effects, so the OpenAPI export and the
 surface listing can call `create_app()`; without an injected core the lifespan opens the data
-directory and creates a `Core` when the app starts.
+directory and creates a `Core` when the app starts. With a `WorkerSupervisor` the lifespan starts the
+local worker. With `provision` it starts engine provisioning and, without a supervisor, has the core start
+the local worker on the provisioned engine once it is ready. It stops all of them at shutdown.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from cinewright.api.schemas import API_PREFIX, API_VERSION, PROBLEM_NOT_FOUND
 from cinewright.config import Config, load_config
 from cinewright.core.core import Core
 from cinewright.core.service import CoreService
+from cinewright.core.supervisor import WorkerSupervisor
 from cinewright.security import LocalOnlyMiddleware, is_api_path
 
 log = logging.getLogger(__name__)
@@ -131,7 +134,20 @@ def _build_mcp(app: FastAPI, port: int) -> tuple[Any, httpx.AsyncClient] | None:
     return build_mcp_app(client), client
 
 
-def create_app(core: CoreService | None = None, config: Config | None = None) -> FastAPI:
+def create_app(
+    core: CoreService | None = None,
+    config: Config | None = None,
+    *,
+    supervisor: WorkerSupervisor | None = None,
+    provision: bool = False,
+) -> FastAPI:
+    """`supervisor`, when given, runs the local worker from startup to shutdown (only with a `Core`).
+
+    `provision` starts engine provisioning at startup (only with a `Core`); the launcher sets it, tests do not.
+    Without a `supervisor`, the core then starts the local worker from the provisioning record as soon as the
+    engine is ready: at startup, or when a provisioning run (first run or retry) reaches ready. So the installed
+    app starts no worker while provisioning runs or after it failed.
+    """
     config = config or getattr(core, "config", None) or load_config()
     mcp: Any = None
     api_client: httpx.AsyncClient | None = None
@@ -143,16 +159,40 @@ def create_app(core: CoreService | None = None, config: Config | None = None) ->
             app.state.core = owned
         current = app.state.core
         tasks: list[asyncio.Task[None]] = []
+        supervised = False
+        watching = False  # the core starts the local worker once the engine is ready
         try:
             if isinstance(current, Core):
                 app.state.enrollment_token = current.enrollment_token
                 await asyncio.to_thread(current.ensure_hardware)
                 tasks.append(asyncio.create_task(current.run_maintenance()))
+                if supervisor is not None:
+                    supervisor.start(
+                        core_url=config.base_url, enrollment_token=current.enrollment_token, paths=current.paths, clock=current.clock
+                    )
+                    current.supervisor = supervisor
+                    supervised = True
+                if provision:
+                    current.start_provisioning()  # first: it may try the optional wheels again before a worker runs
+                    if not supervised:
+                        current.run_local_worker_when_ready(config.base_url)
+                        watching = True
             async with AsyncExitStack() as stack:
                 if mcp is not None:
                     await stack.enter_async_context(mcp.lifespan())
                 yield
         finally:
+            # Shutdown order: stop granting leases, ask the worker to stop, kill it after the grace period.
+            # uvicorn has closed its sockets by now, so a running job returns to the queue when its lease expires.
+            if isinstance(current, Core) and (owned is not None or supervised or watching):
+                current.stop_leasing()
+            if watching:
+                await asyncio.to_thread(current.stop_local_worker)  # also keeps a run that reaches ready now from starting one
+            if isinstance(current, Core):
+                await asyncio.to_thread(current.provisioner.stop)  # a later start resumes it
+            if supervised:
+                await asyncio.to_thread(supervisor.stop)
+                current.supervisor = None
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

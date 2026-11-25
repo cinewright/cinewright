@@ -1,7 +1,9 @@
 """Start Cinewright: run the core on 127.0.0.1:<port> and open the web UI in the browser.
 
 End users start it from the Start menu (a gui-script without console), so everything goes to
-`<data dir>/logs/cinewright.log`. A second start only opens the browser. `--version` exists for CI.
+`<data dir>/logs/cinewright.log`. The core provisions the WanGP engine in the background on the first
+start and starts the local worker on it once it is ready. A second start only opens the browser.
+`--version` exists for CI.
 """
 
 from __future__ import annotations
@@ -73,7 +75,7 @@ def serve(config: Config) -> bool:
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(config=config),
+            create_app(config=config, provision=True),
             host=config.host,
             port=config.port,
             log_config=None,  # no console: our file handler on the root logger takes uvicorn's records

@@ -7,7 +7,7 @@ Methods raise `cinewright.core.errors.CoreError` subclasses, never HTTP exceptio
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -20,6 +20,7 @@ from cinewright.api.schemas import (
     CastList,
     ClientKind,
     DataClass,
+    EngineInfo,
     Estimate,
     HardwareProfile,
     Health,
@@ -43,6 +44,7 @@ from cinewright.api.schemas import (
     RecipeList,
     Settings,
     SettingsPatch,
+    SystemEvent,
     SystemInfo,
     WorkerEvents,
     WorkerEventsAck,
@@ -59,6 +61,9 @@ class CoreService(Protocol):
     def license_notices(self) -> LicenseNotices: ...
     def get_settings(self) -> Settings: ...
     def update_settings(self, patch: SettingsPatch) -> Settings: ...
+    def provision_engine(self, engine_id: str) -> EngineInfo:
+        """Start provisioning the engine unless it is ready or already provisioning; returns its state."""
+        ...
 
     # hardware
     def hardware(self) -> HardwareProfile: ...
@@ -79,10 +84,11 @@ class CoreService(Protocol):
     def list_jobs(self, state: JobState | None, cursor: str | None, limit: int) -> JobList: ...
     def get_job(self, job_id: str) -> Job: ...
     def cancel_job(self, job_id: str) -> Job: ...
-    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
-        """Replay events after `after` (`<job_id>:<seq>`, from Last-Event-ID), then the kept latest previews, then live ones.
+    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent | SystemEvent, None]:
+        """Replay job events after `after` (`<job_id>:<seq>`, from Last-Event-ID), then the kept latest previews, then live ones.
 
         Previews are live only: they carry the `seq` of the job's latest stored event and are never replayed.
+        Without `job_id`, live system events (engine provisioning) are mixed in; they are never stored, kept or replayed.
         """
         ...
 
@@ -114,7 +120,10 @@ class CoreService(Protocol):
         ...
 
     def heartbeat(self, worker_id: str, heartbeat: Heartbeat) -> HeartbeatAck: ...
-    async def lease(self, worker_id: str, request: LeaseRequest) -> Lease | None: ...
+    async def lease(self, worker_id: str, request: LeaseRequest, gone: Callable[[], Awaitable[bool]] | None = None) -> Lease | None:
+        """Long-poll for a job; `gone` tells whether the requesting worker disconnected meanwhile."""
+        ...
+
     def worker_input_path(self, worker_id: str, sha256: str) -> Path:
         """Path of an input asset, only for inputs of jobs currently leased to this worker."""
         ...

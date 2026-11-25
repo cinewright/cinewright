@@ -1,7 +1,10 @@
 """The core: the implementation of `CoreService` (see `service.py`).
 
-One `Core` per process start. It owns the database, the asset store, the scheduler and the event
-log, and generates the enrollment token that worker processes need to register.
+One `Core` per process start. It owns the database, the asset store, the scheduler, the event
+log and the engine provisioner (`provisioning.py`), and generates the enrollment token that worker
+processes need to register. The app's lifespan starts provisioning when asked to. It either attaches
+a given supervisor of the local worker (`supervisor.py`), or, in the installed app, lets the core start
+one on the provisioned engine as soon as the engine is ready (`run_local_worker_when_ready`).
 """
 
 from __future__ import annotations
@@ -15,7 +18,8 @@ import logging
 import os
 import secrets
 import sqlite3
-from collections.abc import AsyncGenerator, Callable, Iterator
+import threading
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -74,6 +78,8 @@ from cinewright.api.schemas import (
     Route,
     Settings,
     SettingsPatch,
+    SystemEvent,
+    SystemEventKind,
     SystemInfo,
     WorkerEvents,
     WorkerEventsAck,
@@ -87,11 +93,15 @@ from cinewright.config import Config
 from cinewright.core import hardware, router
 from cinewright.core.assets import BlobStore, BlobWriter, StagedBlob, asset_from_row, input_provenance, output_provenance, record_asset
 from cinewright.core.clock import Clock, from_iso, to_iso, utcnow
+from cinewright.core.engines import load_engine_pins
 from cinewright.core.errors import Conflict, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
 from cinewright.core.events import EventLog, Published
 from cinewright.core.licenses import WANGP_NAME, WANGP_NOTICE, license_notices
+from cinewright.core.provisioning import ENGINE_ID as WAN2GP
+from cinewright.core.provisioning import EngineProvisioner, ProvisioningStatus, bundled_uv
 from cinewright.core.registry import Registry
 from cinewright.core.scheduler import ACTIVE_STATES, LEASE_SECONDS, Scheduler, Tx, WorkerRecord, transition
+from cinewright.core.supervisor import WorkerLaunch, WorkerSupervisor
 from cinewright.db.database import Database
 
 log = logging.getLogger(__name__)
@@ -145,7 +155,14 @@ class Core:
         detect: Detector = hardware.detect,
         clock: Clock = utcnow,
         lease_seconds: float = LEASE_SECONDS,
+        provisioner: EngineProvisioner | None = None,
+        worker_supervisor: Callable[[WorkerLaunch], WorkerSupervisor] = WorkerSupervisor,
     ) -> None:
+        """`provisioner` defaults to provisioning the pinned Wan2GP with the installation's bundled uv.
+
+        `worker_supervisor` builds the local worker's supervisor from the launch the provisioning record gives
+        (`run_local_worker_when_ready`); tests swap in the mock engine and their own interpreter.
+        """
         self.config = config
         self.paths = config.paths
         self.paths.ensure()
@@ -158,13 +175,94 @@ class Core:
         self.scheduler = Scheduler(self.registry, lease_seconds=lease_seconds)
         # Per start; handed to spawned worker processes in CINEWRIGHT_ENROLLMENT_TOKEN.
         self.enrollment_token = secrets.token_urlsafe(32)
+        self.started_at = clock()
+        # The supervisor of the local worker process while there is one: given to the app, or started by the core.
+        self.supervisor: WorkerSupervisor | None = None
+        self._worker_supervisor = worker_supervisor
+        self._worker_lock = threading.Lock()
+        self._worker_core_url: str | None = None  # set while the core starts the local worker once the engine is ready
+        self._own_supervisor: WorkerSupervisor | None = None  # the supervisor the core started itself
         self._closed = False
+        self._leasing = True
+        self._retired: set[str] = set()  # workers replaced by a restart of the local worker: they get no new job
+        self.provisioner = (
+            provisioner
+            if provisioner is not None
+            else EngineProvisioner(self.paths, load_engine_pins()[WAN2GP], uv=bundled_uv(), clock=clock)
+        )
+        self.provisioner.on_change = self._engine_changed
         self._ensure_local_host()
+
+    def stop_leasing(self) -> None:
+        """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
+        self._leasing = False
+        self.scheduler.wakeup.notify()
+
+    def run_local_worker_when_ready(self, core_url: str) -> None:
+        """Start the supervised local worker on the provisioned engine now if it is ready, else once a run reaches ready.
+
+        For the installed app: the app's lifespan calls this with `provision`, after `start_provisioning`, so a
+        start that tries the optional wheels again comes first. The launch comes from the provisioning record
+        (`EngineProvisioner.worker_launch`). No worker starts while provisioning runs, nor after a failure, until a
+        retry reaches ready. `stop_local_worker` ends this.
+        """
+        with self._worker_lock:
+            self._worker_core_url = core_url
+        self._start_local_worker()
+
+    def stop_local_worker(self) -> None:
+        """Stop the local worker the core started, if any, and start none from now on (shutdown)."""
+        with self._worker_lock:
+            self._worker_core_url = None
+            supervisor, self._own_supervisor = self._own_supervisor, None
+        if supervisor is not None:
+            supervisor.stop()
+            if self.supervisor is supervisor:
+                self.supervisor = None
+
+    def _start_local_worker(self) -> None:
+        """Start the local worker if the core is to run one, runs none yet, and the engine is ready."""
+        with self._worker_lock:
+            core_url = self._worker_core_url
+            if core_url is None or self.supervisor is not None or self._closed or not self._leasing:
+                return
+            launch = self.provisioner.worker_launch()
+            if launch is None:
+                return
+            try:
+                supervisor = self._worker_supervisor(launch)
+                supervisor.start(core_url=core_url, enrollment_token=self.enrollment_token, paths=self.paths, clock=self.clock)
+            except Exception:  # noqa: BLE001 - the core keeps serving; the Hosts view shows no worker
+                log.exception("Starting the local worker on %s failed", launch.wan2gp_root)
+                return
+            self._own_supervisor = self.supervisor = supervisor
+        log.info("The engine is ready; starting the local worker with %s.", launch.python)
+
+    def restart_local_worker(self) -> None:
+        """Restart the supervised local worker, so it registers again with its current model list.
+
+        For model installs and removals (#3): a worker sends its model list only when it registers.
+        First the running worker process is retired: its pending lease long-poll returns at once and it gets
+        no new job. An idle worker waits in a long-poll longer than the stop's grace period, so it would
+        otherwise be killed instead of stopping on request, and a job it took in that window would wait for
+        its lease to expire while the new worker idles. Does nothing while the core supervises no worker.
+        """
+        supervisor = self.supervisor
+        if supervisor is None:
+            return
+        status = supervisor.status()
+        if status.state == "running" and status.since is not None:
+            rows = self.db.query("SELECT id FROM workers WHERE host_id = ? AND registered_at >= ?", (LOCAL_HOST_ID, to_iso(status.since)))
+            self._retired.update(row["id"] for row in rows)
+            self.scheduler.wakeup.notify()
+        supervisor.restart()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self.stop_local_worker()
+        self.provisioner.stop()
         self.event_log.close()
         self.scheduler.wakeup.notify()
         self.db.close()
@@ -271,16 +369,45 @@ class Core:
     def system_info(self) -> SystemInfo:
         return SystemInfo(version=__version__, data_dir=str(self.paths.root), bind=self.config.bind, engines=[self._wan2gp_info()])
 
-    def _wan2gp_info(self) -> EngineInfo:
-        online = {w.id for w in self._online_workers() if w.engine == "wan2gp"}
-        rows = [
-            r
-            for r in self.db.query("SELECT id, engine_version FROM workers WHERE engine = 'wan2gp' ORDER BY last_seen_at DESC")
-            if r["id"] in online
-        ]
-        if rows:
-            return EngineInfo(id="wan2gp", name=WANGP_NAME, version=rows[0]["engine_version"], state="ready", notice=WANGP_NOTICE)
-        return EngineInfo(id="wan2gp", name=WANGP_NAME, version=None, state="not_installed", notice=WANGP_NOTICE)
+    def _wan2gp_info(self, status: ProvisioningStatus | None = None) -> EngineInfo:
+        """The engine as provisioning reports it; once `ready`, `version` is the pinned commit."""
+        status = status if status is not None else self.provisioner.status()
+        return EngineInfo(
+            id=WAN2GP,
+            name=WANGP_NAME,
+            version=status.version,
+            state=status.state,
+            notice=WANGP_NOTICE,
+            progress=status.progress,
+            error=status.error,
+        )
+
+    def _engine_changed(self, status: ProvisioningStatus) -> None:
+        """Provisioning moved on (from its thread): publish the engine's new state; once ready, start the local worker.
+
+        The state goes out as a live system event to unfiltered streams only; it is not stored, kept or replayed.
+        """
+        if not self._closed:
+            self.event_log.publish_system(
+                SystemEvent(kind=SystemEventKind.ENGINE, engine=self._wan2gp_info(status), created_at=self.clock())
+            )
+        if status.state == "ready":
+            self._start_local_worker()
+
+    def start_provisioning(self) -> None:
+        """Provision the engine in the background unless it is ready; the app's lifespan calls this at start.
+
+        A ready engine whose optional wheels could not be downloaded earlier tries them again first, unless a
+        local worker already runs on its environment.
+        """
+        if not self.provisioner.start() and self.supervisor is None:
+            self.provisioner.retry_optional()
+
+    def provision_engine(self, engine_id: str) -> EngineInfo:
+        if engine_id != WAN2GP:
+            raise NotFound(f"Engine {engine_id} is not known; the only engine is {WAN2GP}.")
+        self.provisioner.start()
+        return self._wan2gp_info()
 
     def health(self) -> Health:
         checks: dict[str, str] = {}
@@ -581,7 +708,7 @@ class Core:
                 raise Conflict(f"Job {job_id} already {state.value}, so it cannot be cancelled.")
         return self.get_job(job_id)
 
-    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
+    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent | SystemEvent, None]:
         return self.event_log.stream(job_id, after)
 
     # ------------------------------------------------------------------ assets
@@ -622,8 +749,33 @@ class Core:
 
     # ------------------------------------------------------------------ hosts, approvals, libraries
 
+    def _worker_health(self) -> dict[str, WorkerHealth]:
+        """Per host, the health its most recently seen worker reported, among workers registered since this start.
+
+        Rows of earlier starts stay in the database. On the local host the supervisor's view of the process
+        wins while the process is starting or down, or runs but has not registered yet.
+        """
+        cutoff = to_iso(self.clock() - timedelta(seconds=WORKER_STALE_SECONDS))
+        rows = self.db.query(
+            "SELECT host_id, health, registered_at FROM workers WHERE last_seen_at >= ? AND registered_at >= ? "
+            "ORDER BY last_seen_at, registered_at",
+            (cutoff, to_iso(self.started_at)),
+        )
+        latest = {row["host_id"]: row for row in rows}  # ascending order: the last row of a host wins
+        health = {host_id: WorkerHealth.model_validate_json(row["health"]) for host_id, row in latest.items()}
+        supervisor = self.supervisor
+        if supervisor is not None:
+            status = supervisor.status()
+            local = latest.get(LOCAL_HOST_ID)
+            if status.state != "running":
+                health[LOCAL_HOST_ID] = WorkerHealth(state="starting" if status.state == "starting" else "failed", detail=status.detail)
+            elif local is None or (status.since is not None and from_iso(local["registered_at"]) < status.since):
+                health[LOCAL_HOST_ID] = WorkerHealth(state="starting", detail="The worker process runs and has not registered yet.")
+        return health
+
     def list_hosts(self) -> HostList:
         online = {w.host_id for w in self._online_workers()}
+        worker_health = self._worker_health()
         last_seen = {
             row["host_id"]: row["seen"] for row in self.db.query("SELECT host_id, MAX(last_seen_at) AS seen FROM workers GROUP BY host_id")
         }
@@ -638,6 +790,7 @@ class Core:
                     online=host.kind == HostKind.LOCAL or host.id in online,
                     last_seen_at=from_iso(last_seen.get(host.id)),
                     hardware=self._stored_hardware(host.id),
+                    worker_health=worker_health.get(host.id),
                 )
             )
         return HostList(items=items)
@@ -727,19 +880,26 @@ class Core:
             ).fetchall()
         return HeartbeatAck(cancel=[row["id"] for row in rows])
 
-    async def lease(self, worker_id: str, request: LeaseRequest) -> Lease | None:
+    async def lease(self, worker_id: str, request: LeaseRequest, gone: Callable[[], Awaitable[bool]] | None = None) -> Lease | None:
+        """Long-poll for a job. `gone` reports whether the requesting worker disconnected; a later check then takes no job.
+
+        A worker retired by `restart_local_worker` gets no job, and its waiting long-poll returns at once.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.wait_seconds
         first = True
-        while not self._closed:
+        while not self._closed and self._leasing:
             wakeup = self.scheduler.wakeup.snapshot()  # before checking, so no enqueue slips between check and wait
             # Only a request's first check releases the worker's abandoned jobs. A later check may belong to a
             # stale long-poll whose connection dropped while the worker's retry already got a job; it must not
-            # take that job back.
+            # take that job back. Nor may the long-poll of a worker process that was killed take a new job:
+            # the job would wait for its lease to expire while the restarted worker idles.
+            if not first and gone is not None and await gone():
+                return None
             granted = self._try_lease(worker_id, abandon=first)
             first = False
             remaining = deadline - loop.time()
-            if granted is not None or remaining <= 0:
+            if granted is not None or remaining <= 0 or worker_id in self._retired:
                 return granted
             try:
                 await asyncio.wait_for(wakeup.wait(), remaining)
@@ -748,6 +908,8 @@ class Core:
         return None
 
     def _try_lease(self, worker_id: str, *, abandon: bool = True) -> Lease | None:
+        if not self._leasing or worker_id in self._retired:
+            return None
         with self._tx() as tx:
             worker = self._worker_record(tx.conn, worker_id)
             row = self.scheduler.lease_next(tx, worker, abandon=abandon)

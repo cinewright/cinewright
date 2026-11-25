@@ -1,0 +1,80 @@
+# Engine files Wan2GP loads for the Wan 14B models (t2v_2_2, i2v_2_2), besides the transformer of the chosen
+# quantization. Source of truth: Wan2GP models/wan/wan_handler.py (query_model_def: text encoder; query_model_files:
+# tokenizer, CLIP and VAE files) at the pinned commit (38758d3c73366422efcf609abb63cab8385f3552).
+# Hashes and sizes: Hugging Face API for the repository at the revision below, read on 2026-11-24. Files in Git LFS:
+# lfs.oid (SHA-256) and lfs.size from POST https://huggingface.co/api/models/<repo>/paths-info/<revision>.
+# Files marked `content` are stored without LFS: SHA-256 and size of the content served at the resolve URL.
+id: wan-2.1-shared
+source:
+  provider: huggingface
+  repo: DeepBeepMeep/Wan2.1
+  revision: 378286d397e160409d4d453e0c9336d54780ac74
+files:
+  # UMT5-XXL text encoder, one file per text_encoder_quantization, plus its tokenizer.
+  - name: models_t5_umt5-xxl-enc-bf16.safetensors
+    subfolder: umt5-xxl/
+    variant: bf16
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors
+    sha256: ec346c46bef27b0cca2a02c08757f60632b297cd9d21e759491765b0c6463869
+    size_bytes: 11361847677
+  - name: models_t5_umt5-xxl-enc-quanto_int8.safetensors
+    subfolder: umt5-xxl/
+    variant: int8
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/models_t5_umt5-xxl-enc-quanto_int8.safetensors
+    sha256: 5e4961851c78838931990549810ed51c9036081b2ad80bf464c4e2603c5f922c
+    size_bytes: 6733337738
+  - name: special_tokens_map.json
+    subfolder: umt5-xxl/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/special_tokens_map.json
+    sha256: 7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d  # content
+    size_bytes: 6623
+  - name: spiece.model
+    subfolder: umt5-xxl/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/spiece.model
+    sha256: e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458
+    size_bytes: 4548313
+  - name: tokenizer.json
+    subfolder: umt5-xxl/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/tokenizer.json
+    sha256: 6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b
+    size_bytes: 16837417
+  - name: tokenizer_config.json
+    subfolder: umt5-xxl/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/umt5-xxl/tokenizer_config.json
+    sha256: ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05  # content
+    size_bytes: 61728
+  # XLM-RoBERTa CLIP image encoder and its tokenizer.
+  - name: models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors
+    subfolder: xlm-roberta-large/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/xlm-roberta-large/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors
+    sha256: 742b68fe1cade9e54863aee12aed5390a994269957bd0638799b141cbc236ad8
+    size_bytes: 2386119506
+  - name: sentencepiece.bpe.model
+    subfolder: xlm-roberta-large/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/xlm-roberta-large/sentencepiece.bpe.model
+    sha256: cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865
+    size_bytes: 5069051
+  - name: special_tokens_map.json
+    subfolder: xlm-roberta-large/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/xlm-roberta-large/special_tokens_map.json
+    sha256: 06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f  # content
+    size_bytes: 280
+  - name: tokenizer.json
+    subfolder: xlm-roberta-large/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/xlm-roberta-large/tokenizer.json
+    sha256: 62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626
+    size_bytes: 17082660
+  - name: tokenizer_config.json
+    subfolder: xlm-roberta-large/
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/xlm-roberta-large/tokenizer_config.json
+    sha256: efb5c0d09722e5fe59a462cd2a9976ee216d55b037597d997cd3fe833216da15  # content
+    size_bytes: 418
+  # VAE and the 2x upscaling VAE.
+  - name: Wan2.1_VAE.safetensors
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/Wan2.1_VAE.safetensors
+    sha256: 3ce0c02b9470532e7f63f3e2f8e83b0681fdeaa432e969c412482d2b3b78267b
+    size_bytes: 507593157
+  - name: Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors
+    url: https://huggingface.co/DeepBeepMeep/Wan2.1/resolve/378286d397e160409d4d453e0c9336d54780ac74/Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors
+    sha256: 2413554bbec24215185662d009893cf4666b8e777efece2d895e03e1a6b63e06
+    size_bytes: 507684560

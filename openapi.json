@@ -502,6 +502,17 @@
       "EngineInfo": {
         "additionalProperties": false,
         "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why provisioning failed (`failed`) or cannot run here (`not_installed`); null otherwise"
+          },
           "id": {
             "description": "Engine id, e.g. `wan2gp`",
             "title": "Id",
@@ -523,7 +534,19 @@
             "description": "Licence disclosure shown in the UI (WanGP requires one)",
             "title": "Notice"
           },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Progress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provisioning progress while `state` is `provisioning`"
+          },
           "state": {
+            "description": "From engine provisioning",
             "enum": [
               "not_installed",
               "provisioning",
@@ -848,6 +871,17 @@
           "online": {
             "title": "Online",
             "type": "boolean"
+          },
+          "worker_health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerHealth"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "State and VRAM use of the host's worker, as last reported by a worker registered since the core started. On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker"
           }
         },
         "required": [
@@ -2481,6 +2515,41 @@
         "title": "SettingsPatch",
         "type": "object"
       },
+      "SetupError": {
+        "additionalProperties": false,
+        "description": "Why a setup task (engine provisioning) failed or cannot run.",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "const": "retry",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The one helpful action the UI offers; null when none helps",
+            "title": "Action"
+          },
+          "code": {
+            "description": "Stable machine code, e.g. `hash_mismatch`, `download_failed`, `install_failed`",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Cause and consequence in one sentence",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "SetupError",
+        "type": "object"
+      },
       "SystemInfo": {
         "additionalProperties": false,
         "properties": {
@@ -3564,6 +3633,61 @@
         ]
       }
     },
+    "/api/v1/engines/{engine_id}/provision": {
+      "post": {
+        "description": "Start provisioning the engine (the Setup view's retry) unless it is ready or already provisioning.\n\nReturns the engine's state; progress and the result follow as `engine` events on `GET /events`.",
+        "operationId": "provisionEngine",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "engine_id",
+            "required": true,
+            "schema": {
+              "title": "Engine Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Provision Engine",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/estimate": {
       "post": {
         "operationId": "estimate",
@@ -3683,7 +3807,7 @@
             "content": {
               "text/event-stream": {}
             },
-            "description": "Server-sent events; each `data:` line is a JobEvent"
+            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed."
           },
           "404": {
             "content": {
