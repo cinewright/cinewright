@@ -3,6 +3,12 @@
 # creates the GitHub release and tag, then the publish job builds the Windows installer, attests its
 # build provenance and uploads it to the release.
 # The release PR is never merged automatically: a merge by GITHUB_TOKEN would not trigger this workflow.
+# release-please runs with GITHUB_TOKEN, so the release PR starts no workflows. The CI run this
+# workflow starts on the PR branch is an early signal only: GitHub does not count a workflow_dispatch
+# run for the PR's required check "ci". To release, the owner closes and reopens the release PR (a
+# human event, so ci.yml runs and its "ci" check counts), waits for "ci" to pass, approves the PR
+# (it is bot-authored) and squash-merges it. If release-please updates the PR afterwards, the owner
+# closes and reopens it again.
 name: release
 on:
   push:
@@ -35,7 +41,8 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
       # A PR that GITHUB_TOKEN created or updated triggers no workflows, so start CI on its head
-      # branch; the run's "ci" check lands on the PR's head commit.
+      # branch as an early signal only. GitHub does not count this workflow_dispatch run for the PR's
+      # required check "ci"; that check comes from the run the owner's close and reopen of the PR starts.
       - name: Start CI on the release PR
         if: steps.rp.outputs.pr != ''
         env:
