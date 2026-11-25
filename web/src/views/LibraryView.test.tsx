@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Asset } from '../api/client';
 import { EventsProvider } from '../api/events';
-import { stubApi, type ApiCall, type Routes } from '../test/api';
+import { StatusAnswer, stubApi, type ApiCall, type Routes } from '../test/api';
 import { stubEventSource } from '../test/events';
 import { LibraryView } from './LibraryView';
 
@@ -135,6 +135,28 @@ describe('LibraryView', () => {
     expect(within(await screen.findByRole('alert')).getByText('Could not open the linked asset')).toBeTruthy();
     expect(calls.filter((call) => call.path === `/api/v1/assets/${missing}`)).toHaveLength(2);
     expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
+  });
+
+  it('drops the banner of a link that failed once its asset arrives with the next page', async () => {
+    let pages = 0;
+    const calls = renderAt(`#/library/${LINKED_SHA}`, {
+      'GET /api/v1/assets': () => (pages++ === 0 ? { items: FIRST_PAGE, next_cursor: 'page-2' } : { items: [LINKED], next_cursor: null }),
+      [`GET /api/v1/assets/${LINKED_SHA}`]: () => new StatusAnswer(503),
+    });
+    expect(within(await screen.findByRole('alert')).getByText('Could not open the linked asset')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more assets' }));
+    await waitFor(() => expect(provenance('Parameters')).toBe('1280x704 · 241 frames · 24 fps · 8 steps'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(pressedTimestamps()).toStrictEqual(['2026-11-01T08:00:00Z']);
+
+    // Selecting it anew neither loads it again nor brings the banner back.
+    fireEvent.click(card('2026-11-01T08:00:00Z'));
+    await screen.findByText('Select an asset to see its provenance.');
+    fireEvent.click(card('2026-11-01T08:00:00Z'));
+    await waitFor(() => expect(provenance('Parameters')).toBe('1280x704 · 241 frames · 24 fps · 8 steps'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(calls.filter((call) => call.path === `/api/v1/assets/${LINKED_SHA}`)).toHaveLength(1);
   });
 
   it('clears the banner of a link that is not an asset id when a card is selected', async () => {

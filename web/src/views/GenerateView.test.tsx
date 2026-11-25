@@ -414,32 +414,38 @@ describe('GenerateView', () => {
     expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toHaveLength(1);
   });
 
-  /** Submit a t2v job; the stream then drops and opens again while the reload of the job waits for `answer`. */
+  /** Submit a t2v job; the stream then drops and opens again while the reload of the job waits for `reload`. */
   async function reopenWithHeldReload(before: (source: FakeEventSource) => void = () => undefined) {
     let submitted: Job | undefined;
-    let answer: (state: Partial<Job>) => void = () => undefined;
-    const { calls, source } = renderView({
+    // One held answer per reload, in the order the reloads were sent.
+    const answers: ((state: Partial<Job>) => void)[] = [];
+    const { source } = renderView({
       'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
       'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
       'POST /api/v1/estimate': () => feasible(LTX),
       'POST /api/v1/jobs': (body) => (submitted = job(body as JobRequest)),
-      [`GET /api/v1/jobs/${JOB_ID}`]: () => new Promise((resolve) => (answer = (fields) => resolve({ ...submitted, ...fields }))),
+      [`GET /api/v1/jobs/${JOB_ID}`]: () => new Promise((resolve) => answers.push((fields) => resolve({ ...submitted, ...fields }))),
     });
     await screen.findByRole('option', { name: LTX_NAME });
     enterPrompt();
     fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
     const panel = await screen.findByRole('region', { name: 'Job' });
     act(() => before(source()));
-    act(() => source().onerror?.(new Event('error')));
-    act(() => source().open());
-    await waitFor(() => expect(calls.some((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toBe(true));
+    /** The stream drops and opens again, which sends a reload of its own. */
+    const reopen = async () => {
+      const sent = answers.length;
+      act(() => source().onerror?.(new Event('error')));
+      act(() => source().open());
+      await waitFor(() => expect(answers).toHaveLength(sent + 1));
+    };
+    await reopen();
     const bar = () => within(panel).getByRole('progressbar');
-    /** Answer the reload and let the view take it. */
-    const reload = async (fields: Partial<Job>) => {
-      answer(fields);
+    /** Answer a held reload, the latest by default, and let the view take it. */
+    const reload = async (fields: Partial<Job>, index = answers.length - 1) => {
+      answers[index]?.(fields);
       await act(() => new Promise((resolve) => window.setTimeout(resolve, 50)));
     };
-    return { source, bar, reload };
+    return { source, bar, reload, reopen };
   }
 
   it('keeps a live state that arrived while the reload after a reopen was on its way', async () => {
@@ -467,6 +473,7 @@ describe('GenerateView', () => {
     expect(bar().getAttribute('aria-valuenow')).toBe('88');
   });
 
+  // The guard must not be stricter than "an event arrived meanwhile": a reload may move the state back.
   it('takes a reload that finds the job queued again when no event arrived meanwhile', async () => {
     const { bar, reload } = await reopenWithHeldReload((stream) => stream.emit('state', event('state', 3, { state: 'running' })));
     expect(bar().getAttribute('aria-label')).toBe('Running');
@@ -474,6 +481,31 @@ describe('GenerateView', () => {
     // The worker was lost while the stream was down, and the scheduler queued the job again.
     await reload({ state: 'queued' });
     expect(bar().getAttribute('aria-label')).toBe('Queued');
+  });
+
+  it('takes the reloaded progress when only a log event arrived while the reload was on its way', async () => {
+    const { source, bar, reload } = await reopenWithHeldReload((stream) => {
+      stream.emit('state', event('state', 2, { state: 'running' }));
+      stream.emit('progress', event('progress', 3, { phase: 'denoise', step: 2, total_steps: 8, percent: 25 }));
+    });
+    expect(bar().getAttribute('aria-label')).toBe('Step 2/8');
+
+    act(() => source().emit('log', event('log', 6, { message: 'Cancel requested; the worker stops the job at its next check.' })));
+    await reload({ state: 'running', progress: { phase: 'denoise', step: 5, total_steps: 8, percent: 62.5 } });
+    expect(bar().getAttribute('aria-label')).toBe('Step 5/8');
+    expect(bar().getAttribute('aria-valuenow')).toBe('63');
+  });
+
+  it('takes only the latest reload when the stream reopens again before the first reload answered', async () => {
+    const { bar, reload, reopen } = await reopenWithHeldReload((stream) => stream.emit('state', event('state', 2, { state: 'leased' })));
+    await reopen();
+    expect(bar().getAttribute('aria-label')).toBe('Starting');
+
+    // The newer reload finds the job running; the older one, answered last, read it before it started.
+    await reload({ state: 'running' }, 1);
+    expect(bar().getAttribute('aria-label')).toBe('Running');
+    await reload({ state: 'leased' }, 0);
+    expect(bar().getAttribute('aria-label')).toBe('Running');
   });
 
   it('shows readable upload refusals', async () => {

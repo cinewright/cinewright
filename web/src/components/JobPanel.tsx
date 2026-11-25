@@ -44,6 +44,8 @@ export interface TrackedJob {
   lastSeq: number;
   /** Seq of the latest state event applied, so a reload answered after a newer state event does not undo it. */
   lastStateSeq: number;
+  /** Seq of the latest progress event applied, so a reload answered after newer progress keeps the live progress. */
+  lastProgressSeq: number;
 }
 
 function fromJob(job: Job): TrackedJob {
@@ -56,6 +58,7 @@ function fromJob(job: Job): TrackedJob {
     preview: null,
     lastSeq: 0,
     lastStateSeq: 0,
+    lastProgressSeq: 0,
   };
 }
 
@@ -97,7 +100,10 @@ export function applyEvent(job: TrackedJob, event: JobEvent): TrackedJob {
   }
   if (event.seq <= job.lastSeq) return job; // replayed after a reconnect
   const next = { ...job, lastSeq: event.seq };
-  if (event.kind === 'progress') return { ...next, progress: readProgress(event.data, job.progress) };
+  if (event.kind === 'progress') {
+    const progress = readProgress(event.data, job.progress);
+    return progress === job.progress ? next : { ...next, progress, lastProgressSeq: event.seq };
+  }
   if (event.kind === 'state') {
     const raw = event.data.state;
     if (typeof raw !== 'string' || !(raw in JOB_STATES)) return next;
@@ -118,6 +124,7 @@ export function useTrackedJob() {
   const buffer = useRef<JobEvent[]>([]);
   const current = useRef<TrackedJob | null>(null);
   current.current = job;
+  const reloads = useRef(0);
   const connected = useEventsConnected();
 
   useJobEvents((event) => {
@@ -128,22 +135,25 @@ export function useTrackedJob() {
     }
   });
 
-  // A stream the provider had to open anew sends no replay; load the job again whenever the stream opens. The answer
-  // may predate events that arrive while it is on its way: after a state event the live state wins, after a progress
-  // event the live progress. Without them the answer is the newest word, also for a job that was queued again.
+  // A stream the provider had to open anew sends no replay; load the job again whenever the stream opens. Only the
+  // latest reload applies, since an older one may answer last. The answer may predate events that arrive while it is
+  // on its way: after a state event the live state wins, after a progress event the live progress. Without them the
+  // answer is the newest word, also for a job that was queued again.
   useEffect(() => {
     const tracked = current.current;
     if (!connected || !tracked || TERMINAL.has(tracked.state)) return;
-    const { lastSeq, lastStateSeq } = tracked;
+    const { lastStateSeq, lastProgressSeq } = tracked;
+    const reload = ++reloads.current;
     api
       .job(tracked.id)
-      .then((loaded) =>
+      .then((loaded) => {
+        if (reload !== reloads.current) return;
         setJob((value) => {
           if (!value || value.id !== loaded.id || TERMINAL.has(value.state) || value.lastStateSeq > lastStateSeq) return value;
-          const progress = value.lastSeq > lastSeq ? value.progress : (loaded.progress ?? value.progress);
+          const progress = value.lastProgressSeq > lastProgressSeq ? value.progress : (loaded.progress ?? value.progress);
           return { ...value, state: loaded.state, progress, error: loaded.error ?? null, outputs: loaded.outputs ?? [] };
-        }),
-      )
+        });
+      })
       .catch(() => undefined); // the next event brings the state
   }, [connected]);
 

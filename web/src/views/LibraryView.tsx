@@ -53,7 +53,8 @@ export function LibraryView() {
   const [cursor, setCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<unknown>();
-  // The asset being loaded by itself, and the failed load; each counts only while that asset is selected.
+  // The asset being loaded by itself, and the failed load; each counts only while that asset is selected, the failed
+  // load only while that asset is also missing, as a list page may bring it in after all.
   const [linkLoading, setLinkLoading] = useState<string | null>(null);
   const [linkError, setLinkError] = useState<{ sha256: string; error: unknown }>();
   const requestedLink = useRef<string | null>(null);
@@ -121,7 +122,7 @@ export function LibraryView() {
       {link === 'invalid' ? (
         <ErrorBanner title="Could not open the linked asset" error="The link names no asset; an asset id is 64 lowercase hex characters." />
       ) : null}
-      {linkError && linkError.sha256 === selected ? <ErrorBanner title="Could not open the linked asset" error={linkError.error} /> : null}
+      {linkError && linkError.sha256 === selected && !asset ? <ErrorBanner title="Could not open the linked asset" error={linkError.error} /> : null}
 
       {!list.loading && !list.error && linkLoading === null && assets.length === 0 ? (
         <EmptyState title="No assets yet">
