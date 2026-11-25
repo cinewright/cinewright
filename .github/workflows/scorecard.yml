@@ -1,6 +1,5 @@
-# Managed by nullthrone/governance. Do not edit: changes come only from the owner via onboarding.
-# OpenSSF Scorecard for public repositories. Not a thin caller: scorecard-action has to run in the
-# repository's own workflow to publish results (badge).
+# OpenSSF Scorecard for this public repository. Publishes the results behind the README badge;
+# scorecard-action allows only a restricted set of actions in this workflow to publish them.
 name: scorecard
 on:
   branch_protection_rule:

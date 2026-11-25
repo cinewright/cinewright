@@ -1,4 +1,3 @@
-# Managed by nullthrone/governance. Workflows are governance-managed, so github-actions is not updated here.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -10,5 +9,13 @@ updates:
       prefix: fix
       prefix-development: chore
       include: scope
+    labels:
+      - dependencies
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
     labels:
       - dependencies
