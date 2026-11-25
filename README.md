@@ -49,7 +49,7 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
    pytest tests/test_e2e_mock.py -v
    ```
 
-   The test starts a real core on a free port, with a temporary data directory. It then starts the mock worker as a separate process (`python -m cinewright_worker --engine mock`), which registers with the core's enrollment token. Next it submits a text-to-image job pinned to `z-image-turbo`. The mock worker stands in for WanGP and writes a small PNG instead of running the model. The test then checks four things: the job's events over SSE, the PNG, its provenance record (seed, model, host) and the MCP tools at `/mcp`. You should see `1 passed`.
+   The test starts a real core on a free port, with a temporary data directory. It then starts the mock worker as a separate process (`python -m cinewright_worker --engine mock`), which registers with the core's enrollment token. Next it records `z-image-turbo` in `int8` as installed, without its files, because the router routes only installed quantizations, and submits a text-to-image job pinned to that model. The mock worker stands in for WanGP and writes a small PNG instead of running the model. The test then checks four things: the job's events over SSE, the PNG, its provenance record (seed, parameters, model and its files, host) and the MCP tools at `/mcp`. You should see `1 passed`.
 
 3. Build the web UI and the wheel:
 
