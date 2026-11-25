@@ -335,8 +335,8 @@ export interface paths {
          * @description Change a host's settings. A new `text_encoder_variant` is switched in the background.
          *
          *     Checks first and refuses with 409 while a job runs on the host or a model is being installed, and when the
-         *     variant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's
-         *     configuration names it.
+         *     variant's files do not fit on the drive of the model store. `GET /hosts` shows the switch as the host's
+         *     `text_encoder_switch` while it runs or after it failed, and the new `text_encoder_variant` once it is done.
          */
         patch: operations["updateHost"];
         trace?: never;
@@ -1008,6 +1008,8 @@ export interface components {
             name: string;
             /** Online */
             online: boolean;
+            /** @description The host's last text encoder switch while it runs or after it failed; null when none ran since the core started or the last one succeeded, which `text_encoder_variant` then shows */
+            text_encoder_switch?: components["schemas"]["TextEncoderSwitch"] | null;
             /**
              * Text Encoder Variant
              * @description Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies
@@ -1631,6 +1633,20 @@ export interface components {
             name: "Cinewright";
             /** Version */
             version: string;
+        };
+        /**
+         * TextEncoderSwitch
+         * @description A text encoder variant switch of a host since the core started: running, or failed.
+         */
+        TextEncoderSwitch: {
+            /** @description Why the switch failed; the previous variant stays in use. null while the switch runs */
+            error?: components["schemas"]["SetupError"] | null;
+            /**
+             * Variant
+             * @description The variant the switch installs
+             * @enum {string}
+             */
+            variant: "bf16" | "int8";
         };
         /** WorkerEvent */
         WorkerEvent: {

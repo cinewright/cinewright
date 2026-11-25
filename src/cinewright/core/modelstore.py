@@ -8,6 +8,8 @@ lie at `<store>/<name>`, every other shared file at `<store>/<subfolder><name>` 
 Files are shared: `store_files` holds each file once, and `installed_model_files` ties it to every installed
 quantization that needs it, which is its reference count. A file goes only when no installed quantization
 references it, no install in progress needs it and no job that waits or runs on the local host needs it.
+Until jobs run the quantization they are routed to (#5), Wan2GP picks the file of a model type by its own
+`transformer_quantization`, so a job needs every quantization bound to the same engine model type as its route.
 
 An install (`prepare_install`, then `run_install`):
 
@@ -15,22 +17,26 @@ An install (`prepare_install`, then `run_install`):
    descriptor `requires` the files without a variant plus those of the host's text encoder variant;
 2. checks before any byte moves: allowed file types, paths inside the store, pinned sizes; the quota, planning
    the eviction of least recently used quantizations no waiting or running job needs; the free space of the
-   store's drive, counting what that eviction frees. Only then it evicts;
+   store's drive, counting what that eviction frees. Both count what the installs in progress still add and
+   download. Only then it evicts;
 3. downloads the missing files into `.downloads/` with the `Downloader` of engine provisioning: resumable `.part`
    files, SHA-256 and size checked before a file is used, HTTPS to the registry's hosts and their download CDNs
    only (`DOWNLOAD_HOSTS`, every redirect included);
 4. once every file verified, moves them into place and registers them with their references in one
    transaction, then merges `checkpoints_paths` and `text_encoder_quantization` into `wgp_config.json`.
 
-A failed or cancelled install registers nothing; its verified and partial downloads stay in `.downloads/` for the
-next try. After an install or a removal the caller restarts the local worker, so it re-announces its models.
-Wan2GP defines the MVP model types itself (`<wan2gp root>/defaults/<model_type>.json`); a finetune definition is
-written only for a model type it does not define. Do not call the store from inside a database transaction.
+A failed or cancelled install registers no file: its quantization stays `failed`, and its verified and partial
+downloads stay in `.downloads/` for the next try until a removal deletes them. After an install or a removal the
+caller restarts the local worker, so it re-announces its models. Wan2GP defines the MVP model types itself
+(`<wan2gp root>/defaults/<model_type>.json`); a finetune definition is written only for a model type it does not
+define that `architectures` maps to an architecture. No such map ships yet, since every registry type is a Wan2GP
+built-in. Do not call the store from inside a database transaction.
 
 A text encoder variant switch (`prepare_switch`, then `run_switch`) checks free disk space, downloads the other
 variant's files of every installed quantization the same way, re-registers each one's references and stores the
 variant in one transaction, and rewrites `text_encoder_quantization`. The caller then restarts the worker and
-collects the previous variant's files (`collect_garbage`). Installs, removals and a switch exclude each other.
+collects the previous variant's files (`collect_garbage`); until then the files a waiting or running job needs
+stay in both variants. Installs, removals and a switch exclude each other.
 """
 
 from __future__ import annotations
@@ -352,7 +358,7 @@ def disk_free(path: Path) -> int:
 
 
 def _cancelled(label: str) -> ModelStoreError:
-    return ModelStoreError("cancelled", f"The install of {label} was cancelled; a later install continues its downloads.")
+    return ModelStoreError("cancelled", f"The install of {label} stopped before it finished; install it again to continue its downloads.")
 
 
 def _sha256_of(path: Path) -> str:
@@ -386,7 +392,8 @@ class ModelStore:
         """`quota_bytes` reads the quota (`settings.model_store_quota_gb` times `GB`), None for none. `free_bytes` measures the drive.
 
         `transport` replaces the network (tests); `engine_root` names the provisioned Wan2GP root, None while there is
-        none. `architectures` maps a model type Wan2GP does not define to the architecture of its finetune definition.
+        none. `architectures` maps a model type Wan2GP does not define to the architecture of its finetune definition;
+        the core passes none yet, as every registry type is a Wan2GP built-in.
         One store per core start: it marks an install the previous start left `downloading` as failed.
         """
         self.db = db
@@ -401,10 +408,13 @@ class ModelStore:
         self._architectures = dict(architectures or {})
         self._clock = clock
         self._lock = threading.RLock()  # plans, registrations and removals
-        self._download_lock = threading.Lock()  # one install downloads at a time; two may want the same file
-        self._active: set[InstallKey] = set()
+        # One install downloads and registers at a time: two may want the same file, and the first moves it into place.
+        self._download_lock = threading.Lock()
+        self._active: dict[InstallKey, Install] = {}  # installs prepared and not yet ended
         self._switching: str | None = None  # the text encoder variant a switch in progress installs
+        self._previous_variant: str | None = None  # the variant a switch replaced, until the worker no longer uses it
         self._reserved: Counter[str] = Counter()  # path keys of the files active installs and a switch need
+        self._undeletable: set[str] = set()  # path keys a collection could not delete (a worker held them open)
         # An install the last core start did not finish (Cinewright closed) left its row `downloading`.
         self.db.execute(
             "UPDATE installed_models SET state = 'failed', error = ? WHERE state = 'downloading'",
@@ -446,22 +456,41 @@ class ModelStore:
             free_bytes=self._free_bytes(self.root),
         )
 
+    def runs_on(self, model_id: str, quant: str) -> set[str]:
+        """The quantizations of the model whose files a job routed to `quant` may run on.
+
+        That is `quant` and every quantization bound to the same engine and model type: until jobs run the quantization
+        they are routed to (#5), Wan2GP picks a model type's file by its own `transformer_quantization`, and the router
+        picks the first quantization the worker's model type serves (for the MVP models `bf16`, not the installed `int8`).
+        """
+        model = self.registry.get(model_id)
+        if model is None:
+            return {quant}
+        types = {(binding.engine, binding.model_type) for binding in model.engines if binding.quant == quant}
+        return {quant} | {binding.quant for binding in model.engines if (binding.engine, binding.model_type) in types}
+
     def needed_by_jobs(self) -> set[InstallKey]:
-        """Quantizations that a job waiting or running on this host is routed to."""
+        """Quantizations that a job waiting or running on this host may run on (see `runs_on`)."""
         rows = self.db.query(
             "SELECT DISTINCT json_extract(route, '$.model_id') AS model_id, json_extract(route, '$.quant') AS quant FROM jobs "
             "WHERE route IS NOT NULL AND json_extract(route, '$.host_id') = ? "
             "AND state IN ('awaiting_approval', 'queued', 'leased', 'running')",
             (self.host_id,),
         )
-        return {(row["model_id"], row["quant"]) for row in rows if row["model_id"] and row["quant"]}
+        needed: set[InstallKey] = set()
+        for row in rows:
+            if row["model_id"] and row["quant"]:
+                needed.update((row["model_id"], quant) for quant in self.runs_on(row["model_id"], row["quant"]))
+        return needed
 
     def mark_used(self, model_id: str, quant: str) -> None:
-        """Record that a job used the quantization now; eviction removes the least recently used first."""
-        self.db.execute(
-            "UPDATE installed_models SET last_used_at = ? WHERE model_id = ? AND quant = ? AND state = 'installed'",
-            (to_iso(self._clock()), model_id, quant),
-        )
+        """Record that a job routed to the quantization used it now (see `runs_on`); eviction removes the least recently used first."""
+        now = to_iso(self._clock())
+        with self.db.transaction() as conn:
+            conn.executemany(
+                "UPDATE installed_models SET last_used_at = ? WHERE model_id = ? AND quant = ? AND state = 'installed'",
+                [(now, model_id, used) for used in sorted(self.runs_on(model_id, quant))],
+            )
 
     def register_in_wan2gp(self) -> WgpConfigResult:
         """Merge the store and the host's text encoder variant into `wgp_config.json` (see `merge_wgp_config`)."""
@@ -507,15 +536,27 @@ class ModelStore:
                 )
             stored = self._stored()
             missing = [file for file in files if not self._present(file, stored)]
-            download = sum(file.size_bytes - self._staged_bytes(file) for file in missing)
-            growth = sum(file.size_bytes - (stored[file.key][1] if file.key in stored else 0) for file in missing)
-            evicted, freed = self._plan_eviction(key, files, growth, label)
-            available = self._free_bytes(self.root) + freed
+            # Installs accepted before this one still add their missing files to the store and download what is not in
+            # `.downloads/` yet; free space measured now does not show that. A file one of them brings counts once.
+            pending = {
+                file.key: file
+                for other in self._active.values()
+                for file in other.missing
+                if stored.get(file.key) != (file.sha256, file.size_bytes)
+            }
+            own = [file for file in missing if file.key not in pending]
+            download = sum(file.size_bytes - self._staged_bytes(file) for file in own)
+            growth = sum(self._growth(file, stored) for file in own)
+            pending_download = sum(file.size_bytes - self._staged_bytes(file) for file in pending.values())
+            pending_growth = sum(self._growth(file, stored) for file in pending.values())
+            evicted, freed = self._plan_eviction(key, files, growth, label, pending=pending_growth)
+            available = self._free_bytes(self.root) + freed - pending_download
             if download > available:
+                after = ", after what the installs in progress still download" if pending_download else ""
                 raise ModelStoreError(
                     "not_enough_space",
                     f"Installing {label} needs {format_size(download - available)} more free space on the drive of the model store: "
-                    f"it downloads {format_size(download)}, and only {format_size(available)} are free.",
+                    f"it downloads {format_size(download)}, and only {format_size(max(available, 0))} are free{after}.",
                 )
             if evicted or freed:
                 for victim in evicted:
@@ -529,9 +570,10 @@ class ModelStore:
                     "ON CONFLICT (model_id, quant) DO UPDATE SET state = 'downloading', error = NULL",
                     key,
                 )
-            self._active.add(key)
+            install = Install(model_id, quant, label, variant, tuple(files), tuple(missing), download, tuple(evicted))
+            self._active[key] = install
             self._reserved.update(file.key for file in files)
-            return Install(model_id, quant, label, variant, tuple(files), tuple(missing), download, tuple(evicted))
+            return install
 
     def run_install(
         self,
@@ -543,39 +585,39 @@ class ModelStore:
         """Download, verify, place and register a prepared install, then register the store in Wan2GP.
 
         Returns what the `wgp_config.json` merge did; `missing` means Wan2GP has not written its config yet, so it
-        does not see the store until a merge after its first start. On any failure nothing of the install is
-        registered, the quantization is `failed` with the message (or absent again when cancelled), and
-        `ModelStoreError` is raised. A config that cannot be merged raises after the registration: the files are
-        installed, but Wan2GP does not see them until the config is fixed.
+        does not see the store until a merge after its first start. On any failure, a cancellation included, no file of
+        the install is registered, the quantization is `failed` with the message, and `ModelStoreError` is raised. A
+        config that cannot be merged raises after the registration: the files are installed, but Wan2GP does not see
+        them until the config is fixed.
         """
         report = progress or (lambda _: None)
         try:
-            with self._download_lock:
+            with self._download_lock:  # also over the registration: a staged file another install needs moves with it
                 ready = self._download(
                     install.label,
                     install.missing,
                     lambda done, total, path: report(InstallProgress(install.model_id, install.quant, done, total, path)),
                     cancelled,
                 )
-            self._register(install, ready)
+                self._register(install, ready)
         except ModelStoreError as exc:
-            self._fail(install, exc.code, exc.message)
+            self._fail(install, exc.message)
             raise
         except OSError as exc:
             log.exception("Installing %s failed", install.label)
             message = f"Writing the files of {install.label} failed ({exc.strerror or exc}), so it is not installed."
-            self._fail(install, "io_error", message)
+            self._fail(install, message)
             raise ModelStoreError("io_error", message) from exc
         except Exception as exc:  # noqa: BLE001 - whatever stopped it, the install must end as failed
             log.exception("Installing %s failed", install.label)
             message = (
                 f"The install of {install.label} stopped with an unexpected error (details in logs/cinewright.log), so it is not installed."
             )
-            self._fail(install, "install_failed", message)
+            self._fail(install, message)
             raise ModelStoreError("install_failed", message) from exc
         finally:
             with self._lock:
-                self._active.discard(install.key)
+                self._active.pop(install.key, None)
                 self._release(install.files)
         return self.register_in_wan2gp()
 
@@ -646,14 +688,19 @@ class ModelStore:
             raise _cancelled(label) from None
 
     def _place(self, conn: sqlite3.Connection, missing: tuple[PlannedFile, ...], ready: dict[str, Path], now: str) -> None:
-        """Move each verified file to its path in the store and register it (inside the caller's transaction)."""
+        """Move each verified file to its path in the store and register it (inside the caller's transaction).
+
+        Only a staged download moves, once no other path needs its bytes any more; a source in the store itself (the
+        same bytes at another path) is copied, so the file at that path stays.
+        """
+        staging = self.root / STAGING_DIR
         uses = Counter(ready[file.key] for file in missing)
         for file in missing:
             source, final = ready[file.key], store_path(self.root, file.path)
             uses[source] -= 1
             if source != final:
                 final.parent.mkdir(parents=True, exist_ok=True)
-                if uses[source]:
+                if uses[source] or not source.is_relative_to(staging):
                     shutil.copyfile(source, final)
                 else:
                     os.replace(source, final)
@@ -689,15 +736,13 @@ class ModelStore:
         if model is not None:
             self._write_finetunes(model, install.quant)
 
-    def _fail(self, install: Install, code: str, message: str) -> None:
+    def _fail(self, install: Install, message: str) -> None:
+        """Leave the quantization `failed` with `message`, a cancelled one too: Remove then deletes its downloads."""
         with self._lock, self.db.transaction() as conn:
             conn.execute("DELETE FROM installed_model_files WHERE model_id = ? AND quant = ?", install.key)
-            if code == "cancelled":
-                conn.execute("DELETE FROM installed_models WHERE model_id = ? AND quant = ?", install.key)
-            else:
-                conn.execute(
-                    "UPDATE installed_models SET state = 'failed', error = ? WHERE model_id = ? AND quant = ?", (message, *install.key)
-                )
+            conn.execute(
+                "UPDATE installed_models SET state = 'failed', error = ? WHERE model_id = ? AND quant = ?", (message, *install.key)
+            )
 
     # ------------------------------------------------------------------ remove
 
@@ -723,10 +768,10 @@ class ModelStore:
                 )
             needed = self.needed_by_jobs()
             keys = [(model_id, row["quant"]) for row in rows]
-            for key in keys:
+            for key, row in zip(keys, rows, strict=True):
                 if key in self._active:
                     raise ModelStoreError("installing", f"{name} {key[1]} is being installed, so it was not removed.")
-                if key in needed:
+                if key in needed and row["state"] == "installed":  # a failed install's leftovers serve no job
                     raise ModelStoreError("in_use", f"A queued or running job needs {name} {key[1]}, so it was not removed.")
             leftovers = []
             for key in keys:
@@ -741,14 +786,18 @@ class ModelStore:
                 self._remove_finetunes(model)
             return keys
 
-    def collect_garbage(self) -> None:
+    def collect_garbage(self) -> bool:
         """Delete every registered file that no installed quantization references and nothing else needs.
 
-        After a variant switch, this removes the previous variant's files. A file that cannot be deleted (on Windows,
-        one a worker process still holds open) stays registered and goes with a later collection.
+        Call it once the local worker runs with the current text encoder variant: after a variant switch, this removes
+        the previous variant's files, which until then stay for the waiting and running jobs that need them. A file that
+        cannot be deleted (on Windows, one a worker process still holds open) stays registered and goes with a later
+        collection. Returns whether this deleted such a file, so that a worker which registered while the file was still
+        there must register again.
         """
         with self._lock:
-            self._collect_garbage()
+            self._previous_variant = None
+            return self._collect_garbage()
 
     # ------------------------------------------------------------------ text encoder variant
 
@@ -815,6 +864,7 @@ class ModelStore:
             with self._download_lock:
                 ready = self._download(switch.label, switch.missing, progress or (lambda *_: None), cancelled)
             now = to_iso(self._clock())
+            previous = self.text_encoder_variant()
             with self._lock, self.db.transaction() as conn:
                 self._place(conn, switch.missing, ready, now)
                 for key, files in switch.plans.items():
@@ -835,6 +885,9 @@ class ModelStore:
                         (sum(file.size_bytes for file in files), *key),
                     )
                 conn.execute("UPDATE hosts SET text_encoder_variant = ? WHERE id = ?", (switch.variant, self.host_id))
+            with self._lock:  # jobs leased before the worker restarts still run with the previous variant
+                if previous != switch.variant:
+                    self._previous_variant = previous
         except OSError as exc:
             log.exception("Switching to %s failed", switch.label)
             message = f"Writing the files of {switch.label} failed ({exc.strerror or exc}), so the text encoder was not switched."
@@ -888,27 +941,40 @@ class ModelStore:
         return 0
 
     def _kept(self, extra: Iterable[PlannedFile] = ()) -> set[str]:
-        """Path keys that must stay although no installed quantization references them."""
+        """Path keys that must stay although no installed quantization references them.
+
+        The files of active installs and a switch, `extra`, and the files of every quantization a waiting or running job
+        may run on, with the host's text encoder variant and, until the worker restarted after a switch, the previous one.
+        """
         keep = {key for key, count in self._reserved.items() if count > 0}
         keep.update(file.key for file in extra)
-        variant = self.text_encoder_variant()
+        variants = {self.text_encoder_variant(), *([self._previous_variant] if self._previous_variant else [])}
         for model_id, quant in self.needed_by_jobs():
-            try:
-                keep.update(file.key for file in plan_files(self.registry, model_id, quant, variant))
-            except ModelStoreError:
-                continue
+            for variant in variants:
+                try:
+                    keep.update(file.key for file in plan_files(self.registry, model_id, quant, variant))
+                except ModelStoreError:
+                    continue
         return keep
 
-    def _plan_eviction(self, key: InstallKey, files: list[PlannedFile], growth: int, label: str) -> tuple[list[InstallKey], int]:
+    @staticmethod
+    def _growth(file: PlannedFile, stored: dict[str, tuple[str, int]]) -> int:
+        """What placing `file` adds to the store: its size, less a registered file of other content at its path."""
+        return file.size_bytes - (stored[file.key][1] if file.key in stored else 0)
+
+    def _plan_eviction(
+        self, key: InstallKey, files: list[PlannedFile], growth: int, label: str, *, pending: int = 0
+    ) -> tuple[list[InstallKey], int]:
         """What to evict so the store stays within its quota after growing by `growth`: (victims, bytes freed).
 
-        Unreferenced files nothing needs go first, then the files of installed quantizations from the least recently
-        used on, skipping this one, those being installed and those a waiting or running job needs. A shared file is
-        freed only when its last reference goes. Refuses when even that does not make room.
+        `pending` is what the installs in progress still add. Unreferenced files nothing needs go first, then the files
+        of installed quantizations from the least recently used on, skipping this one, those being installed and those
+        a waiting or running job needs. A shared file is freed only when its last reference goes. Refuses when even
+        that does not make room.
         """
         quota = self._quota_bytes()
         stored = self.db.query("SELECT path, size_bytes FROM store_files")
-        total = sum(row["size_bytes"] for row in stored)
+        total = sum(row["size_bytes"] for row in stored) + pending
         if quota is None or total + growth <= quota:
             return [], 0
         sizes = {row["path"].casefold(): row["size_bytes"] for row in stored}
@@ -936,11 +1002,12 @@ class ModelStore:
                     if not users and path not in keep:
                         freed += sizes.get(path, 0)
         if total - freed + growth > quota:
+            including = " (the installs in progress included)" if pending else ""
             raise ModelStoreError(
                 "quota_exceeded",
                 f"Installing {label} needs {format_size(total - freed + growth - quota)} more room within the model store quota of "
-                f"{format_size(quota)}: it adds {format_size(growth)} to {format_size(total)}, and removing the least recently used "
-                f"models that no queued or running job needs frees only {format_size(freed)}.",
+                f"{format_size(quota)}: it adds {format_size(growth)} to {format_size(total)}{including}, and removing the least "
+                f"recently used models that no queued or running job needs frees only {format_size(freed)}.",
             )
         return victims, freed
 
@@ -948,21 +1015,31 @@ class ModelStore:
         """Drop the quantization's row; its references go with it (ON DELETE CASCADE)."""
         self.db.execute("DELETE FROM installed_models WHERE model_id = ? AND quant = ?", key)
 
-    def _collect_garbage(self, extra: Iterable[PlannedFile] = ()) -> None:
-        """Delete every registered file nothing references or needs. A file that cannot be deleted stays registered."""
+    def _collect_garbage(self, extra: Iterable[PlannedFile] = ()) -> bool:
+        """Delete every registered file nothing references or needs. A file that cannot be deleted stays registered.
+
+        Returns whether this deleted a file that an earlier collection could not delete.
+        """
         keep = self._kept(extra)
         rows = self.db.query("SELECT path FROM store_files WHERE path NOT IN (SELECT path FROM installed_model_files)")
+        retried = False
         for row in rows:
-            if row["path"].casefold() in keep:
+            key = row["path"].casefold()
+            if key in keep:
                 continue
             target = store_path(self.root, row["path"])
             try:
                 target.unlink(missing_ok=True)
             except OSError as exc:
                 log.warning("Could not delete %s from the model store (%s); it stays registered.", row["path"], exc)
+                self._undeletable.add(key)
                 continue
             self.db.execute("DELETE FROM store_files WHERE path = ?", (row["path"],))
             self._prune(target.parent)
+            if key in self._undeletable:
+                self._undeletable.discard(key)
+                retried = True
+        return retried
 
     def _discard_downloads(self, files: Iterable[PlannedFile]) -> None:
         """Delete staged and partial downloads of `files` that no install in progress needs."""

@@ -93,6 +93,7 @@ from cinewright.api.schemas import (
     SystemEvent,
     SystemEventKind,
     SystemInfo,
+    TextEncoderSwitch,
     WorkerEvents,
     WorkerEventsAck,
     WorkerHealth,
@@ -252,7 +253,9 @@ class Core:
         self._background: set[threading.Thread] = set()  # installs and text encoder switches
         self._background_lock = threading.Lock()
         self._restart_pending = False  # the model store changed while a job ran on the local worker
+        self._restart_lock = threading.Lock()  # sets, checks and clears `_restart_pending` with the job check
         self._config_restarted = False  # restarted once since this start because WanGP's config was merged
+        self._switch: TextEncoderSwitch | None = None  # the local host's text encoder switch: running, or failed
 
     def stop_leasing(self) -> None:
         """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
@@ -727,9 +730,7 @@ class Core:
                 self._publish_model(*install.key, InstallState.INSTALLED)
                 if install.missing:
                     self._restart_for_models()
-            elif exc.code == "cancelled":
-                self._publish_model(*install.key, InstallState.ABSENT)
-            else:
+            else:  # a cancellation (Cinewright closes) too: the quantization stays `failed`, so Remove deletes its downloads
                 log.warning("%s", exc.message)
                 error = SetupError(code=exc.code, message=exc.message, action="retry" if exc.code in _STORE_RETRY else None)
                 self._publish_model(*install.key, InstallState.FAILED, error=error)
@@ -740,14 +741,29 @@ class Core:
             self._restart_for_models()
 
     def _run_switch(self, switch: VariantSwitch) -> None:
+        """Run a prepared switch; `GET /hosts` shows it as the local host's `text_encoder_switch` until it succeeded or failed."""
         try:
             merged = self.models.run_switch(switch, cancelled=lambda: self._closed)
         except ModelStoreError as exc:
+            if exc.code == "cancelled":
+                self._switch = None
+                return
             if exc.code == "config_invalid":  # both variants stay until WanGP's config names the new one
                 log.error("%s", exc.message)
-            elif exc.code != "cancelled":
+            else:
                 log.warning("Switching the text encoder to %s failed: %s", switch.variant, exc.message)
+            action = "retry" if exc.code in _STORE_RETRY else None
+            self._switch = TextEncoderSwitch(variant=switch.variant, error=SetupError(code=exc.code, message=exc.message, action=action))
             return
+        except Exception:  # noqa: BLE001 - whatever stopped it, the view must learn that the switch ended
+            log.exception("Switching the text encoder to %s failed", switch.variant)
+            message = (
+                f"The switch to the {switch.variant} text encoder stopped with an unexpected error (details in logs/cinewright.log), "
+                "so the previous variant stays in use."
+            )
+            self._switch = TextEncoderSwitch(variant=switch.variant, error=SetupError(code="install_failed", message=message))
+            return
+        self._switch = None
         log.info("Switched the text encoder to %s.", switch.variant)
         if switch.missing or merged == "updated":
             self._restart_for_models()
@@ -769,33 +785,47 @@ class Core:
         """
         if self._closed or self.supervisor is None:
             return
-        if self._local_job_active():
-            if not self._restart_pending:
+        with self._restart_lock:
+            if not self._restart_pending and self._local_job_active():
                 log.info("The model store changed; the local worker restarts once its job ended.")
             self._restart_pending = True
-            return
-        self._restart_pending = False
-        self.restart_local_worker()
+        self._restart_if_pending()
 
     def _restart_if_pending(self) -> None:
-        if self._restart_pending:
-            self._restart_for_models()
+        """Restart the local worker if a model change waits for it and no job runs on it any more.
+
+        Job ends call this after their transaction, and so does maintenance on every tick. The flag is set before the job
+        check, and checking and clearing it share one lock, so a job that ends while another thread decides still leads
+        to exactly one restart.
+        """
+        if not self._restart_pending:  # read without the lock; a set flag is checked again under it
+            return
+        with self._restart_lock:
+            if not self._restart_pending or self._closed or self.supervisor is None or self._local_job_active():
+                return
+            self._restart_pending = False
+        self.restart_local_worker()
 
     def _local_worker_registered(self) -> None:
         """A local worker registered: register the store in WanGP's config and collect files left for deletion.
 
         WanGP writes its config at its first start, so an install before that could not merge into it; a merge that
         changes the config restarts the worker once per core start, since WanGP reads its config only at import.
+        A file the previous worker held open could not be deleted before this worker built its model list; once this
+        collection deletes such a file, the worker restarts again to register without it.
         """
         try:
             merged = self.models.register_in_wan2gp() if self.models.has_installs() else "unchanged"
-            self.models.collect_garbage()
+            retried = self.models.collect_garbage()
         except (ModelStoreError, OSError) as exc:
             log.warning("Updating the model store after the local worker registered failed: %s", exc)
             return
         if merged == "updated" and not self._config_restarted and self.supervisor is not None:
             self._config_restarted = True
             log.info("Registered the model store in WanGP's configuration; restarting the local worker so WanGP reads it.")
+            self._restart_for_models()
+        elif retried:
+            log.info("Deleted model files the previous local worker held open; restarting the local worker so it registers without them.")
             self._restart_for_models()
 
     # ------------------------------------------------------------------ jobs
@@ -1044,6 +1074,7 @@ class Core:
                     hardware=self._stored_hardware(host.id),
                     worker_health=worker_health.get(host.id),
                     text_encoder_variant=variants.get(host.id),
+                    text_encoder_switch=self._switch if host.id == LOCAL_HOST_ID else None,
                 )
             )
         return HostList(items=items)
@@ -1065,6 +1096,7 @@ class Core:
             switch = self.models.prepare_switch(variant)
         except ModelStoreError as exc:
             raise _store_refusal(exc) from None
+        self._switch = TextEncoderSwitch(variant=switch.variant)
         self._in_background(f"switch the text encoder to {variant}", lambda: self._run_switch(switch))
 
     def add_host(self) -> None:
@@ -1369,7 +1401,7 @@ class Core:
         return expired
 
     async def run_maintenance(self, interval: float = MAINTENANCE_INTERVAL_S) -> None:
-        """Background task of the app: re-queue jobs whose lease expired."""
+        """Background task of the app: re-queue jobs whose lease expired, and restart the worker for a model change that waited."""
         while not self._closed:
             try:
                 expired = self.expire_leases()
@@ -1378,6 +1410,10 @@ class Core:
             else:
                 if expired:
                     log.info("Released %d job(s) with expired leases", expired)
+            try:
+                self._restart_if_pending()  # a model change that waited for a job, should no job end report it
+            except sqlite3.Error:
+                log.exception("Restarting the local worker after a model change failed")
             await asyncio.sleep(interval)
 
 

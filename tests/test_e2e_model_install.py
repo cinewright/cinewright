@@ -1,13 +1,17 @@
 """A model becomes routable within seconds of its install, without an app restart (#3).
 
 The core runs on uvicorn with the fixture registry and fake hub of `test_core_modelstore`. Its local worker is the
-real worker loop with the mock engine, run in this process by a stand-in for the supervisor; the engine's model list
-follows the files in the model store, as Wan2GP's availability check does. The core restarts the worker after an
-install or a removal, and the new worker registers with its new model list.
+real worker loop with the mock engine, run in this process by a stand-in for the supervisor. Like a Wan2GP session, the
+engine reads `checkpoints_paths` from `wgp_config.json` when it starts (Wan2GP's import) and serves a model type while
+one of its transformer files lies in one of those roots (upstream `files_locator.locate_file`), so the test also shows
+that the store merged into the config is where Wan2GP finds the files. The core restarts the worker after an install or
+a removal, and the new worker registers with its new model list.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import socket
 import threading
 import time
@@ -36,17 +40,30 @@ MODEL, QUANT, MODEL_TYPE = "z-image-turbo", "int8", "z_image"
 REQUEST = {"capability": "t2i", "prompt": "A lighthouse on a cliff at dusk", "model": MODEL, "quant": QUANT}
 
 
-class StoreFollowingAdapter(MockAdapter):
-    """The mock engine, serving a model type only while one of its transformer files is in the model store."""
+WGP_DEFAULTS = {"checkpoints_paths": ["ckpts", "."], "text_encoder_quantization": "int8", "attention_mode": "auto"}
 
-    def __init__(self, models_dir: Path, files: dict[str, tuple[str, ...]]) -> None:
+
+class StoreFollowingAdapter(MockAdapter):
+    """The mock engine as a Wan2GP session: serves a model type only while a transformer file of it lies in a checkpoint root.
+
+    Like Wan2GP, it reads its checkpoint roots from `wgp_config.json` once, when it starts; a relative root is relative to
+    the Wan2GP root, where the core's store never is.
+    """
+
+    def __init__(self, config_path: Path, files: dict[str, tuple[str, ...]]) -> None:
         super().__init__(models=tuple(files), engine="wan2gp")
-        self.models_dir = models_dir
         self.files = files
+        root = config_path.parent / "wan2gp-root"
+        roots = json.loads(config_path.read_text(encoding="utf-8"))["checkpoints_paths"]
+        self.roots = [Path(entry) if os.path.isabs(entry) else root / entry for entry in roots]
 
     def capabilities(self) -> list[EngineModel]:
         return [
-            EngineModel(engine_model=model_type, name=model_type, available=any((self.models_dir / name).is_file() for name in names))
+            EngineModel(
+                engine_model=model_type,
+                name=model_type,
+                available=any((root / name).is_file() for root in self.roots for name in names),
+            )
             for model_type, names in self.files.items()
         ]
 
@@ -54,8 +71,8 @@ class StoreFollowingAdapter(MockAdapter):
 class InProcessWorkers:
     """Stands in for the worker supervisor: runs the worker loop in a thread and replaces it on `restart()`."""
 
-    def __init__(self, models_dir: Path, files: dict[str, tuple[str, ...]]) -> None:
-        self.models_dir = models_dir
+    def __init__(self, config_path: Path, files: dict[str, tuple[str, ...]]) -> None:
+        self.config_path = config_path
         self.files = files
         self.spawned = 0
         self._lock = threading.Lock()
@@ -68,7 +85,7 @@ class InProcessWorkers:
             self._spawn()
 
     def _spawn(self) -> None:
-        adapter = StoreFollowingAdapter(self.models_dir, self.files)
+        adapter = StoreFollowingAdapter(self.config_path, self.files)
         loop = WorkerLoop(adapter, WorkerClient(self._core_url), self._token, lease_wait=2.0, heartbeat_interval=1.0, retry_interval=0.2)
         thread = threading.Thread(target=loop.run, daemon=True, name=f"worker-{self.spawned}")
         self._since = self._clock()  # before the new worker registers
@@ -137,7 +154,9 @@ def served(home: Path) -> Iterator[Served]:
     )
     model = registry.get(MODEL)
     assert model is not None
-    workers = InProcessWorkers(core.paths.models_dir, {MODEL_TYPE: tuple(f.name for q in model.quantizations for f in q.files)})
+    core.models.config_path.parent.mkdir(parents=True, exist_ok=True)
+    core.models.config_path.write_bytes(json.dumps(WGP_DEFAULTS, indent=4).encode())  # as Wan2GP's first start writes it
+    workers = InProcessWorkers(core.models.config_path, {MODEL_TYPE: tuple(f.name for q in model.quantizations for f in q.files)})
     server = uvicorn.Server(uvicorn.Config(create_app(core, supervisor=workers), log_config=None, timeout_graceful_shutdown=2))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True, name="uvicorn")
     thread.start()
@@ -167,6 +186,8 @@ def test_an_estimate_turns_feasible_seconds_after_the_install_and_infeasible_aft
     assert took < FEASIBLE_WITHIN_S
     assert served.estimate()["route"]["model_id"] == MODEL
     assert served.workers.spawned == 2  # the core restarted the worker once; the app did not restart
+    config = json.loads(served.core.models.config_path.read_text(encoding="utf-8"))
+    assert config["checkpoints_paths"] == [str(served.core.paths.models_dir.resolve()), "ckpts", "."]
 
     response = served.http.delete(f"{API}/models/{MODEL}", params={"quant": QUANT})
     assert response.status_code == 204, response.text

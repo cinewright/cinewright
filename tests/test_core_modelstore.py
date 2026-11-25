@@ -346,6 +346,64 @@ def test_the_free_space_check_counts_only_what_is_still_missing(env):
     assert {"wan-2.2-i2v-14b", "wan-2.2-t2v-14b"} == {r["model_id"] for r in env.rows("SELECT model_id FROM installed_models")}
 
 
+def test_the_free_space_check_counts_what_installs_in_progress_still_download(env):
+    first = env.store.prepare_install("z-image-turbo", "int8")  # accepted, not downloaded yet
+    env.free = max(env.size("z-image-turbo", "int8"), env.size("wan-2.2-t2v-14b", "int8")) + 10  # room for one of them
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_install("wan-2.2-t2v-14b", "int8")
+
+    assert failure.value.code == "not_enough_space" and "installs in progress" in failure.value.message
+    assert env.hub.requests == []
+    env.store.run_install(first)
+    env.free = 10**12
+    env.store.install("wan-2.2-t2v-14b", "int8")  # once the first one is in the store
+
+
+def test_installs_in_progress_that_share_a_file_count_it_once_and_both_install(env):
+    t2v = env.size("wan-2.2-t2v-14b", "int8")
+    i2v_transformers = transformer_bytes(env, "wan-2.2-i2v-14b", WAN_I2V_INT8)
+    first = env.store.prepare_install("wan-2.2-t2v-14b", "int8")
+    env.free = t2v + i2v_transformers  # the shared text encoder and VAE fit once, not twice
+    second = env.store.prepare_install("wan-2.2-i2v-14b", "int8")
+
+    env.store.run_install(first)
+    env.store.run_install(second)
+
+    assert set(WAN_T2V_INT8) | set(WAN_I2V_INT8) | {UMT5_INT8} <= env.placed()
+    assert env.hub.served(env.url("wan-2.1-shared", UMT5_INT8)) == 1
+    assert {r["state"] for r in env.rows("SELECT state FROM installed_models")} == {"installed"}
+
+
+def test_the_quota_counts_what_installs_in_progress_still_add(env):
+    first = env.store.prepare_install("z-image-turbo", "int8")
+    env.quota = max(env.size("z-image-turbo", "int8"), env.size("wan-2.2-t2v-14b", "int8")) + 10
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_install("wan-2.2-t2v-14b", "int8")
+
+    assert failure.value.code == "quota_exceeded" and "installs in progress included" in failure.value.message
+    env.store.run_install(first)
+    assert store_total(env) <= env.quota
+
+
+def test_two_paths_with_the_same_bytes_keep_a_file_already_in_the_store(env):
+    component = env.registry.component("z-image-shared")
+    assert component is not None
+    vocab = next(f for f in component.files if f.path == "Qwen3/vocab.json")
+    config = next(f for f in component.files if f.path == "Qwen3/config.json")
+    env.hub.files[config.url] = env.hub.files[vocab.url]  # a registry could pin the same bytes at two paths
+    component.files[component.files.index(config)] = config.model_copy(update={"sha256": vocab.sha256, "size_bytes": vocab.size_bytes})
+    placed = env.root / vocab.path  # placed by an install that stopped before it registered the file
+    placed.parent.mkdir(parents=True)
+    placed.write_bytes(env.hub.files[vocab.url])
+
+    env.store.install("z-image-turbo", "int8")
+
+    assert {vocab.path, config.path} <= env.placed()
+    assert {vocab.path, config.path} <= {r["path"] for r in env.rows("SELECT path FROM store_files")}
+
+
 def test_the_host_variant_picks_the_text_encoder_files(env):
     env.db.execute("UPDATE hosts SET text_encoder_variant = 'bf16'")
     env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."], "text_encoder_quantization": "int8"})
@@ -356,13 +414,18 @@ def test_the_host_variant_picks_the_text_encoder_files(env):
     assert env.config()["text_encoder_quantization"] == "bf16"
 
 
-def test_a_cancelled_install_registers_nothing_and_keeps_its_downloads(env):
+def test_a_cancelled_install_registers_no_file_keeps_its_downloads_and_remove_deletes_them(env):
     calls = iter([False, False, True])
     with pytest.raises(ModelStoreError) as failure:
         env.store.install("z-image-turbo", "int8", cancelled=lambda: next(calls, True))
     assert failure.value.code == "cancelled"
-    assert env.rows("SELECT * FROM installed_models") == [] and env.placed() == set()
+    [row] = env.rows("SELECT state, error FROM installed_models")
+    assert row["state"] == "failed" and "stopped before it finished" in row["error"]
+    assert env.rows("SELECT * FROM store_files") == [] and env.placed() == set()
     assert any((env.root / STAGING_DIR).iterdir())
+
+    env.store.remove("z-image-turbo", "int8")  # the failed quantization offers Remove, which deletes its downloads
+    assert list((env.root / STAGING_DIR).iterdir()) == [] and env.rows("SELECT * FROM installed_models") == []
 
 
 def test_an_install_without_a_pinned_size_is_refused(env):
@@ -422,6 +485,50 @@ def test_a_model_a_job_needs_is_not_removed(env):
         env.db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (job_id,))
     env.store.remove("z-image-turbo", "int8")
     assert env.placed() == set()
+
+
+def test_a_job_routed_to_another_quantization_of_the_same_model_type_protects_and_marks_the_installed_one(env):
+    # The router picks bf16 (first in the registry) when the worker serves z_image, but Wan2GP runs the installed int8.
+    env.store.install("z-image-turbo", "int8")
+    assert env.store.runs_on("z-image-turbo", "bf16") == {"bf16", "int8"}
+    env.add_job("z-image-turbo", "bf16", "leased")
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.remove("z-image-turbo", "int8")
+    assert failure.value.code == "in_use" and env.placed() == Z_IMAGE_INT8_FILES
+
+    [before] = env.rows("SELECT last_used_at FROM installed_models")
+    env.clock.advance(60)
+    env.store.mark_used("z-image-turbo", "bf16")
+    [after] = env.rows("SELECT last_used_at FROM installed_models")
+    assert after["last_used_at"] > before["last_used_at"]
+
+
+def test_a_gguf_quantization_has_its_own_model_type_and_is_not_protected_by_another_one(env):
+    assert env.store.runs_on("ltx-2.3-distilled-22b", "bf16") == {"bf16", "int8"}
+    assert env.store.runs_on("ltx-2.3-distilled-22b", "Q4_K_M") == {"Q4_K_M"}
+
+
+def test_a_file_a_worker_held_open_goes_with_the_next_collection_which_reports_it(env, monkeypatch):
+    env.store.install("z-image-turbo", "int8")
+    transformer = "ZImageTurbo_quanto_bf16_int8.safetensors"
+    original = Path.unlink
+    held = {"open": True}
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == transformer and held["open"]:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    env.store.remove("z-image-turbo", "int8")
+    assert env.placed() == {transformer}
+
+    assert env.store.collect_garbage() is False  # still held open
+    held["open"] = False
+    assert env.store.collect_garbage() is True
+    assert env.placed() == set() and env.rows("SELECT * FROM store_files") == []
+    assert env.store.collect_garbage() is False
 
 
 def test_a_shared_file_a_queued_job_needs_stays_after_its_last_model_goes(env):
@@ -486,6 +593,18 @@ def test_quota_eviction_never_removes_a_model_a_job_needs(env):
     assert set(WAN_T2V_INT8) <= env.placed()
 
 
+def test_quota_eviction_skips_a_model_a_job_routed_to_another_quantization_of_its_model_type_needs(env):
+    install_three(env)
+    env.add_job("wan-2.2-t2v-14b", "bf16", "queued")  # Wan2GP runs it on the installed int8
+    growth = env.size("ltx-2.3-distilled-22b", "int8")
+    env.quota = store_total(env) + growth - transformer_bytes(env, "wan-2.2-i2v-14b", WAN_I2V_INT8)
+
+    install = env.store.install("ltx-2.3-distilled-22b", "int8")
+
+    assert install.evicted == (("wan-2.2-i2v-14b", "int8"),)
+    assert set(WAN_T2V_INT8) <= env.placed()
+
+
 def test_an_install_the_quota_cannot_hold_is_refused_and_evicts_nothing(env):
     install_three(env)
     for model_id in ("z-image-turbo", "wan-2.2-t2v-14b", "wan-2.2-i2v-14b"):
@@ -530,6 +649,21 @@ def test_a_variant_switch_installs_the_other_variant_and_frees_the_previous_one(
     placed = env.placed()
     assert QWEN3_BF16 in placed and QWEN3_INT8 not in placed and UMT5_INT8 not in placed
     assert {r["path"] for r in env.rows("SELECT path FROM store_files")} == placed
+
+
+def test_after_a_switch_removals_keep_the_previous_variant_a_job_needs_until_the_worker_restarted(env):
+    env.store.install("z-image-turbo", "int8")
+    env.store.install("wan-2.2-t2v-14b", "int8")
+    switch = env.store.prepare_switch("bf16")
+    env.add_job("z-image-turbo", "int8", "leased")  # leased while the bf16 files download
+    env.store.run_switch(switch)
+
+    env.store.remove("wan-2.2-t2v-14b", "int8")
+    assert {QWEN3_INT8, QWEN3_BF16} <= env.placed()  # the worker running the job still uses the int8 text encoder
+    assert UMT5_INT8 not in env.placed()
+
+    env.store.collect_garbage()  # the worker restarted with bf16
+    assert QWEN3_BF16 in env.placed() and QWEN3_INT8 not in env.placed()
 
 
 def test_a_failed_variant_switch_changes_nothing(env):

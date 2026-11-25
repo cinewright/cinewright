@@ -51,13 +51,14 @@ interface Server {
   models: ModelSummary[];
   store: ModelStoreUsage;
   variant: Host['text_encoder_variant'];
+  switch?: Host['text_encoder_switch'];
 }
 
 function renderView(server: Server, routes: Record<string, (body: unknown) => unknown> = {}) {
   const source = stubEventSource();
   const calls = stubApi({
     'GET /api/v1/models': () => ({ items: server.models, store: server.store }),
-    'GET /api/v1/hosts': () => ({ items: [{ ...LOCAL, text_encoder_variant: server.variant }] }),
+    'GET /api/v1/hosts': () => ({ items: [{ ...LOCAL, text_encoder_variant: server.variant, text_encoder_switch: server.switch ?? null }] }),
     ...routes,
   });
   render(
@@ -95,6 +96,10 @@ beforeAll(() => {
   // jsdom has no modal dialogs.
   HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
     this.setAttribute('open', '');
+  };
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.removeAttribute('open');
+    this.dispatchEvent(new Event('close'));
   };
 });
 
@@ -142,7 +147,9 @@ describe('ModelsView', () => {
     expect(calls.filter((call) => call.method === 'POST')).toStrictEqual([
       { method: 'POST', path: '/api/v1/models/z-image-turbo/install', query: { quant: 'int8' }, body: undefined },
     ]);
-    expect(bar.getAttribute('aria-valuenow')).toBe('0');
+    // Waiting: indeterminate, so no value that reads as 0 %.
+    expect(bar.getAttribute('aria-valuenow')).toBeNull();
+    expect(bar.getAttribute('aria-valuetext')).toBe('Waiting for the download');
     expect(within(card('Z-Image Turbo 6B int8')).getByText('Waiting for the download')).toBeTruthy();
 
     const downloading = { model_id: 'z-image-turbo', quant: 'int8', install_state: 'downloading' } as const;
@@ -167,6 +174,52 @@ describe('ModelsView', () => {
     expect(within(card('Z-Image Turbo 6B int8')).getByText('Installed')).toBeTruthy();
     expect(within(card('Z-Image Turbo 6B int8')).queryByRole('progressbar')).toBeNull();
     expect(screen.getByRole('button', { name: 'Remove Z-Image Turbo 6B int8' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe('Z-Image Turbo 6B int8 is installed.');
+  });
+
+  it('loads the list again when the event stream opens, since model events are never replayed', async () => {
+    const server: Server = { models: [I2V, zImage('absent')], store: STORE, variant: 'int8' };
+    const { calls, source } = renderView(server);
+    const modelLoads = () => calls.filter((call) => call.method === 'GET' && call.path === '/api/v1/models').length;
+    await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' });
+    const downloading = { model_id: 'z-image-turbo', quant: 'int8', install_state: 'downloading' } as const;
+    act(() => source().emit('model', modelEvent({ ...downloading, progress: { phase: 'download', percent: 10 }, total_bytes: 6 * GiB })));
+    await within(card('Z-Image Turbo 6B int8')).findByRole('progressbar');
+    const before = modelLoads();
+
+    server.models = [I2V, zImage('installed')]; // the install ended while the stream was down
+    act(() => source().open());
+
+    await within(card('Z-Image Turbo 6B int8')).findByText('Installed');
+    expect(modelLoads()).toBe(before + 1);
+    expect(within(card('Z-Image Turbo 6B int8')).queryByRole('progressbar')).toBeNull(); // the stale event is dropped
+  });
+
+  it('shows the reason of an install that fails while the view is open', async () => {
+    const mismatch = 'Qwen3/tokenizer.json of Z-Image Turbo 6B int8 did not match its pinned SHA-256 and size, so it was deleted.';
+    const server: Server = { models: [zImage('downloading')], store: STORE, variant: 'int8' };
+    const { source } = renderView(server);
+    await screen.findByRole('progressbar', { name: 'Downloading Z-Image Turbo 6B int8' });
+    server.models = [zImage('failed', mismatch)];
+
+    act(() =>
+      source().emit(
+        'model',
+        modelEvent({
+          model_id: 'z-image-turbo',
+          quant: 'int8',
+          install_state: 'failed',
+          error: { code: 'hash_mismatch', message: mismatch, action: null },
+        }),
+      ),
+    );
+
+    // At once from the event, before the list loads again.
+    expect(within(card('Z-Image Turbo 6B int8')).getByText(mismatch)).toBeTruthy();
+    expect(within(card('Z-Image Turbo 6B int8')).getByText('Install failed')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe(`The install of Z-Image Turbo 6B int8 failed. ${mismatch}`);
+    await within(card('Z-Image Turbo 6B int8')).findByRole('button', { name: 'Try again Z-Image Turbo 6B int8' });
+    expect(within(card('Z-Image Turbo 6B int8')).getByText(mismatch)).toBeTruthy();
   });
 
   it('shows a refused install with the reason from the core', async () => {
@@ -225,7 +278,12 @@ describe('ModelsView', () => {
   it('switches the text encoder of the local host and blocks installs until the host reports the new variant', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const server: Server = { models: [I2V, zImage('absent')], store: STORE, variant: null };
-    const { calls } = renderView(server, { 'PATCH /api/v1/hosts/local': () => null });
+    const { calls } = renderView(server, {
+      'PATCH /api/v1/hosts/local': () => {
+        server.switch = { variant: 'bf16', error: null };
+        return null;
+      },
+    });
 
     const panel = await screen.findByRole('region', { name: 'Text encoder' });
     expect(within(panel).getByText(/Not chosen yet, so int8/)).toBeTruthy();
@@ -239,11 +297,13 @@ describe('ModelsView', () => {
     expect(calls.filter((call) => call.method === 'PATCH')).toStrictEqual([
       { method: 'PATCH', path: '/api/v1/hosts/local', query: {}, body: { text_encoder_variant: 'bf16' } },
     ]);
+    expect(screen.getByRole('status').textContent).toBe('Switching the text encoder to bf16.');
     // The core refuses installs and removals during a switch.
     const install = within(card('Z-Image Turbo 6B int8')).getByRole('button', { name: 'Switch in progress' });
     expect(install).toHaveProperty('disabled', true);
 
     server.variant = 'bf16';
+    server.switch = null;
     act(() => {
       vi.advanceTimersByTime(5000);
     });
@@ -251,6 +311,49 @@ describe('ModelsView', () => {
     expect(within(panel).getByRole('radio', { name: /bf16/ })).toHaveProperty('checked', true);
     expect(within(panel).queryByText(/Not chosen yet/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Install Z-Image Turbo 6B int8' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('status').textContent).toBe('The text encoder is switched to bf16.');
+  });
+
+  it('shows why a text encoder switch failed and offers installs and the switch again', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const server: Server = { models: [zImage('absent')], store: STORE, variant: 'int8', switch: { variant: 'bf16', error: null } };
+    renderView(server);
+
+    // A switch started before the view loaded shows too.
+    const panel = await screen.findByRole('region', { name: 'Text encoder' });
+    await within(panel).findByRole('button', { name: 'Switching to bf16' });
+    expect(within(card('Z-Image Turbo 6B int8')).getByRole('button', { name: 'Switch in progress' })).toHaveProperty('disabled', true);
+
+    const mismatch = 'Qwen3/qwen3_bf16.safetensors of the bf16 text encoder did not match its pinned SHA-256 and size, so it was deleted.';
+    server.switch = { variant: 'bf16', error: { code: 'hash_mismatch', message: mismatch, action: null } };
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    await within(panel).findByText(mismatch);
+    expect(within(panel).getByText('Switch to bf16 failed')).toBeTruthy();
+    expect(within(panel).getByText(/int8 stays in use/)).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe(`The switch to bf16 failed. ${mismatch}`);
+    expect(screen.getByRole('button', { name: 'Install Z-Image Turbo 6B int8' })).toHaveProperty('disabled', false);
+    fireEvent.click(within(panel).getByRole('radio', { name: /bf16/ }));
+    expect(within(panel).getByRole('button', { name: 'Switch to bf16' })).toHaveProperty('disabled', false);
+  });
+
+  it('shows a refused text encoder switch and offers it again', async () => {
+    const running = 'A job is running on this computer, so the text encoder was not switched; switch it once the job ended.';
+    renderView({ models: [zImage('installed')], store: STORE, variant: 'int8' }, {
+      'PATCH /api/v1/hosts/local': () => new ProblemAnswer(409, 'Conflict', running),
+    });
+
+    const panel = await screen.findByRole('region', { name: 'Text encoder' });
+    fireEvent.click(within(panel).getByRole('radio', { name: /bf16/ }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Switch to bf16' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Could not switch the text encoder to bf16');
+    expect(alert.textContent).toContain(running);
+    expect(within(panel).getByRole('button', { name: 'Switch to bf16' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: 'Remove Z-Image Turbo 6B int8' })).toHaveProperty('disabled', false);
   });
 
   it('does not offer a switch while a model is being installed', async () => {

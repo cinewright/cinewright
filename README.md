@@ -147,7 +147,7 @@ While Cinewright runs:
 2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright.
 3. To remove a model, choose **Remove** on its card and confirm with **Remove model**. Text encoders and VAEs that another installed model needs stay.
 
-If an install fails, its card says why. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
+If an install fails, its card says why. An install that was still running when Cinewright closed shows as failed too. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
 
 ### Switch the text encoder variant
 
@@ -156,7 +156,7 @@ Every model on your computer uses the same text encoder variant: `int8` (WanGP's
 1. Open **Models**. The Text encoder panel marks the variant in use.
 2. Select the other variant and choose **Switch to bf16** (or **Switch to int8**). The panel shows **Switching** while Cinewright downloads the new variant's files, restarts the worker and removes the previous variant's files. **Install** and **Remove** are unavailable until the switch is done.
 
-A switch is refused while a job runs or a model is being installed, and when the new files do not fit on the drive; a message says why. If the panel still shows **Switching** long after the download should have finished, open `logs/cinewright.log` in the data directory: a switch that failed is logged there, and the previous variant stays in use.
+A switch is refused while a job runs or a model is being installed, and when the new files do not fit on the drive; a message says why. If a switch fails while it downloads, the panel shows **Switch to bf16 failed** with the reason, and the previous variant stays in use. Choose **Switch to bf16** again to retry; files that were already downloaded and checked are kept.
 
 ### Install or remove a model through the API
 
@@ -167,7 +167,7 @@ While Cinewright runs, with WanGP set up:
 3. Follow it in `GET /api/v1/events` (`model` events with the downloaded bytes) or in `GET /api/v1/models`, where the quantization goes from `downloading` to `installed`, or to `failed` with the reason in `error`.
 4. To remove it: `curl -X DELETE "http://127.0.0.1:8737/api/v1/models/z-image-turbo?quant=int8"`.
 
-To switch the text encoder variant of your computer, send `curl -X PATCH http://127.0.0.1:8737/api/v1/hosts/local -H "Content-Type: application/json" -d "{\"text_encoder_variant\": \"bf16\"}"`. `GET /api/v1/hosts` shows the new variant once the switch is done.
+To switch the text encoder variant of your computer, send `curl -X PATCH http://127.0.0.1:8737/api/v1/hosts/local -H "Content-Type: application/json" -d "{\"text_encoder_variant\": \"bf16\"}"`. `GET /api/v1/hosts` shows the switch as the host's `text_encoder_switch` while it runs (or with an `error` after it failed), and the new `text_encoder_variant` once it is done.
 
 ### Use another port or data directory
 
@@ -309,7 +309,7 @@ The installer sets up only Cinewright itself. WanGP comes on the first start, be
 4. It tries the optional SageAttention and Triton wheels, which speed up generation on recent NVIDIA cards. It installs a wheel only if the wheel matches its pinned hash, then runs one attention calculation on the GPU. WanGP uses SageAttention only if that calculation works. Otherwise it uses PyTorch's standard attention (`sdpa`), which works everywhere. If a wheel could not be downloaded, each later start tries it once more before the worker starts; a wheel that did not match its hash is not tried again.
 5. Finally, it writes a record of the setup and starts the worker on WanGP. A later start that finds the record and the files downloads and installs nothing else.
 
-During the setup, the core and uv connect to `github.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `releases.astral.sh`, `files.pythonhosted.org`, `download.pytorch.org`, `download-r2.pytorch.org` (the lock's PyTorch wheels), `aiinfra.pkgs.visualstudio.com` and `*.vsblob.vsassets.io`. WanGP itself needs no internet connection afterwards: it runs offline, and model downloads will go through the core. The setup runs on Windows only so far, because the pins cover only 64-bit Windows.
+During the setup, the core and uv connect to `github.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `releases.astral.sh`, `files.pythonhosted.org`, `download.pytorch.org`, `download-r2.pytorch.org` (the lock's PyTorch wheels), `aiinfra.pkgs.visualstudio.com` and `*.vsblob.vsassets.io`. WanGP itself needs no internet connection afterwards: it runs offline, and model downloads go through the core (see [Model store](#model-store)). The setup runs on Windows only so far, because the pins cover only 64-bit Windows.
 
 ### Model store
 
@@ -320,8 +320,8 @@ The core keeps every model file in one model store, `models/` in the data direct
 - **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default. Switching first checks the free space, then installs the other variant's files, restarts the worker and removes the previous variant's files. It is refused while a job runs.
 - **The worker learns about new models.** WanGP reports its models only when its worker starts, so the core restarts the worker after every install, removal and switch. If a job is running, the restart waits until the job ended.
 - **Licence.** Models whose licence excludes your country (`country` in the settings) are not offered and cannot be installed.
-- **Sizes.** The Models view shows each installed model's size with the shared files it uses, and the store's total, which counts every shared file once. So the models' sizes can add up to more than the total. Free disk space is measured each time the view loads the model list.
-- **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.
+- **Sizes.** The Models view shows each installed model's size with the shared files it uses, and the store's total, which counts every shared file once. So the models' sizes can add up to more than the total. On a card, **installed** marks that size; before the install, **model files** is the size of the model's own files, without the shared files it may still need. Free disk space is measured each time the view loads the model list, and every 30 seconds while a download runs.
+- **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store, counting what installs that are still running will download; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.
 - **Download hosts.** Model files come only over HTTPS from `huggingface.co` and the download host it forwards to, `us.aws.cdn.hf.co` (later also `civitai.com`).
 
 ### Why WanGP is not bundled

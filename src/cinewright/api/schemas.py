@@ -658,6 +658,15 @@ class WorkerHealth(Contract):
     detail: str | None = None
 
 
+class TextEncoderSwitch(Contract):
+    """A text encoder variant switch of a host since the core started: running, or failed."""
+
+    variant: TextEncoderVariant = Field(description="The variant the switch installs")
+    error: SetupError | None = Field(
+        default=None, description="Why the switch failed; the previous variant stays in use. null while the switch runs"
+    )
+
+
 class Host(Contract):
     id: str
     name: str
@@ -674,6 +683,11 @@ class Host(Contract):
     text_encoder_variant: TextEncoderVariant | None = Field(
         default=None,
         description="Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies",
+    )
+    text_encoder_switch: TextEncoderSwitch | None = Field(
+        default=None,
+        description="The host's last text encoder switch while it runs or after it failed; null when none ran since the core "
+        "started or the last one succeeded, which `text_encoder_variant` then shows",
     )
 
 

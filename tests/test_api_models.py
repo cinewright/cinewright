@@ -124,17 +124,22 @@ class Store:
         self.idle()
         return self.quant(model_id, quant)
 
+    def route(self, job_id: str) -> dict[str, Any]:
+        return json.loads(self.rows("SELECT route FROM jobs WHERE id = ?", (job_id,))[0]["route"])
+
     def local_host(self) -> dict[str, Any]:
         return next(host for host in self.client.get(f"{API}/hosts").json()["items"] if host["id"] == "local")
 
     def rows(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(row) for row in self.core.db.query(sql, params)]
 
-    def leased_job(self, model_id: str, quant: str, engine_model: str) -> tuple[str, str, str]:
-        """A job pinned to `model_id` `quant`, leased to a local worker serving `engine_model`: (worker id, job id, lease id)."""
+    def leased_job(self, model_id: str, quant: str | None, engine_model: str) -> tuple[str, str, str]:
+        """A job for `model_id`, pinned to `quant` unless None (as the Generate view sends it), leased to a local worker
+        serving `engine_model`: (worker id, job id, lease id)."""
         registration = WorkerRegistration(host_id="local", engine="wan2gp", models=[engine_model], health={"state": "ready"})
         worker_id = self.core.register_worker(registration, self.core.enrollment_token).worker_id
-        request = JobRequest.model_validate({"capability": "t2i", "prompt": "a lighthouse", "model": model_id, "quant": quant})
+        pinned = {"quant": quant} if quant is not None else {}
+        request = JobRequest.model_validate({"capability": "t2i", "prompt": "a lighthouse", "model": model_id, **pinned})
         job_id = self.core.submit_job(request, ClientKind.UI, None).id
         granted = asyncio.run(self.core.lease(worker_id, LeaseRequest(wait_seconds=0)))
         assert granted is not None and granted.job.job_id == job_id
@@ -254,6 +259,54 @@ def test_a_job_lease_and_its_completion_mark_the_quantization_used(store):
     assert store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"] > leased_at
 
 
+def test_a_job_without_a_quantization_protects_and_marks_the_installed_one_it_runs_on(store):
+    store.install("z-image-turbo", "int8")
+    installed_at = store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"]
+
+    store.clock.advance(60)
+    worker_id, job_id, lease_id = store.leased_job("z-image-turbo", None, "z_image")
+    # The router takes the registry's first quantization the worker's model type serves; Wan2GP runs the installed int8.
+    assert store.route(job_id)["quant"] == "bf16"
+    leased_at = store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"]
+    assert leased_at > installed_at
+
+    problem = assert_problem(store.client.delete(f"{API}/models/z-image-turbo", params={"quant": "int8"}), 409)
+    assert problem.model_extra["code"] == "in_use" and store.placed() == Z_IMAGE_INT8_FILES
+
+    store.clock.advance(60)
+    finish_job(store.core, worker_id, job_id, lease_id)
+    assert store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"] > leased_at
+    assert store.client.delete(f"{API}/models/z-image-turbo", params={"quant": "int8"}).status_code == 204
+
+
+def test_quota_eviction_never_removes_the_installed_quantization_a_job_without_one_runs_on(store, monkeypatch):
+    store.install("z-image-turbo", "int8")
+    store.clock.advance(60)
+    store.leased_job("z-image-turbo", None, "z_image")
+    used = store.client.get(f"{API}/models").json()["store"]["total_bytes"]
+    monkeypatch.setattr(store.core.models, "_quota_bytes", lambda: used + store.size("ltx-2.3-distilled-22b", "Q4_K_M") - 1)
+
+    problem = assert_problem(store.client.post(f"{API}/models/ltx-2.3-distilled-22b/install", params={"quant": "Q4_K_M"}), 409)
+
+    assert problem.model_extra["code"] == "quota_exceeded"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed" and store.placed() == Z_IMAGE_INT8_FILES
+
+
+def test_a_second_install_that_fits_only_without_the_first_is_refused_before_any_byte_is_downloaded(store):
+    store.free = max(store.size("z-image-turbo", "int8"), store.size("wan-2.2-t2v-14b", "int8")) + 10  # room for one
+    store.gate = threading.Event()
+    assert store.client.post(f"{API}/models/z-image-turbo/install", params={"quant": "int8"}).status_code == 202
+
+    problem = assert_problem(store.client.post(f"{API}/models/wan-2.2-t2v-14b/install", params={"quant": "int8"}), 409)
+
+    assert problem.model_extra["code"] == "not_enough_space" and "installs in progress" in problem.detail
+    store.gate.set()
+    store.idle()
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
+    assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "absent"
+    assert not any("wan2.2" in url for url, _ in store.hub.requests)
+
+
 # ---------------------------------------------------------------------- remove, quota, worker restarts
 
 
@@ -331,6 +384,47 @@ def test_a_model_change_restarts_the_worker_only_once_its_running_job_ended(stor
     assert store.supervisor.restarts == 1
 
 
+def test_maintenance_restarts_the_worker_for_a_model_change_once_no_job_runs(store):
+    _, job_id, _ = store.leased_job("z-image-turbo", "bf16", "z_image")
+    store.install("z-image-turbo", "int8")
+    assert store.supervisor.restarts == 0
+    store.core.db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (job_id,))  # an end no job report followed
+
+    async def one_tick() -> None:
+        task = asyncio.create_task(store.core.run_maintenance(interval=0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(one_tick())
+    assert store.supervisor.restarts == 1
+
+
+def test_a_removed_file_the_old_worker_held_open_restarts_its_replacement_once_it_is_deleted(store, monkeypatch):
+    store.install("z-image-turbo", "int8")
+    transformer = "ZImageTurbo_quanto_bf16_int8.safetensors"
+    original = Path.unlink
+    held = {"open": True}
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == transformer and held["open"]:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    restarts = store.supervisor.restarts
+    assert store.client.delete(f"{API}/models/z-image-turbo", params={"quant": "int8"}).status_code == 204
+    assert store.supervisor.restarts == restarts + 1 and transformer in store.placed()
+
+    held["open"] = False  # the old worker process ended; its replacement found the file and lists z_image
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["z_image"], health={"state": "ready"})
+    store.core.register_worker(registration, store.core.enrollment_token)
+    assert transformer not in store.placed() and store.supervisor.restarts == restarts + 2
+
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=[], health={"state": "ready"})
+    store.core.register_worker(registration, store.core.enrollment_token)
+    assert store.supervisor.restarts == restarts + 2
+
+
 def test_wgp_config_written_by_wan2gp_after_an_install_is_merged_when_the_worker_registers(store):
     store.install("z-image-turbo", "int8")  # WanGP has not started yet: no config to merge into
     assert not store.core.models.config_path.exists() and store.supervisor.restarts == 1
@@ -366,7 +460,7 @@ def test_switching_the_local_text_encoder_from_int8_to_bf16(store):
         "checkpoints_paths": [str(store.root.resolve()), "ckpts", "."],
         "text_encoder_quantization": "bf16",
     }
-    assert store.local_host()["text_encoder_variant"] == "bf16"
+    assert store.local_host()["text_encoder_variant"] == "bf16" and store.local_host()["text_encoder_switch"] is None
     assert store.supervisor.restarts == 2
     assert {r["path"] for r in store.rows("SELECT path FROM installed_model_files")} == placed
     assert store.quant("z-image-turbo", "int8")["size_bytes"] == store.size("z-image-turbo", "int8", "bf16")
@@ -404,7 +498,45 @@ def test_a_job_leased_during_a_switch_keeps_the_previous_variant_until_the_worke
     assert QWEN3_BF16 in store.placed() and QWEN3_INT8 not in store.placed()
 
 
-def test_closing_the_core_cancels_an_install_and_registers_nothing(store):
+def test_hosts_show_a_running_text_encoder_switch_and_why_it_failed(store):
+    store.install("z-image-turbo", "int8")
+    url = store.url("z-image-shared", QWEN3_BF16)
+    store.hub.files[url] = store.contents[url][:-1] + b"!"
+    store.gate = threading.Event()
+
+    assert store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"}).status_code == 202
+    assert store.local_host()["text_encoder_switch"] == {"variant": "bf16", "error": None}
+    store.gate.set()
+    store.idle()
+
+    host = store.local_host()
+    assert host["text_encoder_variant"] == "int8"
+    failed = host["text_encoder_switch"]
+    assert failed["variant"] == "bf16" and failed["error"]["code"] == "hash_mismatch" and QWEN3_BF16 in failed["error"]["message"]
+    assert store.client.post(f"{API}/models/wan-2.2-t2v-14b/install", params={"quant": "int8"}).status_code == 202  # no longer blocked
+    store.idle()
+
+    store.hub.files[url] = store.contents[url]
+    assert store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"}).status_code == 202
+    store.idle()
+    assert store.local_host()["text_encoder_variant"] == "bf16" and store.local_host()["text_encoder_switch"] is None
+
+
+def test_after_a_switch_a_removal_keeps_the_text_encoder_a_job_leased_during_the_switch_uses(store):
+    store.install("wan-2.2-t2v-14b", "int8")
+    store.install("z-image-turbo", "int8")
+    store.gate = threading.Event()
+    assert store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"}).status_code == 202
+    store.leased_job("z-image-turbo", "int8", "z_image")  # while the bf16 files download
+    store.gate.set()
+    store.idle()
+
+    assert store.client.delete(f"{API}/models/wan-2.2-t2v-14b", params={"quant": "int8"}).status_code == 204
+
+    assert {QWEN3_INT8, QWEN3_BF16} <= store.placed()  # the worker running the job still uses the int8 text encoder
+
+
+def test_closing_the_core_cancels_an_install_registers_no_file_and_leaves_it_failed(store):
     store.gate = threading.Event()
     assert store.client.post(f"{API}/models/z-image-turbo/install", params={"quant": "int8"}).status_code == 202
 
@@ -418,7 +550,9 @@ def test_closing_the_core_cancels_an_install_and_registers_nothing(store):
     assert store.placed() == set()
     reopened = Database.open(store.core.paths.db_file)
     try:
-        assert reopened.query("SELECT * FROM installed_models") == [] and reopened.query("SELECT * FROM store_files") == []
+        # Failed, not absent: its card offers Remove, which deletes the downloads it left in models/.downloads/.
+        assert [row["state"] for row in reopened.query("SELECT state FROM installed_models")] == ["failed"]
+        assert reopened.query("SELECT * FROM store_files") == []
     finally:
         reopened.close()
 

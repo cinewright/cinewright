@@ -21,8 +21,8 @@ def update_host(host_id: str, patch: HostPatch, core: Core) -> Response:
     """Change a host's settings. A new `text_encoder_variant` is switched in the background.
 
     Checks first and refuses with 409 while a job runs on the host or a model is being installed, and when the
-    variant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's
-    configuration names it.
+    variant's files do not fit on the drive of the model store. `GET /hosts` shows the switch as the host's
+    `text_encoder_switch` while it runs or after it failed, and the new `text_encoder_variant` once it is done.
     """
     core.update_host(host_id, patch)
     return Response(status_code=202)

@@ -39,7 +39,9 @@ function DownloadProgress({ label, live }: { label: string; live: ModelInstall |
         data-state={known ? undefined : 'waiting'}
         role="progressbar"
         aria-label={`Downloading ${label}`}
-        aria-valuenow={Math.round(percent)}
+        // Indeterminate while waiting: no value, so it does not read as 0 %.
+        aria-valuenow={known ? Math.round(percent) : undefined}
+        aria-valuetext={known ? undefined : text}
         aria-valuemin={0}
         aria-valuemax={100}
       >
@@ -79,14 +81,16 @@ function InstallState({ state, error, label, live }: { state: Schemas['InstallSt
 function InstallActions({ state, label, controls }: { state: Schemas['InstallState']; label: string; controls: InstallControls }) {
   const { blocker, pending } = controls;
   const busy = blocker !== null || pending !== null;
+  // A disabled button says why, the other button of a pending request too.
+  const reason = pending === 'install' ? 'Starting install' : pending === 'remove' ? 'Removing' : blocker;
   const remove = (
     <button type="button" className="cw-btn cw-btn--danger cw-btn--sm" onClick={controls.onRemove} disabled={busy} aria-label={busy ? undefined : `Remove ${label}`}>
-      {pending === 'remove' ? 'Removing' : (blocker ?? 'Remove')}
+      {reason ?? 'Remove'}
     </button>
   );
   const install = (word: string) => (
     <button type="button" className="cw-btn cw-btn--secondary cw-btn--sm" onClick={controls.onInstall} disabled={busy} aria-label={busy ? undefined : `${word} ${label}`}>
-      {pending === 'install' ? 'Starting' : (blocker ?? word)}
+      {pending === 'install' ? 'Starting' : (reason ?? word)}
     </button>
   );
   switch (state) {
@@ -163,7 +167,8 @@ export function ModelCard({
             license.name
           )}
           {` · ${commercial(license)}`}
-          {quant.size_bytes != null ? ` · ${formatBytes(quant.size_bytes)}` : ''}
+          {/* Installed: with the shared files it uses; otherwise its own model files, which an install downloads at least. */}
+          {quant.size_bytes != null ? ` · ${quant.install_state === 'installed' ? 'installed' : 'model files'} ${formatBytes(quant.size_bytes)}` : ''}
         </span>
         {controls ? (
           <div className="model-card__actions">

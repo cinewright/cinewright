@@ -872,6 +872,17 @@
             "title": "Online",
             "type": "boolean"
           },
+          "text_encoder_switch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextEncoderSwitch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The host's last text encoder switch while it runs or after it failed; null when none ran since the core started or the last one succeeded, which `text_encoder_variant` then shows"
+          },
           "text_encoder_variant": {
             "anyOf": [
               {
@@ -2705,6 +2716,37 @@
         "title": "SystemInfo",
         "type": "object"
       },
+      "TextEncoderSwitch": {
+        "additionalProperties": false,
+        "description": "A text encoder variant switch of a host since the core started: running, or failed.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the switch failed; the previous variant stays in use. null while the switch runs"
+          },
+          "variant": {
+            "description": "The variant the switch installs",
+            "enum": [
+              "bf16",
+              "int8"
+            ],
+            "title": "Variant",
+            "type": "string"
+          }
+        },
+        "required": [
+          "variant"
+        ],
+        "title": "TextEncoderSwitch",
+        "type": "object"
+      },
       "WorkerEvent": {
         "additionalProperties": false,
         "properties": {
@@ -4217,7 +4259,7 @@
     },
     "/api/v1/hosts/{host_id}": {
       "patch": {
-        "description": "Change a host's settings. A new `text_encoder_variant` is switched in the background.\n\nChecks first and refuses with 409 while a job runs on the host or a model is being installed, and when the\nvariant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's\nconfiguration names it.",
+        "description": "Change a host's settings. A new `text_encoder_variant` is switched in the background.\n\nChecks first and refuses with 409 while a job runs on the host or a model is being installed, and when the\nvariant's files do not fit on the drive of the model store. `GET /hosts` shows the switch as the host's\n`text_encoder_switch` while it runs or after it failed, and the new `text_encoder_variant` once it is done.",
         "operationId": "updateHost",
         "parameters": [
           {

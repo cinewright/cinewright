@@ -10,18 +10,22 @@ import { useEventsConnected, useSystemEvents } from '../api/events';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ErrorBanner, RetryButton } from '../components/Feedback';
 import { ModelCard } from '../components/ModelCard';
-import { PendingLight } from '../components/StatusLight';
+import { Light, PendingLight } from '../components/StatusLight';
 import { DASH, formatBytes } from '../lib/format';
 import { useApi } from '../lib/useApi';
 
 type Quant = Schemas['ModelQuantState'];
 type Variant = NonNullable<Host['text_encoder_variant']>;
+type Switch = NonNullable<Host['text_encoder_switch']>;
+type Pending = 'install' | 'remove';
 
 const VARIANTS: Variant[] = ['int8', 'bf16'];
 /** Applies while a host has no variant chosen (WanGP's default). */
 const DEFAULT_VARIANT: Variant = 'int8';
-/** A text encoder switch sends no events; GET /hosts shows the new variant once it is done. */
+/** A text encoder switch sends no events; GET /hosts shows it as `text_encoder_switch` until it is done or failed. */
 const SWITCH_POLL_MS = 5000;
+/** A download fills the store's drive, so free disk loads again at this rate while a card downloads. */
+const STORE_POLL_MS = 30000;
 const ENDED: ReadonlySet<Schemas['InstallState']> = new Set(['installed', 'failed', 'absent']);
 
 const keyOf = (modelId: string, quant: string) => `${modelId}/${quant}`;
@@ -39,17 +43,21 @@ function useModelStates() {
   const seq = useRef(0);
   const { setData } = models;
 
-  const refresh = useCallback(async () => {
-    const seen = seq.current;
-    try {
-      const list = await api.models();
-      setData(list);
-      // Events that arrived meanwhile are newer than this answer.
-      setLive((current) => new Map([...current].filter(([, entry]) => entry.seq > seen)));
-    } catch {
-      // The shown state stays; the next event or reload corrects it.
-    }
-  }, [setData]);
+  /** Load the list again; `keepLive` keeps the events laid over it (for the store's numbers during a download). */
+  const refresh = useCallback(
+    async (keepLive = false) => {
+      const seen = seq.current;
+      try {
+        const list = await api.models();
+        setData(list);
+        // Events that arrived meanwhile are newer than this answer.
+        if (!keepLive) setLive((current) => new Map([...current].filter(([, entry]) => entry.seq > seen)));
+      } catch {
+        // The shown state stays; the next event or reload corrects it.
+      }
+    },
+    [setData],
+  );
 
   useSystemEvents((event) => {
     const install = event.kind === 'model' ? event.model : null;
@@ -57,7 +65,7 @@ function useModelStates() {
     seq.current += 1;
     const entry = { install, seq: seq.current };
     setLive((current) => new Map(current).set(keyOf(install.model_id, install.quant), entry));
-    // Sizes, the store's totals and free disk change only with the end of an install or a removal.
+    // Install states and sizes change with the end of an install or a removal; free disk also while a download runs.
     if (ENDED.has(install.install_state)) void refresh();
   });
 
@@ -130,12 +138,15 @@ function StorePanel({ store, models }: { store: ModelStoreUsage | null | undefin
 function TextEncoderPanel({
   host,
   switchingTo,
+  failed,
   installing,
   onSwitch,
   starting,
 }: {
   host: Host;
   switchingTo: Variant | null;
+  /** The last switch, when it failed. */
+  failed: Switch | null;
   installing: boolean;
   onSwitch: (variant: Variant) => void;
   starting: boolean;
@@ -182,6 +193,12 @@ function TextEncoderPanel({
           </p>
         </div>
       ) : null}
+      {!switchingTo && failed?.error ? (
+        <div className="stack stack--tight">
+          <Light state="fail" word={`Switch to ${failed.variant} failed`} detail={`${current} stays in use`} />
+          <p className="text-caption">{failed.error.message}</p>
+        </div>
+      ) : null}
       <div className="form-actions">
         <button type="button" className="cw-btn cw-btn--secondary" disabled={blocker !== null} onClick={() => onSwitch(choice)}>
           {blocker ?? `Switch to ${choice}`}
@@ -199,51 +216,87 @@ function TextEncoderPanel({
 export function ModelsView() {
   const { models, live, refresh } = useModelStates();
   const hosts = useApi((signal) => api.hosts(signal));
-  const [pending, setPending] = useState<{ key: string; action: 'install' | 'remove' } | null>(null);
+  const [pending, setPending] = useState<ReadonlyMap<string, Pending>>(new Map());
   const [actionError, setActionError] = useState<{ title: string; error: unknown } | null>(null);
   const [confirm, setConfirm] = useState<{ model: ModelSummary; quant: Quant } | null>(null);
-  const [switchingTo, setSwitchingTo] = useState<Variant | null>(null);
   const [switchStarting, setSwitchStarting] = useState(false);
+  /** Ended installs and switches, for screen readers: the cards and the panel change without focus moving. */
+  const [announcement, setAnnouncement] = useState('');
 
   const items = models.data?.items ?? [];
   const local = hosts.data?.items.find((host) => host.kind === 'local');
-  const localVariant = local?.text_encoder_variant ?? null;
+  const switchState = local?.text_encoder_switch ?? null;
+  const switchingTo = switchState && !switchState.error ? switchState.variant : null;
+  const switchFailed = switchState?.error ? switchState : null;
   const stateOf = (model: ModelSummary, quant: Quant) => live.get(keyOf(model.id, quant.quant))?.install.install_state ?? quant.install_state;
   const installing = items.some((model) => model.quantizations.some((quant) => stateOf(model, quant) === 'downloading'));
 
-  // The switch is done once GET /hosts names the new variant.
+  useSystemEvents((event) => {
+    const install = event.kind === 'model' ? event.model : null;
+    if (!install || !ENDED.has(install.install_state)) return;
+    const label = `${items.find((model) => model.id === install.model_id)?.name ?? install.model_id} ${install.quant}`;
+    if (install.install_state === 'installed') setAnnouncement(`${label} is installed.`);
+    else if (install.install_state === 'failed') setAnnouncement(`The install of ${label} failed. ${install.error?.message ?? ''}`.trim());
+    else setAnnouncement(`${label} was removed.`);
+  });
+
+  // While a switch runs, GET /hosts shows it; it ends with the new variant, or with the reason it failed.
   const { reload: reloadHosts } = hosts;
   useEffect(() => {
     if (!switchingTo) return;
-    if (localVariant === switchingTo) {
-      setSwitchingTo(null);
-      void refresh(); // installed sizes changed with the variant
-      return;
-    }
     const timer = window.setInterval(reloadHosts, SWITCH_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [switchingTo, localVariant, reloadHosts, refresh]);
+  }, [switchingTo, reloadHosts]);
+
+  const lastSwitch = useRef<Variant | null>(null);
+  const failedMessage = switchFailed?.error?.message ?? null;
+  useEffect(() => {
+    const was = lastSwitch.current;
+    lastSwitch.current = switchingTo;
+    if (switchingTo && !was) setAnnouncement(`Switching the text encoder to ${switchingTo}.`);
+    if (was && !switchingTo) {
+      void refresh(); // installed sizes changed with the variant
+      setAnnouncement(failedMessage ? `The switch to ${was} failed. ${failedMessage}` : `The text encoder is switched to ${was}.`);
+    }
+  }, [switchingTo, failedMessage, refresh]);
+
+  // Free disk drops while a download fills the store's drive.
+  useEffect(() => {
+    if (!installing) return;
+    const timer = window.setInterval(() => void refresh(true), STORE_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [installing, refresh]);
+
+  const startPending = (key: string, action: Pending) => setPending((current) => new Map(current).set(key, action));
+  const endPending = (key: string) =>
+    setPending((current) => {
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
 
   const install = (model: ModelSummary, quant: Quant) => {
-    setPending({ key: keyOf(model.id, quant.quant), action: 'install' });
+    const key = keyOf(model.id, quant.quant);
+    startPending(key, 'install');
     setActionError(null);
     api
       .installModel(model.id, quant.quant)
       // The install is checked and marked `downloading` before the answer, so the list shows it at once.
-      .then(refresh)
+      .then(() => refresh())
       .catch((error: unknown) => setActionError({ title: `Could not install ${model.name} ${quant.quant}`, error }))
-      .finally(() => setPending(null));
+      .finally(() => endPending(key));
   };
 
   const remove = (model: ModelSummary, quant: Quant) => {
+    const key = keyOf(model.id, quant.quant);
     setConfirm(null);
-    setPending({ key: keyOf(model.id, quant.quant), action: 'remove' });
+    startPending(key, 'remove');
     setActionError(null);
     api
       .removeModel(model.id, quant.quant)
-      .then(refresh)
+      .then(() => refresh())
       .catch((error: unknown) => setActionError({ title: `Could not remove ${model.name} ${quant.quant}`, error }))
-      .finally(() => setPending(null));
+      .finally(() => endPending(key));
   };
 
   const switchVariant = (variant: Variant) => {
@@ -252,10 +305,8 @@ export function ModelsView() {
     setActionError(null);
     api
       .updateHost(local.id, { text_encoder_variant: variant })
-      .then(() => {
-        setSwitchingTo(variant);
-        reloadHosts();
-      })
+      // The core shows the switch on the host before it answers; keep "Starting" until the host list shows it.
+      .then(() => api.hosts().then(hosts.setData, reloadHosts))
       .catch((error: unknown) => setActionError({ title: `Could not switch the text encoder to ${variant}`, error }))
       .finally(() => setSwitchStarting(false));
   };
@@ -266,6 +317,9 @@ export function ModelsView() {
         <h1 className="view__title">Models</h1>
       </header>
 
+      <p className="sr-only" role="status">
+        {announcement}
+      </p>
       {actionError ? <ErrorBanner title={actionError.title} error={actionError.error} /> : null}
       {models.error && !models.data ? (
         <ErrorBanner title="Could not load models" error={models.error} action={<RetryButton onClick={models.reload} />} />
@@ -277,7 +331,14 @@ export function ModelsView() {
       <div className="models-overview">
         {models.data ? <StorePanel store={models.data.store} models={items} /> : null}
         {local ? (
-          <TextEncoderPanel host={local} switchingTo={switchingTo} installing={installing} onSwitch={switchVariant} starting={switchStarting} />
+          <TextEncoderPanel
+            host={local}
+            switchingTo={switchingTo}
+            failed={switchFailed}
+            installing={installing}
+            onSwitch={switchVariant}
+            starting={switchStarting}
+          />
         ) : null}
       </div>
 
@@ -297,7 +358,7 @@ export function ModelsView() {
                   onInstall: () => install(model, quant),
                   onRemove: () => setConfirm({ model, quant }),
                   blocker: switchingTo || switchStarting ? 'Switch in progress' : null,
-                  pending: pending?.key === key ? pending.action : null,
+                  pending: pending.get(key) ?? null,
                 }}
               />
             );
