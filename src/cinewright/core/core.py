@@ -1,8 +1,10 @@
 """The core: the implementation of `CoreService` (see `service.py`).
 
-One `Core` per process start. It owns the database, the asset store, the scheduler and the event
-log, and generates the enrollment token that worker processes need to register. The app's lifespan
-attaches the local worker's supervisor (`supervisor.py`) when it starts one.
+One `Core` per process start. It owns the database, the asset store, the scheduler, the event
+log and the engine provisioner (`provisioning.py`), and generates the enrollment token that worker
+processes need to register. The app's lifespan starts provisioning when asked to. It either attaches
+a given supervisor of the local worker (`supervisor.py`), or, in the installed app, lets the core start
+one on the provisioned engine as soon as the engine is ready (`run_local_worker_when_ready`).
 """
 
 from __future__ import annotations
@@ -16,11 +18,12 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -75,6 +78,8 @@ from cinewright.api.schemas import (
     Route,
     Settings,
     SettingsPatch,
+    SystemEvent,
+    SystemEventKind,
     SystemInfo,
     WorkerEvents,
     WorkerEventsAck,
@@ -88,15 +93,16 @@ from cinewright.config import Config
 from cinewright.core import hardware, router
 from cinewright.core.assets import BlobStore, BlobWriter, StagedBlob, asset_from_row, input_provenance, output_provenance, record_asset
 from cinewright.core.clock import Clock, from_iso, to_iso, utcnow
+from cinewright.core.engines import load_engine_pins
 from cinewright.core.errors import Conflict, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
 from cinewright.core.events import EventLog, Published
 from cinewright.core.licenses import WANGP_NAME, WANGP_NOTICE, license_notices
+from cinewright.core.provisioning import ENGINE_ID as WAN2GP
+from cinewright.core.provisioning import EngineProvisioner, ProvisioningStatus, bundled_uv
 from cinewright.core.registry import Registry
 from cinewright.core.scheduler import ACTIVE_STATES, LEASE_SECONDS, Scheduler, Tx, WorkerRecord, transition
+from cinewright.core.supervisor import WorkerLaunch, WorkerSupervisor
 from cinewright.db.database import Database
-
-if TYPE_CHECKING:
-    from cinewright.core.supervisor import WorkerSupervisor
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +155,14 @@ class Core:
         detect: Detector = hardware.detect,
         clock: Clock = utcnow,
         lease_seconds: float = LEASE_SECONDS,
+        provisioner: EngineProvisioner | None = None,
+        worker_supervisor: Callable[[WorkerLaunch], WorkerSupervisor] = WorkerSupervisor,
     ) -> None:
+        """`provisioner` defaults to provisioning the pinned Wan2GP with the installation's bundled uv.
+
+        `worker_supervisor` builds the local worker's supervisor from the launch the provisioning record gives
+        (`run_local_worker_when_ready`); tests swap in the mock engine and their own interpreter.
+        """
         self.config = config
         self.paths = config.paths
         self.paths.ensure()
@@ -163,17 +176,67 @@ class Core:
         # Per start; handed to spawned worker processes in CINEWRIGHT_ENROLLMENT_TOKEN.
         self.enrollment_token = secrets.token_urlsafe(32)
         self.started_at = clock()
-        # Set by the app's lifespan while it supervises the local worker process.
+        # The supervisor of the local worker process while there is one: given to the app, or started by the core.
         self.supervisor: WorkerSupervisor | None = None
+        self._worker_supervisor = worker_supervisor
+        self._worker_lock = threading.Lock()
+        self._worker_core_url: str | None = None  # set while the core starts the local worker once the engine is ready
+        self._own_supervisor: WorkerSupervisor | None = None  # the supervisor the core started itself
         self._closed = False
         self._leasing = True
         self._retired: set[str] = set()  # workers replaced by a restart of the local worker: they get no new job
+        self.provisioner = (
+            provisioner
+            if provisioner is not None
+            else EngineProvisioner(self.paths, load_engine_pins()[WAN2GP], uv=bundled_uv(), clock=clock)
+        )
+        self.provisioner.on_change = self._engine_changed
         self._ensure_local_host()
 
     def stop_leasing(self) -> None:
         """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
         self._leasing = False
         self.scheduler.wakeup.notify()
+
+    def run_local_worker_when_ready(self, core_url: str) -> None:
+        """Start the supervised local worker on the provisioned engine now if it is ready, else once a run reaches ready.
+
+        For the installed app: the app's lifespan calls this with `provision`, after `start_provisioning`, so a
+        start that tries the optional wheels again comes first. The launch comes from the provisioning record
+        (`EngineProvisioner.worker_launch`). No worker starts while provisioning runs, nor after a failure, until a
+        retry reaches ready. `stop_local_worker` ends this.
+        """
+        with self._worker_lock:
+            self._worker_core_url = core_url
+        self._start_local_worker()
+
+    def stop_local_worker(self) -> None:
+        """Stop the local worker the core started, if any, and start none from now on (shutdown)."""
+        with self._worker_lock:
+            self._worker_core_url = None
+            supervisor, self._own_supervisor = self._own_supervisor, None
+        if supervisor is not None:
+            supervisor.stop()
+            if self.supervisor is supervisor:
+                self.supervisor = None
+
+    def _start_local_worker(self) -> None:
+        """Start the local worker if the core is to run one, runs none yet, and the engine is ready."""
+        with self._worker_lock:
+            core_url = self._worker_core_url
+            if core_url is None or self.supervisor is not None or self._closed or not self._leasing:
+                return
+            launch = self.provisioner.worker_launch()
+            if launch is None:
+                return
+            try:
+                supervisor = self._worker_supervisor(launch)
+                supervisor.start(core_url=core_url, enrollment_token=self.enrollment_token, paths=self.paths, clock=self.clock)
+            except Exception:  # noqa: BLE001 - the core keeps serving; the Hosts view shows no worker
+                log.exception("Starting the local worker on %s failed", launch.wan2gp_root)
+                return
+            self._own_supervisor = self.supervisor = supervisor
+        log.info("The engine is ready; starting the local worker with %s.", launch.python)
 
     def restart_local_worker(self) -> None:
         """Restart the supervised local worker, so it registers again with its current model list.
@@ -198,6 +261,8 @@ class Core:
         if self._closed:
             return
         self._closed = True
+        self.stop_local_worker()
+        self.provisioner.stop()
         self.event_log.close()
         self.scheduler.wakeup.notify()
         self.db.close()
@@ -304,16 +369,45 @@ class Core:
     def system_info(self) -> SystemInfo:
         return SystemInfo(version=__version__, data_dir=str(self.paths.root), bind=self.config.bind, engines=[self._wan2gp_info()])
 
-    def _wan2gp_info(self) -> EngineInfo:
-        online = {w.id for w in self._online_workers() if w.engine == "wan2gp"}
-        rows = [
-            r
-            for r in self.db.query("SELECT id, engine_version FROM workers WHERE engine = 'wan2gp' ORDER BY last_seen_at DESC")
-            if r["id"] in online
-        ]
-        if rows:
-            return EngineInfo(id="wan2gp", name=WANGP_NAME, version=rows[0]["engine_version"], state="ready", notice=WANGP_NOTICE)
-        return EngineInfo(id="wan2gp", name=WANGP_NAME, version=None, state="not_installed", notice=WANGP_NOTICE)
+    def _wan2gp_info(self, status: ProvisioningStatus | None = None) -> EngineInfo:
+        """The engine as provisioning reports it; once `ready`, `version` is the pinned commit."""
+        status = status if status is not None else self.provisioner.status()
+        return EngineInfo(
+            id=WAN2GP,
+            name=WANGP_NAME,
+            version=status.version,
+            state=status.state,
+            notice=WANGP_NOTICE,
+            progress=status.progress,
+            error=status.error,
+        )
+
+    def _engine_changed(self, status: ProvisioningStatus) -> None:
+        """Provisioning moved on (from its thread): publish the engine's new state; once ready, start the local worker.
+
+        The state goes out as a live system event to unfiltered streams only; it is not stored, kept or replayed.
+        """
+        if not self._closed:
+            self.event_log.publish_system(
+                SystemEvent(kind=SystemEventKind.ENGINE, engine=self._wan2gp_info(status), created_at=self.clock())
+            )
+        if status.state == "ready":
+            self._start_local_worker()
+
+    def start_provisioning(self) -> None:
+        """Provision the engine in the background unless it is ready; the app's lifespan calls this at start.
+
+        A ready engine whose optional wheels could not be downloaded earlier tries them again first, unless a
+        local worker already runs on its environment.
+        """
+        if not self.provisioner.start() and self.supervisor is None:
+            self.provisioner.retry_optional()
+
+    def provision_engine(self, engine_id: str) -> EngineInfo:
+        if engine_id != WAN2GP:
+            raise NotFound(f"Engine {engine_id} is not known; the only engine is {WAN2GP}.")
+        self.provisioner.start()
+        return self._wan2gp_info()
 
     def health(self) -> Health:
         checks: dict[str, str] = {}
@@ -614,7 +708,7 @@ class Core:
                 raise Conflict(f"Job {job_id} already {state.value}, so it cannot be cancelled.")
         return self.get_job(job_id)
 
-    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
+    def events(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent | SystemEvent, None]:
         return self.event_log.stream(job_id, after)
 
     # ------------------------------------------------------------------ assets

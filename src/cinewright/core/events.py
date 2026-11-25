@@ -8,6 +8,10 @@ Worker previews are the exception: they are broadcast but never stored, because 
 the `seq` of the job's latest stored event, so `Last-Event-ID` always names a stored event. The log
 keeps the latest preview of each running job in memory and sends it to a stream after its replay.
 Releases 0.0.1 and 0.0.2 did store previews; those rows stay in the table but replay never sends them.
+
+System events (engine provisioning) are not job events: they are live only, neither stored nor
+replayed nor kept, and only the unfiltered stream carries them. They are broadcast as they are, not
+as a counted `(published, Published)` item, so they never touch the watermark or the publish counter.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from cinewright.api.schemas import TERMINAL_JOB_STATES, EventKind, JobEvent, JobState
+from cinewright.api.schemas import TERMINAL_JOB_STATES, EventKind, JobEvent, JobState, SystemEvent
 from cinewright.core.clock import from_iso, to_iso
 from cinewright.core.notify import Broadcaster
 from cinewright.db.database import Database
@@ -71,7 +75,8 @@ class EventLog:
         # replay snapshot. So subscribers see events in commit order, and a snapshot never sees a
         # commit whose events (and kept preview) are not yet published.
         self.lock = threading.RLock()
-        self._published = 0  # counts broadcast items, so a stream can skip previews its snapshot covers
+        # Counts broadcast job events and previews (not system events), so a stream can skip previews its snapshot covers.
+        self._published = 0
         self._previews: dict[str, JobEvent] = {}  # latest preview per running job
 
     @staticmethod
@@ -108,6 +113,14 @@ class EventLog:
                 return list(self._previews.values())
             preview = self._previews.get(job_id)
             return [preview] if preview is not None else []
+
+    def publish_system(self, event: SystemEvent) -> None:
+        """Callable from any thread; reaches open unfiltered streams only.
+
+        Takes neither the lock nor a publish count: a system event is not ordered against job commits
+        and is never replayed or kept, so no replay snapshot has to account for it.
+        """
+        self.broadcaster.publish(event)
 
     def close(self) -> None:
         self.broadcaster.close()
@@ -154,11 +167,12 @@ class EventLog:
             previews = [] if finished else self.kept_previews(job_id)
         return _Replay([Published(row["rowid"], _event(row)) for row in rows], watermark, finished, published, previews)
 
-    async def stream(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent, None]:
+    async def stream(self, job_id: str | None, after: str | None) -> AsyncGenerator[JobEvent | SystemEvent, None]:
         """Replay, then the kept previews, then follow live events. A job-filtered stream ends after the job's terminal state.
 
         Without `after`, a job-filtered stream replays the job's whole history and the unfiltered
-        stream starts with the kept previews and live events.
+        stream starts with the kept previews and live events. Only the unfiltered stream carries
+        system events; they are live only, so one published before the stream subscribed is not sent.
         """
         subscription = self.broadcaster.subscribe()
         try:
@@ -175,6 +189,11 @@ class EventLog:
                 item = await subscription.queue.get()
                 if item is None:
                     return
+                if isinstance(item, SystemEvent):
+                    # Not a job event: never replayed, so neither the watermark nor the publish counter applies.
+                    if job_id is None:
+                        yield item
+                    continue
                 published, (rowid, event) = item
                 if job_id is not None and event.job_id != job_id:
                     continue

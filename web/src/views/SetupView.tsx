@@ -1,15 +1,144 @@
-// Setup and calibration: hardware profile with "Detect again", model status lights from /capabilities.
+// Setup and calibration: engine provisioning (state from /system, live progress from `engine` events),
+// hardware profile with "Detect again", model status lights from /capabilities.
 
 import { RefreshCw } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 
-import { api, type CalibrationResult, type HardwareProfile } from '../api/client';
+import { api, type CalibrationResult, type EngineInfo, type HardwareProfile } from '../api/client';
+import { useEventsConnected, useSystemEvents } from '../api/events';
 import { CapabilityChip } from '../components/DataClassTag';
 import { ErrorBanner, RetryButton } from '../components/Feedback';
 import { bestResult } from '../components/ModelCard';
-import { Light, StatusLight } from '../components/StatusLight';
-import { DASH, formatMb, formatSecondsPerStep, formatTimestamp } from '../lib/format';
+import { Light, PendingLight, StatusLight } from '../components/StatusLight';
+import { DASH, formatMb, formatSecondsPerStep, formatTimestamp, truncateMiddle } from '../lib/format';
 import { useApi } from '../lib/useApi';
+
+const ENGINE_ID = 'wan2gp';
+
+function EngineStatus({ engine, onRetry, retrying }: { engine: EngineInfo; onRetry: () => void; retrying: boolean }) {
+  const progress = engine.progress;
+  if (engine.state === 'ready') {
+    return (
+      <dl className="kv">
+        <dt>{engine.name}</dt>
+        <dd>
+          <Light state="ok" word="Ready" />
+        </dd>
+        <dt>Version</dt>
+        <dd className="cw-mono" title={engine.version ?? undefined}>
+          {engine.version ? truncateMiddle(engine.version) : DASH}
+        </dd>
+      </dl>
+    );
+  }
+  if (engine.state === 'provisioning') {
+    const percent = progress?.percent ?? 0;
+    const label = progress
+      ? [progress.step && progress.total_steps ? `Step ${progress.step} of ${progress.total_steps}` : null, progress.phase].filter(Boolean).join(' · ')
+      : 'Starting';
+    return (
+      <div className="stack">
+        <PendingLight word={`Setting up ${engine.name}`} />
+        <div>
+          <div className="cw-progress" role="progressbar" aria-label={label} aria-valuenow={Math.round(percent)} aria-valuemin={0} aria-valuemax={100}>
+            <span style={{ width: `${percent}%` }} />
+          </div>
+          <div className="cw-progress__label">
+            <span>{label}</span>
+            <span>{Math.round(percent)} %</span>
+          </div>
+        </div>
+        <p className="text-caption cw-muted">
+          Cinewright downloads the engine, its Python environment and ffmpeg once and checks every file against its pinned hash. This
+          takes a while; the other views stay usable.
+        </p>
+      </div>
+    );
+  }
+  if (engine.state === 'failed') {
+    const action =
+      engine.error?.action === 'retry' ? (
+        retrying ? (
+          <button type="button" className="cw-btn cw-btn--secondary cw-btn--sm" disabled>
+            Starting
+          </button>
+        ) : (
+          <RetryButton onClick={onRetry} />
+        )
+      ) : undefined;
+    return <ErrorBanner title={`${engine.name} setup failed`} error={engine.error?.message ?? 'The setup failed.'} action={action} />;
+  }
+  return (
+    <div className="stack">
+      <span className="cw-status cw-muted">Not installed</span>
+      <p className="cw-muted">{engine.error?.message ?? `${engine.name} is set up in the background when Cinewright starts.`}</p>
+    </div>
+  );
+}
+
+/** The engine's provisioning: loaded from /system, then kept current by `engine` events (full snapshots) and loaded
+ * again whenever the event stream opens. */
+export function EnginePanel() {
+  const system = useApi((signal) => api.system(signal));
+  const [live, setLive] = useState<EngineInfo>();
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<unknown>();
+  const events = useRef(0);
+
+  useSystemEvents((event) => {
+    if (event.kind === 'engine' && event.engine?.id === ENGINE_ID) {
+      events.current += 1;
+      setLive(event.engine);
+    }
+  });
+
+  // Engine events are never replayed, so one may have been missed before the stream (re)opened: load the state again.
+  const connected = useEventsConnected();
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    const opened = connected && !wasConnected.current;
+    wasConnected.current = connected;
+    if (!opened) return;
+    const controller = new AbortController();
+    const seen = events.current;
+    api
+      .system(controller.signal)
+      .then((info) => {
+        const current = info.engines.find((candidate) => candidate.id === ENGINE_ID);
+        // An event that arrived meanwhile is newer than this answer.
+        if (current && events.current === seen) setLive(current);
+      })
+      .catch(() => undefined); // the shown state stays; the next event corrects it
+    return () => controller.abort();
+  }, [connected]);
+
+  const retry = () => {
+    const seen = events.current;
+    setRetrying(true);
+    setRetryError(undefined);
+    api
+      .provisionEngine(ENGINE_ID)
+      // An event that arrived meanwhile is newer than this answer.
+      .then((engine) => events.current === seen && setLive(engine))
+      .catch(setRetryError)
+      .finally(() => setRetrying(false));
+  };
+
+  const engine = live ?? system.data?.engines.find((candidate) => candidate.id === ENGINE_ID);
+  return (
+    <section className="panel" aria-labelledby="engine-title">
+      <h2 id="engine-title" className="panel__title">
+        Engine
+      </h2>
+      {system.error && !engine ? (
+        <ErrorBanner title="Could not load the engine state" error={system.error} action={<RetryButton onClick={system.reload} />} />
+      ) : null}
+      {!engine && system.loading ? <p className="cw-muted">Loading engine state</p> : null}
+      {engine ? <EngineStatus engine={engine} onRetry={retry} retrying={retrying} /> : null}
+      {retryError ? <ErrorBanner title="Could not start the setup again" error={retryError} /> : null}
+    </section>
+  );
+}
 
 export function HardwareList({ hardware }: { hardware: HardwareProfile }) {
   return (
@@ -86,6 +215,8 @@ export function SetupView() {
           Calibration arrives in phase 1
         </button>
       </header>
+
+      <EnginePanel />
 
       <section className="panel" aria-labelledby="hardware-title">
         <div className="panel__head">

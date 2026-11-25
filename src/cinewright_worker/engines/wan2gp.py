@@ -10,6 +10,10 @@ without it. `init()` runs once per process: WanGP keeps one global runtime. Its 
 Cinewright's data directory, not in the checkout. The adapter never triggers downloads: Wan2GP runs
 offline, `prepare()` and `submit()` refuse models whose files are not all present, and Wan2GP is not
 started while its ffmpeg binaries are missing (its `init()` would fetch unpinned ones from GitHub).
+
+Engine provisioning (`cinewright.core.provisioning`) writes `PROVISIONING_RECORD` into
+`<data dir>/engines/wan2gp/` once the engine is installed. For the checkout it describes, the adapter
+reports the record's commit as its engine version and passes the attention mode the record found working.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import importlib
+import json
 import logging
 import os
 import re
@@ -31,9 +36,6 @@ from cinewright_worker.engines import EngineError, media_type_for
 
 log = logging.getLogger(__name__)
 
-# `--offline` makes wgp.py set HF_HUB_OFFLINE. Through shared.api that comes too late for
-# huggingface_hub, so `_ensure_session` also sets it before the import (see there).
-CLI_ARGS = ("--attention", "sdpa", "--offline")
 PREVIEW_MAX_SIDE = 384
 RESULT_TIMEOUT = 60.0
 _MIB = 1024 * 1024
@@ -43,6 +45,11 @@ _OOM = re.compile(r"out of memory|outofmemoryerror|tried to allocate|(?:un|in)su
 # missing (shared/ffmpeg_setup.py). Phase 1 provisioning places pinned copies there.
 FFMPEG_DIR = "ffmpeg_bins"
 FFMPEG_BINARIES = ("ffmpeg.exe", "ffprobe.exe", "ffplay.exe") if os.name == "nt" else ("ffmpeg", "ffprobe", "ffplay")
+DEFAULT_ATTENTION = "sdpa"
+# SageAttention modes of wgp.py's --attention; provisioning records one only when its probe found it working.
+SAGE_ATTENTION_MODES = ("sage", "sage2")
+# Written by engine provisioning into <data dir>/engines/wan2gp/ (cinewright.core.provisioning).
+PROVISIONING_RECORD = "provisioning.json"
 # The only Wan2GP settings a job's `params.extra` may set: plain numbers and short enum tokens, plus the
 # negative prompt. Nothing path-valued, and no upsampling, post-processing, prompt enhancer, LoRA or
 # reference-image settings, which load further models or read files beyond the worker's inputs.
@@ -74,6 +81,28 @@ _MAX_TEXT_CHARS = 4000
 
 def is_oom(messages: list[str]) -> bool:
     return any(_OOM.search(message or "") for message in messages)
+
+
+def wgp_args(attention: str = DEFAULT_ATTENTION) -> tuple[str, ...]:
+    """wgp.py command-line arguments. `--offline` makes wgp.py set HF_HUB_OFFLINE; through shared.api that
+    comes too late for huggingface_hub, so `_ensure_session` also sets it before the import (see there)."""
+    return ("--attention", attention, "--offline")
+
+
+def read_provisioning_record(data_dir: str) -> dict[str, Any] | None:
+    """The provisioning record in `<data_dir>/engines/wan2gp/`, or None when it is missing or unreadable."""
+    path = Path(data_dir) / "engines" / "wan2gp" / PROVISIONING_RECORD
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def attention_mode(record: dict[str, Any] | None) -> str:
+    """A SageAttention mode the record found working, else `sdpa`."""
+    mode = record.get("attention") if record else None
+    return mode if mode in SAGE_ATTENTION_MODES else DEFAULT_ATTENTION
 
 
 def _accepted(key: str, value: Any) -> bool:
@@ -143,12 +172,14 @@ class Wan2GPAdapter:
 
     name = "wan2gp"
 
-    def __init__(self, root: str, data_dir: str, output_dir: str | None = None, cli_args: tuple[str, ...] = CLI_ARGS) -> None:
+    def __init__(self, root: str, data_dir: str, output_dir: str | None = None, cli_args: tuple[str, ...] | None = None) -> None:
+        """`cli_args` defaults to `--attention <mode> --offline` with the mode from the provisioning record."""
         self._root = Path(root).resolve()
         engine_dir = Path(data_dir).resolve() / "engines" / "wan2gp"
         self._config_path = engine_dir / "wgp_config.json"  # WanGP requires exactly this file name
         self._output_dir = Path(output_dir).resolve() if output_dir else engine_dir / "outputs"
-        self._cli_args = tuple(cli_args)
+        self._provisioning = self._own_record(read_provisioning_record(data_dir))
+        self._cli_args = tuple(cli_args) if cli_args is not None else wgp_args(attention_mode(self._provisioning))
         self._session: Any = None
         self._version: str | None = None
         self._init_lock = threading.Lock()
@@ -271,10 +302,23 @@ class Wan2GPAdapter:
                     cli_args=list(self._cli_args),
                     console_output=False,
                 )
-                wgp = sys.modules.get("wgp")
-                version = getattr(wgp, "WanGP_version", None)
-                self._version = str(version) if version is not None else None
+                commit = self._provisioning.get("commit") if self._provisioning else None
+                if isinstance(commit, str) and commit:
+                    self._version = commit  # the pinned commit provisioning installed, so provenance names it
+                else:  # a checkout set up by hand, e.g. for the live probe
+                    version = getattr(sys.modules.get("wgp"), "WanGP_version", None)
+                    self._version = str(version) if version is not None else None
             return self._session
+
+    def _own_record(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The provisioning record if it describes this adapter's checkout, else None."""
+        root = record.get("root") if record else None
+        if not isinstance(root, str) or not root:
+            return None
+        try:
+            return record if Path(root).resolve() == self._root else None
+        except (OSError, ValueError):
+            return None
 
     def _record(self, engine_job_id: str) -> _Job:
         try:

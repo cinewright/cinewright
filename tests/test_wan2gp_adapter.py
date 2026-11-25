@@ -26,7 +26,16 @@ import pytest
 from cinewright_worker.adapter import EngineAdapter, EngineJob
 from cinewright_worker.engines import EngineError
 from cinewright_worker.engines.mock import render_png
-from cinewright_worker.engines.wan2gp import FFMPEG_BINARIES, FFMPEG_DIR, Wan2GPAdapter, build_settings, is_oom
+from cinewright_worker.engines.wan2gp import (
+    FFMPEG_BINARIES,
+    FFMPEG_DIR,
+    PROVISIONING_RECORD,
+    Wan2GPAdapter,
+    build_settings,
+    is_oom,
+)
+
+COMMIT = "38758d3c73366422efcf609abb63cab8385f3552"
 
 # The message wgp.py substitutes for a "CUDA out of memory" exception.
 WAN2GP_VRAM_ERROR = (
@@ -260,6 +269,57 @@ def test_capabilities_and_health(fake_api, adapter):
     assert models["z_image"].available is True
     health = adapter.health()
     assert (health.state, health.engine_version, health.vram_total_mb) == ("ready", "19.292", None)
+
+
+def write_record(data_dir: Path, checkout: Path, **fields) -> None:
+    """The record engine provisioning writes once the engine is installed (cinewright.core.provisioning)."""
+    engine_dir = data_dir / "engines" / "wan2gp"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    record = {"engine": "wan2gp", "commit": COMMIT, "root": str(checkout), "attention": "sdpa", **fields}
+    (engine_dir / PROVISIONING_RECORD).write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_engine_version_is_the_provisioned_commit(fake_api, tmp_path):
+    root = tmp_path / "wan2gp"
+    provision_ffmpeg(root)
+    write_record(tmp_path / "data", root)
+    adapter = Wan2GPAdapter(root=str(root), data_dir=str(tmp_path / "data"))
+    adapter.capabilities()
+    assert adapter.health().engine_version == COMMIT  # not WanGP_version, so job provenance names the commit
+
+
+@pytest.mark.parametrize(
+    ("fields", "attention", "version"),
+    [
+        (None, "sdpa", "19.292"),  # no provisioning record
+        ({}, "sdpa", COMMIT),  # the probe found SageAttention not working
+        ({"attention": "sage2"}, "sage2", COMMIT),
+        ({"attention": "sage"}, "sage", COMMIT),
+        ({"attention": "sage2 --share"}, "sdpa", COMMIT),  # only known modes become a command-line argument
+        ({"attention": None}, "sdpa", COMMIT),
+        ({"attention": "sage2", "root": "elsewhere"}, "sdpa", "19.292"),  # a record of another checkout
+    ],
+)
+def test_attention_mode_comes_from_the_provisioning_record(fake_api, tmp_path, fields, attention, version):
+    root = tmp_path / "wan2gp"
+    provision_ffmpeg(root)
+    if fields is not None:
+        write_record(tmp_path / "data", root, **fields)
+    adapter = Wan2GPAdapter(root=str(root), data_dir=str(tmp_path / "data"))
+    adapter.capabilities()
+    assert fake_api[0].init_kwargs["cli_args"] == ["--attention", attention, "--offline"]
+    assert adapter.health().engine_version == version
+
+
+def test_an_unreadable_provisioning_record_keeps_sdpa(fake_api, tmp_path):
+    root = tmp_path / "wan2gp"
+    provision_ffmpeg(root)
+    record = tmp_path / "data" / "engines" / "wan2gp" / PROVISIONING_RECORD
+    record.parent.mkdir(parents=True)
+    record.write_text("{not json", encoding="utf-8")
+    adapter = Wan2GPAdapter(root=str(root), data_dir=str(tmp_path / "data"))
+    adapter.capabilities()
+    assert fake_api[0].init_kwargs["cli_args"] == ["--attention", "sdpa", "--offline"]
 
 
 def test_missing_or_unknown_models_are_refused(fake_api, adapter, tmp_path):
