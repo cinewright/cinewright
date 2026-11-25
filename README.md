@@ -169,7 +169,7 @@ The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TO
 | --- | --- |
 | `db/cinewright.sqlite3` | Jobs, events, assets, workers, settings (SQLite, WAL) |
 | `assets/<sha[:2]>/<sha256>` | Inputs and outputs, stored by SHA-256 |
-| `models/` | Model files (phase 1) |
+| `models/` | Model files (installs arrive with phase 1), where WanGP looks them up: transformer, VAE and upscaler files directly in it, each text encoder with its tokenizer and config files in its own folder (`umt5-xxl/`, `xlm-roberta-large/`, `Qwen3/`, `gemma-3-12b-it-qat-q4_0-unquantized/`). `models/.downloads/` holds downloads in progress; an interrupted one continues from its `.part` file |
 | `engines/` | Engine data, e.g. `engines/wan2gp/wgp_config.json` |
 | `engines/wan2gp/<commit>/` | WanGP's source at the pinned commit (`wgp.py` lies directly in it), with the pinned ffmpeg in `ffmpeg_bins/` |
 | `engines/wan2gp/env/` | WanGP's Python environment (Python 3.11, PyTorch with CUDA 13.0, the locked packages) |
@@ -278,6 +278,16 @@ The installer sets up only Cinewright itself. WanGP comes on the first start, be
 5. Finally, it writes a record of the setup and starts the worker on WanGP. A later start that finds the record and the files downloads and installs nothing else.
 
 During the setup, the core and uv connect to `github.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `releases.astral.sh`, `files.pythonhosted.org`, `download.pytorch.org`, `download-r2.pytorch.org` (the lock's PyTorch wheels), `aiinfra.pkgs.visualstudio.com` and `*.vsblob.vsassets.io`. WanGP itself needs no internet connection afterwards: it runs offline, and model downloads will go through the core. The setup runs on Windows only so far, because the pins cover only 64-bit Windows.
+
+### Model store
+
+The core keeps every model file in one model store, `models/` in the data directory, and tells WanGP to look there first. Model installs from the Models view arrive with phase 1; these are the rules they follow:
+
+- **Checked files.** Every file is pinned by SHA-256 and size in the registry. A download is checked before the file is used; a file that does not match is deleted, and the model is not installed. Weights are safetensors or GGUF files only. Next to them, only non-executable tokenizer and config files (`.json`, `.txt`, `.model`) are allowed.
+- **Shared files.** Text encoders, VAEs and the other engine files several models need are kept once. Removing a model removes a shared file only when no other installed model and no queued or running job needs it.
+- **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default.
+- **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.
+- **Download hosts.** Model files come only over HTTPS from `huggingface.co` and the download host it forwards to, `us.aws.cdn.hf.co` (later also `civitai.com`).
 
 ### Why WanGP is not bundled
 
