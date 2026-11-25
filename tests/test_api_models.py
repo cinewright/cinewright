@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from conftest import API, BASE_URL, FakeClock, assert_problem, fake_detect, finish_job
+from conftest import API, BASE_URL, FakeClock, assert_problem, fake_detect, finish_job, mark_installed
 from fastapi.testclient import TestClient
 from test_core_modelstore import UMT5_INT8, WAN_I2V_INT8, WAN_T2V_INT8, Z_IMAGE_INT8_FILES, FakeHub, fixture_registry
 
@@ -259,14 +259,13 @@ def test_a_job_lease_and_its_completion_mark_the_quantization_used(store):
     assert store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"] > leased_at
 
 
-def test_a_job_without_a_quantization_protects_and_marks_the_installed_one_it_runs_on(store):
+def test_a_job_without_a_quantization_routes_to_protects_and_marks_the_installed_one(store):
     store.install("z-image-turbo", "int8")
     installed_at = store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"]
 
     store.clock.advance(60)
     worker_id, job_id, lease_id = store.leased_job("z-image-turbo", None, "z_image")
-    # The router takes the registry's first quantization the worker's model type serves; Wan2GP runs the installed int8.
-    assert store.route(job_id)["quant"] == "bf16"
+    assert store.route(job_id)["quant"] == "int8"  # the installed one, although bf16 comes first in the registry
     leased_at = store.rows("SELECT last_used_at FROM installed_models")[0]["last_used_at"]
     assert leased_at > installed_at
 
@@ -279,7 +278,7 @@ def test_a_job_without_a_quantization_protects_and_marks_the_installed_one_it_ru
     assert store.client.delete(f"{API}/models/z-image-turbo", params={"quant": "int8"}).status_code == 204
 
 
-def test_quota_eviction_never_removes_the_installed_quantization_a_job_without_one_runs_on(store, monkeypatch):
+def test_quota_eviction_never_removes_the_installed_quantization_a_job_without_one_routes_to(store, monkeypatch):
     store.install("z-image-turbo", "int8")
     store.clock.advance(60)
     store.leased_job("z-image-turbo", None, "z_image")
@@ -375,6 +374,7 @@ def test_the_models_view_data_follows_the_quota_setting_and_measures_free_space_
 
 
 def test_a_model_change_restarts_the_worker_only_once_its_running_job_ended(store):
+    mark_installed(store.core, ("z-image-turbo", "bf16"))
     worker_id, job_id, lease_id = store.leased_job("z-image-turbo", "bf16", "z_image")
 
     store.install("z-image-turbo", "int8")
@@ -385,6 +385,7 @@ def test_a_model_change_restarts_the_worker_only_once_its_running_job_ended(stor
 
 
 def test_maintenance_restarts_the_worker_for_a_model_change_once_no_job_runs(store):
+    mark_installed(store.core, ("z-image-turbo", "bf16"))
     _, job_id, _ = store.leased_job("z-image-turbo", "bf16", "z_image")
     store.install("z-image-turbo", "int8")
     assert store.supervisor.restarts == 0

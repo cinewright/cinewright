@@ -32,7 +32,8 @@ license:
   commercial_use: true
   geo_exclusions: []
 quantizations:
-  # Wan2GP picks the files by its transformer_quantization setting: bf16 = first URL, int8 = the quanto bf16 int8 file.
+  # Wan2GP picks the files by the transformer_quantization override that the Wan2GP adapter sets for each job:
+  # bf16 = first URL, int8 = the quanto bf16 int8 file.
   - id: bf16
     format: safetensors
     files:

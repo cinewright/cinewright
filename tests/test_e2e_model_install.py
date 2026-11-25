@@ -178,7 +178,7 @@ def test_an_estimate_turns_feasible_seconds_after_the_install_and_infeasible_aft
     wait_for(lambda: (health := served.local_health()) is not None and health["state"] == "ready", "the worker to register")
     before = served.estimate()
     assert before["feasible"] is False
-    assert before["reasons"] == [f"feasibility: no online worker on local serves wan2gp {MODEL_TYPE}"]
+    assert before["reasons"] == [f"feasibility: {MODEL} {QUANT} is not installed on local"]
 
     response = served.http.post(f"{API}/models/{MODEL}/install", params={"quant": QUANT})
     assert response.status_code == 202, response.text
@@ -192,4 +192,5 @@ def test_an_estimate_turns_feasible_seconds_after_the_install_and_infeasible_aft
     response = served.http.delete(f"{API}/models/{MODEL}", params={"quant": QUANT})
     assert response.status_code == 204, response.text
     wait_for(lambda: not served.estimate()["feasible"], "the estimate to turn infeasible", timeout=FEASIBLE_WITHIN_S)
-    assert served.workers.spawned == 3
+    assert served.estimate()["reasons"] == [f"feasibility: {MODEL} {QUANT} is not installed on local"]
+    wait_for(lambda: served.workers.spawned == 3, "the core to restart the worker")

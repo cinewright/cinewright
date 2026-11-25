@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 import yaml
-from conftest import API, BASE_URL, fake_detect
+from conftest import API, BASE_URL, TEST_INSTALLED, fake_detect, mark_installed
 from fastapi.testclient import TestClient
 
 from cinewright.api.routes.jobs import sse_frame
@@ -875,6 +875,7 @@ def test_process_runner_names_a_program_that_cannot_start(tmp_path):
 def provisioned_core(setup, config, registry_dir, clock):
     """A core whose provisioner downloads from the fake server and runs the fake uv (same data directory)."""
     instance = Core(config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock, provisioner=setup.provisioner())
+    mark_installed(instance, *TEST_INSTALLED)
     yield instance
     instance.close()
 
@@ -971,7 +972,13 @@ def test_the_worker_reports_the_provisioned_commit(setup, monkeypatch):
     api.init = lambda **kwargs: calls.append(kwargs) or SimpleNamespace(list_model_availability=lambda: [], list_model_defs=lambda: [])
     monkeypatch.setitem(sys.modules, "shared", types.ModuleType("shared"))
     monkeypatch.setitem(sys.modules, "shared.api", api)
-    monkeypatch.setitem(sys.modules, "wgp", SimpleNamespace(WanGP_version="10.0"))
+    overrides = types.ModuleType("shared.utils.generation_overrides")
+    overrides.set_override = lambda text, name, value: f"{name}={value!r}"
+    monkeypatch.setitem(sys.modules, "shared.utils", types.ModuleType("shared.utils"))
+    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", overrides)
+    # No model definitions, so the adapter checks no files (test_wan2gp_adapter covers that).
+    wgp = SimpleNamespace(WanGP_version="10.0", transformer_quantization_choices=[("16-bit", "bf16")], _get_dropdown_deps=lambda: None)
+    monkeypatch.setitem(sys.modules, "wgp", wgp)
     monkeypatch.setitem(sys.modules, "torch", None)
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setenv("HF_HUB_OFFLINE", "0")

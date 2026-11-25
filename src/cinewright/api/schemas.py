@@ -294,6 +294,10 @@ class ModelDescriptor(Contract):
     )
     prompt_dialect: PromptDialect = Field(default_factory=PromptDialect)
     defaults: dict[str, Any] = Field(default_factory=dict)
+    preference: int = Field(
+        default=0,
+        description="Routing preference among candidates of equal cost, higher first; ranks before calibration and runtime",
+    )
     source: ModelSource
     engines: list[EngineBinding] = Field(min_length=1)
 
@@ -595,6 +599,21 @@ class ProvenanceModel(Contract):
     file_sha256: list[Sha256] = Field(default_factory=list)
 
 
+class ProvenanceParams(Contract):
+    """The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
+    them, for example to a distilled model's fixed steps or to a frame count the model can render."""
+
+    resolution: str | None = None
+    steps: int | None = None
+    frames: int | None = Field(default=None, description="null for images")
+    fps: int | None = Field(default=None, description="null for images")
+    guidance: float | None = None
+    extra: dict[str, Any] | None = Field(
+        default=None,
+        description="The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them",
+    )
+
+
 class ProvenanceLora(Contract):
     name: str
     sha256: Sha256 | None = None
@@ -625,6 +644,7 @@ class Provenance(Contract):
     prompt: str | None = None
     negative_prompt: str | None = None
     seed: int | None = None
+    params: ProvenanceParams | None = Field(default=None, description="null for uploaded inputs and for records stored by earlier releases")
     loras: list[ProvenanceLora] = Field(default_factory=list)
     host: ProvenanceHost | None = None
     created_at: datetime
@@ -869,6 +889,11 @@ class JobCompletion(Contract):
     lease_id: str
     outputs: list[CompletedOutput] = Field(min_length=1)
     engine_version: str | None = None
+    accepted_extra: list[Annotated[str, Field(max_length=64)]] | None = Field(
+        default=None,
+        max_length=100,
+        description="Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them",
+    )
 
 
 class JobFailure(Contract):

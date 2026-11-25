@@ -22,6 +22,7 @@ This directory holds the data the core's capability registry loads:
 | `requires` | Ids of the shared components (`shared/<id>.yaml`) every quantization needs. |
 | `prompt_dialect` | `natural` or `tags`, with short notes for prompt translation. |
 | `defaults` | A few user-facing defaults using `JobParams` names: `steps`, `guidance`, `resolution`, `frames`, `fps`. |
+| `preference` | Optional integer, default `0`. Among the router's candidates of equal cost, a higher value ranks first, before calibration status, runtime and registry order. It applies to every capability of the model, so give it only to a model that should win each of its capabilities; say why in a comment. |
 | `source` | Where the files come from: provider, repository and the commit the hashes were read at. |
 | `engines` | One binding per quantization: `{engine, model_type, quant}`, where `model_type` is the engine's model id for that variant. |
 

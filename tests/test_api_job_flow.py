@@ -115,6 +115,9 @@ def test_full_job_flow_as_a_worker(client):
     assert provenance.model.id == "test-image" and provenance.model.quant == "bf16" and provenance.model.engine == "wan2gp"
     assert provenance.model.engine_version == "test-1"  # from the worker registration
     assert provenance.model.file_sha256 == ["a" * 64]
+    # The registry defaults the job ran with; an image has no frames or fps, and the worker reported no extras.
+    expected = {"resolution": "512x512", "steps": 4, "frames": None, "fps": None, "guidance": None, "extra": None}
+    assert provenance.params.model_dump() == expected
     assert (provenance.prompt, provenance.seed, provenance.parents, provenance.job_id) == (
         "a lighthouse at dusk",
         granted.seed,

@@ -83,8 +83,20 @@ class WorkerClient:
             )
         return json.loads(data)
 
-    def complete(self, job_id: str, lease_id: str, outputs: list[dict[str, Any]], engine_version: str | None) -> None:
-        self._json("POST", f"/jobs/{_quote(job_id)}/complete", {"lease_id": lease_id, "outputs": outputs, "engine_version": engine_version})
+    def complete(
+        self,
+        job_id: str,
+        lease_id: str,
+        outputs: list[dict[str, Any]],
+        engine_version: str | None,
+        accepted_extra: list[str] | None = None,
+    ) -> None:
+        """`POST /worker/jobs/{id}/complete`; `accepted_extra` (the `params.extra` keys passed on to the engine) is sent only
+        when the adapter reported them."""
+        body: dict[str, Any] = {"lease_id": lease_id, "outputs": outputs, "engine_version": engine_version}
+        if accepted_extra is not None:
+            body["accepted_extra"] = accepted_extra
+        self._json("POST", f"/jobs/{_quote(job_id)}/complete", body)
 
     def fail(self, job_id: str, lease_id: str, code: str, message: str, retryable: bool) -> None:
         error = {"code": code, "message": message, "retryable": retryable}

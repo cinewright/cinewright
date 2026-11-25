@@ -487,26 +487,30 @@ def test_a_model_a_job_needs_is_not_removed(env):
     assert env.placed() == set()
 
 
-def test_a_job_routed_to_another_quantization_of_the_same_model_type_protects_and_marks_the_installed_one(env):
-    # The router picks bf16 (first in the registry) when the worker serves z_image, but Wan2GP runs the installed int8.
+def test_a_job_protects_and_marks_only_the_quantization_of_its_route(env):
+    # Both share Wan2GP's model type z_image, but a job runs the quantization it is routed to (#5).
     env.store.install("z-image-turbo", "int8")
-    assert env.store.runs_on("z-image-turbo", "bf16") == {"bf16", "int8"}
+    env.store.install("z-image-turbo", "bf16")
     env.add_job("z-image-turbo", "bf16", "leased")
+    used = {row["quant"]: row["last_used_at"] for row in env.rows("SELECT quant, last_used_at FROM installed_models")}
 
-    with pytest.raises(ModelStoreError) as failure:
-        env.store.remove("z-image-turbo", "int8")
-    assert failure.value.code == "in_use" and env.placed() == Z_IMAGE_INT8_FILES
-
-    [before] = env.rows("SELECT last_used_at FROM installed_models")
     env.clock.advance(60)
     env.store.mark_used("z-image-turbo", "bf16")
-    [after] = env.rows("SELECT last_used_at FROM installed_models")
-    assert after["last_used_at"] > before["last_used_at"]
+    marked = {row["quant"]: row["last_used_at"] for row in env.rows("SELECT quant, last_used_at FROM installed_models")}
+    assert marked["bf16"] > used["bf16"] and marked["int8"] == used["int8"]
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.remove("z-image-turbo", "bf16")
+    assert failure.value.code == "in_use"
+    assert env.store.remove("z-image-turbo", "int8") == [("z-image-turbo", "int8")]
+    assert env.store.installed() == {("z-image-turbo", "bf16")}
 
 
-def test_a_gguf_quantization_has_its_own_model_type_and_is_not_protected_by_another_one(env):
-    assert env.store.runs_on("ltx-2.3-distilled-22b", "bf16") == {"bf16", "int8"}
-    assert env.store.runs_on("ltx-2.3-distilled-22b", "Q4_K_M") == {"Q4_K_M"}
+def test_installed_lists_complete_installs_only(env):
+    env.store.install("z-image-turbo", "int8")
+    env.db.execute("INSERT INTO installed_models (model_id, quant, state) VALUES ('wan-2.2-t2v-14b', 'int8', 'failed')")
+    env.db.execute("INSERT INTO installed_models (model_id, quant, state) VALUES ('wan-2.2-i2v-14b', 'int8', 'downloading')")
+    assert env.store.installed() == {("z-image-turbo", "int8")}
 
 
 def test_a_file_a_worker_held_open_goes_with_the_next_collection_which_reports_it(env, monkeypatch):
@@ -614,16 +618,16 @@ def test_quota_eviction_never_removes_a_model_a_job_needs(env):
     assert set(WAN_T2V_INT8) <= env.placed()
 
 
-def test_quota_eviction_skips_a_model_a_job_routed_to_another_quantization_of_its_model_type_needs(env):
+def test_quota_eviction_does_not_skip_a_model_whose_other_quantization_a_job_needs(env):
     install_three(env)
-    env.add_job("wan-2.2-t2v-14b", "bf16", "queued")  # Wan2GP runs it on the installed int8
+    env.add_job("wan-2.2-t2v-14b", "bf16", "queued")  # it runs bf16, so the installed int8 is not needed
     growth = env.size("ltx-2.3-distilled-22b", "int8")
-    env.quota = store_total(env) + growth - transformer_bytes(env, "wan-2.2-i2v-14b", WAN_I2V_INT8)
+    env.quota = store_total(env) + growth - transformer_bytes(env, "wan-2.2-t2v-14b", WAN_T2V_INT8)
 
     install = env.store.install("ltx-2.3-distilled-22b", "int8")
 
-    assert install.evicted == (("wan-2.2-i2v-14b", "int8"),)
-    assert set(WAN_T2V_INT8) <= env.placed()
+    assert install.evicted == (("wan-2.2-t2v-14b", "int8"),)  # the least recently used
+    assert not set(WAN_T2V_INT8) & env.placed()
 
 
 def test_an_install_the_quota_cannot_hold_is_refused_and_evicts_nothing(env):
@@ -685,6 +689,18 @@ def test_after_a_switch_removals_keep_the_previous_variant_a_job_needs_until_the
 
     env.store.collect_garbage()  # the worker restarted with bf16
     assert QWEN3_BF16 in env.placed() and QWEN3_INT8 not in env.placed()
+
+
+def test_the_worker_runs_the_previous_variant_after_a_switch_until_its_replacement_registered(env):
+    env.store.install("z-image-turbo", "int8")
+    assert env.store.worker_variant() == "int8"
+    switch = env.store.prepare_switch("bf16")
+    env.add_job("z-image-turbo", "int8", "leased")  # leased while the bf16 files download
+    env.store.run_switch(switch)
+
+    assert (env.store.text_encoder_variant(), env.store.worker_variant()) == ("bf16", "int8")
+    env.store.collect_garbage()  # the restarted worker registered
+    assert env.store.worker_variant() == "bf16"
 
 
 def test_a_failed_variant_switch_changes_nothing(env):

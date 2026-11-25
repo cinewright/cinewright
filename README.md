@@ -16,14 +16,14 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **MCP server.** It runs over streamable HTTP at `/mcp` and offers seven tools.
 - **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256, including the text encoders, VAEs, upscalers, tokenizer and config files WanGP needs next to the model.
 - **Windows installer.** `scripts/build.py` builds it.
-- **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
+- **WanGP adapter.** The worker side exists. It runs each job in the quantization the router chose, after checking that this quantization's files are installed, makes still images with LTX-2 and Wan 2.2 Text-to-Video (see [Images from video models](#images-from-video-models)), and reports which model settings it passed on to WanGP unchanged. When a job runs out of video memory, the error names the step it reached. An earlier version was checked against a WanGP checkout without any downloaded models; the per-quantization file checks have not been run against a real checkout yet. `tests/test_wan2gp_generation.py` runs an image-to-video, a text-to-image and an image-to-image job from the request to the provenance record on a stand-in for WanGP.
 - **WanGP setup.** On the first start of the installed app, the core sets up WanGP in the background: the pinned WanGP commit, ffmpeg and WanGP's own Python environment, with every file checked against its pinned SHA-256. The Setup view shows the progress. Once WanGP is ready, the core starts its worker on it. Later starts reuse the installation. Windows only.
 - **Model installs.** In the Models view you install a model in one quantization, follow its download, and remove it again. The core installs it with the shared files it needs into its model store, each file checked by SHA-256. The view also shows each installed model's size, the store's total, the storage quota and the free disk space, and lets you switch your computer's text encoder variant. After every change the core restarts the local worker, so a model can run seconds after its install. The API offers the same (`POST /api/v1/models/{model_id}/install?quant=`, `DELETE /api/v1/models/{model_id}`, `PATCH /api/v1/hosts/local`); `tests/test_e2e_model_install.py` runs an install end to end with the mock engine.
 - **Worker supervision.** The installed app starts the local worker in WanGP's own Python environment once the WanGP setup is ready, restarts it after a crash and stops it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
 
 ## What does not work yet
 
-- **Real generation.** Models can be installed, but generation on WanGP has not been checked on real hardware yet, and a job is not yet routed to the quantization you installed. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
+- **Real generation.** Models can be installed, and each job runs the installed quantization it is routed to. But generation on WanGP has not been checked on real hardware yet. In particular, nobody has checked yet whether image-to-image on LTX-2 changes the image or returns it almost unchanged at the default strength. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
@@ -49,7 +49,7 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
    pytest tests/test_e2e_mock.py -v
    ```
 
-   The test starts a real core on a free port, with a temporary data directory. It then starts the mock worker as a separate process (`python -m cinewright_worker --engine mock`), which registers with the core's enrollment token. Next it submits a text-to-image job pinned to `z-image-turbo`. The mock worker stands in for WanGP and writes a small PNG instead of running the model. The test then checks four things: the job's events over SSE, the PNG, its provenance record (seed, model, host) and the MCP tools at `/mcp`. You should see `1 passed`.
+   The test starts a real core on a free port, with a temporary data directory. It then starts the mock worker as a separate process (`python -m cinewright_worker --engine mock`), which registers with the core's enrollment token. Next it records `z-image-turbo` in `int8` as installed, without its files, because the router routes only installed quantizations, and submits a text-to-image job pinned to that model. The mock worker stands in for WanGP and writes a small PNG instead of running the model. The test then checks four things: the job's events over SSE, the PNG, its provenance record (seed, parameters, model and its files, host) and the MCP tools at `/mcp`. You should see `1 passed`.
 
 3. Build the web UI and the wheel:
 
@@ -147,6 +147,8 @@ While Cinewright runs:
 2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright.
 3. To remove a model, choose **Remove** on its card and confirm with **Remove model**. Text encoders and VAEs that another installed model needs stay.
 
+Jobs run only on installed quantizations. If no quantization of the model you choose in the Generate view is installed, the estimate lists the missing ones. A request through the API can pin one quantization with `quant`; if that one is not installed, the estimate names it.
+
 If an install fails, its card says why. An install that was still running when Cinewright closed shows as failed too. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
 
 ### Switch the text encoder variant
@@ -221,7 +223,7 @@ End users never need these. They exist for CI and development.
 | --- | --- |
 | `python -m cinewright` | Starts the core and opens the web UI in the browser |
 | `python -m cinewright --version` | Prints `cinewright <version>` |
-| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core; the installed app starts one on WanGP once WanGP is set up. `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
+| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core; the installed app starts one on WanGP once WanGP is set up. `mock` stands in for WanGP and serves its model types; the core routes jobs only to quantizations recorded as installed, so a hand-started mock worker gets jobs only for those. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
 | `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
@@ -289,7 +291,7 @@ The core keeps one long-running worker on your computer, so WanGP's models stay 
 
 ### Routing
 
-For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a registered worker for the engine model, and calibration. Then come cost (local jobs cost €0.00) and runtime. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
+For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a quantization installed on your computer, a registered worker for the engine model, and calibration. Then come cost (local jobs cost €0.00) and runtime. When several routes remain, the cheapest wins; among equally cheap ones, a model the registry prefers comes first (Z-Image Turbo for text-to-image, as a model made for images), then calibration, runtime and registry order. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
 
 ### Local only
 
@@ -297,7 +299,17 @@ The core listens on `127.0.0.1` only. A web page in your browser can still send 
 
 ### Provenance
 
-Every output asset has a provenance record: prompt, seed, model, quantization, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
+Every output asset has a provenance record: prompt, seed, the requested parameters, model, quantization, the model files, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
+
+- **Parameters** are the request's, with the model's registry defaults filled in where the request left them open: resolution, steps, guidance, and for videos frames and fps. WanGP can still adjust them: LTX-2 2.3 Distilled always runs 8 steps at guidance 1.0, and WanGP rounds a video's frame count to one the model can render. `extra` lists the model-specific settings the worker passed on to the engine unchanged, or is `null` when the worker did not report them. The WanGP worker reports them. It leaves out a setting it does not accept, one the job's own parameters replace, and one WanGP would change for this job, for example `denoising_strength` without an input image to edit, more guidance phases than the model has, or `guidance_scale` on LTX-2 2.3 Distilled. The worker knows these rules for the registry's models at the pinned WanGP commit. A listed setting reached WanGP as asked; whether the model uses it is up to WanGP.
+- **Model files** are the SHA-256 of the quantization's own files plus the shared files the model loads: the text encoder in the variant your computer's worker ran, the VAE and the other engine files.
+- Records stored by earlier releases have no parameters (`params` is `null`) and list only the quantization's own files.
+
+### Images from video models
+
+LTX-2 2.3 Distilled and Wan 2.2 Text-to-Video can also make still images. For a text-to-image or image-to-image job on them, the worker switches WanGP to its image mode. WanGP then renders the shortest clip the model can make and keeps its first frame, so the job's frames, fps and duration do not apply, and provenance records no frames or fps. The image comes back as a JPEG, WanGP's default image format.
+
+An image-to-image job on LTX-2 hands its image to WanGP as the control image, the input WanGP's image mode offers for this model. The model setting `denoising_strength` (in `params.extra`, default 1.0) sets how strongly the image steers the result. A text-to-image job takes no input image; an image-to-image job takes exactly one.
 
 ### WanGP setup
 
@@ -319,6 +331,7 @@ The core keeps every model file in one model store, `models/` in the data direct
 - **Shared files.** Text encoders, VAEs and the other engine files several models need are kept once. Removing a model removes a shared file only when no other installed model and no queued or running job needs it.
 - **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default. Switching first checks the free space, then installs the other variant's files, restarts the worker and, once it has registered again, removes the previous variant's files. It is refused while a job runs or a model is being installed, and when the new files do not fit.
 - **The worker learns about new models.** WanGP reports its models only when its worker starts, so the core restarts the worker after every install, removal and switch. If a job is running, the restart waits until the job ended.
+- **Each job runs its own quantization.** WanGP would otherwise load its default quantization (`int8`). The worker tells WanGP for each job which quantization to load, and first checks that its files are installed, because WanGP would otherwise try to download a missing file.
 - **Licence.** Models whose licence excludes your country (`country` in the settings) are not offered and cannot be installed.
 - **Sizes.** The Models view shows each installed model's size with the shared files it uses, and the store's total, which counts every shared file once. So the models' sizes can add up to more than the total. On a card, **installed** marks that size; before the install, **model files** is the size of the model's own files, without the shared files it may still need. Free disk space is measured each time the view loads the model list, and every 30 seconds while a download runs.
 - **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store, counting what installs that are still running will download; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.

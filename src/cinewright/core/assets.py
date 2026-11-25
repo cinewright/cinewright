@@ -11,15 +11,18 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from cinewright.api.schemas import (
     Asset,
+    Capability,
     ClientKind,
     DataClass,
     HostKind,
+    JobParams,
     JobRequest,
     ModelDescriptor,
     Provenance,
@@ -27,6 +30,7 @@ from cinewright.api.schemas import (
     ProvenanceClient,
     ProvenanceHost,
     ProvenanceModel,
+    ProvenanceParams,
     Route,
 )
 from cinewright.core.clock import from_iso, to_iso
@@ -34,6 +38,7 @@ from cinewright.core.router import strictest
 from cinewright.paths import DataPaths
 
 UPLOAD_PREFIX = ".upload-"  # temporary files of uploads in progress, directly in the asset directory
+IMAGE_CAPABILITIES = frozenset({Capability.T2I, Capability.I2I})  # jobs that return a still image: no frames, no fps
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,25 @@ def input_provenance(sha256: str, media_type: str, size_bytes: int, created_at: 
     return Provenance(asset=ProvenanceAsset(sha256=sha256, media_type=media_type, size_bytes=size_bytes), created_at=created_at)
 
 
+def provenance_params(params: JobParams, capability: Capability, accepted_extra: Sequence[str] | None) -> ProvenanceParams:
+    """The parameters a job requested, from its effective parameters (`router.effective_params`); the engine may still
+    adjust them (a distilled model's fixed steps, a frame count fitted to the model).
+
+    An image job records no frames or fps: the registry defaults of video models fill them, but the engine renders
+    one still image. Of `params.extra` only the keys the worker reports as passed on count; None when it reports none.
+    """
+    image = capability in IMAGE_CAPABILITIES
+    extra = None if accepted_extra is None else {key: params.extra[key] for key in accepted_extra if key in params.extra}
+    return ProvenanceParams(
+        resolution=params.resolution,
+        steps=params.steps,
+        frames=None if image else params.frames,
+        fps=None if image else params.fps,
+        guidance=params.guidance,
+        extra=extra,
+    )
+
+
 def output_provenance(
     *,
     asset: ProvenanceAsset,
@@ -167,6 +191,8 @@ def output_provenance(
     request: JobRequest,
     route: Route,
     model: ModelDescriptor | None,
+    file_sha256: Sequence[str],
+    params: ProvenanceParams | None,
     engine_version: str | None,
     seed: int | None,
     host: sqlite3.Row,
@@ -175,11 +201,7 @@ def output_provenance(
     agent: str | None,
     created_at: datetime,
 ) -> Provenance:
-    """Provenance of a job output, built from the job, its route, the registry entry and the host."""
-    files: list[str] = []
-    if model is not None:
-        quant = next((q for q in model.quantizations if q.id == route.quant), None)
-        files = [f.sha256 for f in quant.files] if quant else []
+    """Provenance of a job output, built from the job, its route, the files it ran with, its parameters and the host."""
     return Provenance(
         asset=asset,
         model=ProvenanceModel(
@@ -188,12 +210,13 @@ def output_provenance(
             quant=route.quant,
             engine=route.engine,
             engine_version=engine_version,
-            file_sha256=files,
+            file_sha256=list(file_sha256),
         ),
         recipe=request.recipe,
         prompt=request.prompt,
         negative_prompt=request.negative_prompt,
         seed=seed,
+        params=params,
         host=ProvenanceHost(id=host["id"], name=host["name"], kind=HostKind(host["kind"]), gpu=gpu),
         created_at=created_at,
         parents=list(request.inputs),

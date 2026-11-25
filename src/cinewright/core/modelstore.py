@@ -7,9 +7,9 @@ lie at `<store>/<name>`, every other shared file at `<store>/<subfolder><name>` 
 
 Files are shared: `store_files` holds each file once, and `installed_model_files` ties it to every installed
 quantization that needs it, which is its reference count. A file goes only when no installed quantization
-references it, no install in progress needs it and no job that waits or runs on the local host needs it.
-Until jobs run the quantization they are routed to (#5), Wan2GP picks the file of a model type by its own
-`transformer_quantization`, so a job needs every quantization bound to the same engine model type as its route.
+references it, no install in progress needs it and no job that waits or runs on the local host needs it. A job
+needs exactly the quantization of its route: the router routes only installed quantizations, and the Wan2GP
+adapter makes Wan2GP run the routed one (#5).
 
 An install (`prepare_install`, then `run_install`):
 
@@ -50,7 +50,8 @@ import shutil
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -443,6 +444,19 @@ class ModelStore:
     def has_installs(self) -> bool:
         return self.db.query_one("SELECT 1 FROM installed_models WHERE state = 'installed' LIMIT 1") is not None
 
+    def installed(self) -> set[InstallKey]:
+        """The quantizations installed and complete; not those `downloading` or `failed`. The router routes only these."""
+        rows = self.db.query("SELECT model_id, quant FROM installed_models WHERE state = 'installed'")
+        return {(row["model_id"], row["quant"]) for row in rows}
+
+    def worker_variant(self) -> str:
+        """The text encoder variant the local worker runs with.
+
+        After a switch that is the previous variant until a worker started since then registered (`collect_garbage`):
+        a job leased before the restart still runs with it. Otherwise it is the host's variant.
+        """
+        return self._previous_variant or self.text_encoder_variant()
+
     def plan(self, model_id: str, quant: str, variant: str | None = None) -> list[PlannedFile]:
         """`plan_files` with the host's text encoder variant unless `variant` is given."""
         return plan_files(self.registry, model_id, quant, variant or self.text_encoder_variant())
@@ -462,41 +476,30 @@ class ModelStore:
             free_bytes=self._free_bytes(self.root),
         )
 
-    def runs_on(self, model_id: str, quant: str) -> set[str]:
-        """The quantizations of the model whose files a job routed to `quant` may run on.
-
-        That is `quant` and every quantization bound to the same engine and model type: until jobs run the quantization
-        they are routed to (#5), Wan2GP picks a model type's file by its own `transformer_quantization`, and the router
-        picks the first quantization the worker's model type serves (for the MVP models `bf16`, not the installed `int8`).
-        """
-        model = self.registry.get(model_id)
-        if model is None:
-            return {quant}
-        types = {(binding.engine, binding.model_type) for binding in model.engines if binding.quant == quant}
-        return {quant} | {binding.quant for binding in model.engines if (binding.engine, binding.model_type) in types}
-
     def needed_by_jobs(self) -> set[InstallKey]:
-        """Quantizations that a job waiting or running on this host may run on (see `runs_on`)."""
+        """The quantizations of the routes of the jobs waiting or running on this host."""
         rows = self.db.query(
             "SELECT DISTINCT json_extract(route, '$.model_id') AS model_id, json_extract(route, '$.quant') AS quant FROM jobs "
             "WHERE route IS NOT NULL AND json_extract(route, '$.host_id') = ? "
             "AND state IN ('awaiting_approval', 'queued', 'leased', 'running')",
             (self.host_id,),
         )
-        needed: set[InstallKey] = set()
-        for row in rows:
-            if row["model_id"] and row["quant"]:
-                needed.update((row["model_id"], quant) for quant in self.runs_on(row["model_id"], row["quant"]))
-        return needed
+        return {(row["model_id"], row["quant"]) for row in rows if row["model_id"] and row["quant"]}
+
+    @contextmanager
+    def routing(self) -> Iterator[None]:
+        """Hold off removals and evictions while a job is routed to installed quantizations and queued, so that its
+        quantization stays installed until `needed_by_jobs` counts the job. Enter it before the database transaction.
+        It waits while an install or a text encoder switch places files under the store's lock, a copy included."""
+        with self._lock:
+            yield
 
     def mark_used(self, model_id: str, quant: str) -> None:
-        """Record that a job routed to the quantization used it now (see `runs_on`); eviction removes the least recently used first."""
-        now = to_iso(self._clock())
-        with self.db.transaction() as conn:
-            conn.executemany(
-                "UPDATE installed_models SET last_used_at = ? WHERE model_id = ? AND quant = ? AND state = 'installed'",
-                [(now, model_id, used) for used in sorted(self.runs_on(model_id, quant))],
-            )
+        """Record that a job routed to the quantization used it now; eviction removes the least recently used first."""
+        self.db.execute(
+            "UPDATE installed_models SET last_used_at = ? WHERE model_id = ? AND quant = ? AND state = 'installed'",
+            (to_iso(self._clock()), model_id, quant),
+        )
 
     def register_in_wan2gp(self) -> WgpConfigResult:
         """Merge the store and the host's text encoder variant into `wgp_config.json` (see `merge_wgp_config`)."""
@@ -949,8 +952,8 @@ class ModelStore:
     def _kept(self, extra: Iterable[PlannedFile] = ()) -> set[str]:
         """Path keys that must stay although no installed quantization references them.
 
-        The files of active installs and a switch, `extra`, and the files of every quantization a waiting or running job
-        may run on, with the host's text encoder variant and, until the worker restarted after a switch, the previous one.
+        The files of active installs and a switch, `extra`, and the files of the quantization of every waiting or running
+        job, with the host's text encoder variant and, until the worker restarted after a switch, the previous one.
         """
         keep = {key for key, count in self._reserved.items() if count > 0}
         keep.update(file.key for file in extra)

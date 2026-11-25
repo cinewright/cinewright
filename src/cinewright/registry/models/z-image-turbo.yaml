@@ -28,7 +28,8 @@ license:
   commercial_use: true
   geo_exclusions: []
 quantizations:
-  # Wan2GP picks the file by its transformer_quantization setting: bf16 = first URL, int8 = the quanto int8 file.
+  # Wan2GP picks the file by the transformer_quantization override that the Wan2GP adapter sets for each job:
+  # bf16 = first URL, int8 = the quanto int8 file.
   - id: bf16
     format: safetensors
     files:
@@ -54,6 +55,9 @@ defaults:
   steps: 8
   guidance: 0
   resolution: 1024x1024
+# Ranks first among t2i models of equal cost: it is made for images, while LTX-2.3 and Wan 2.2 T2V render a short
+# clip in image mode and keep its first frame. Z-Image offers only t2i, so no other capability is affected.
+preference: 1
 source:
   provider: huggingface
   repo: DeepBeepMeep/Z-Image

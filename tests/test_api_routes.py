@@ -62,7 +62,7 @@ def test_every_route_returns_its_declared_model_or_a_problem(client):
     call("POST", "/models/{model_id}/install", 404, path="/models/unknown/install?quant=bf16")
     call("POST", "/models/{model_id}/install", 409, path="/models/test-video/install?quant=bf16")  # its licence excludes DE
     call("POST", "/models/{model_id}/install", 202, path="/models/test-image/install?quant=Q8_0")  # fails in the background
-    call("DELETE", "/models/{model_id}", 404, path="/models/test-image?quant=bf16")  # not installed
+    call("DELETE", "/models/{model_id}", 404, path="/models/test-video?quant=bf16")  # not installed
     wait_for_install_state(client, "test-image", "Q8_0", "failed")  # the test core has no network
     call("DELETE", "/models/{model_id}", 204, path="/models/test-image?quant=Q8_0")
     call("GET", "/calibration", 200, schemas.CalibrationReport)
@@ -178,7 +178,7 @@ def test_infeasible_submit_lists_the_router_reasons(client):
     )
     assert problem.model_extra["reasons"] == [
         "feasibility: no online worker on local serves wan2gp test_image",
-        "feasibility: no online worker on local serves wan2gp test_image_q8",
+        "feasibility: test-image Q8_0 is not installed on local",
     ]
     estimate = client.post(f"{API}/estimate", json={"capability": "t2i", "prompt": "x"}).json()
     assert estimate["feasible"] is False and estimate["reasons"] == problem.model_extra["reasons"]

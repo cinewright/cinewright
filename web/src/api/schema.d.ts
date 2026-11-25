@@ -1072,6 +1072,11 @@ export interface components {
         };
         /** JobCompletion */
         JobCompletion: {
+            /**
+             * Accepted Extra
+             * @description Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them
+             */
+            accepted_extra?: string[] | null;
             /** Engine Version */
             engine_version?: string | null;
             /** Lease Id */
@@ -1442,6 +1447,8 @@ export interface components {
             model?: components["schemas"]["ProvenanceModel"] | null;
             /** Negative Prompt */
             negative_prompt?: string | null;
+            /** @description null for uploaded inputs and for records stored by earlier releases */
+            params?: components["schemas"]["ProvenanceParams"] | null;
             /** Parents */
             parents?: string[];
             /** Prompt */
@@ -1507,6 +1514,36 @@ export interface components {
             name: string;
             /** Quant */
             quant: string;
+        };
+        /**
+         * ProvenanceParams
+         * @description The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
+         *     them, for example to a distilled model's fixed steps or to a frame count the model can render.
+         */
+        ProvenanceParams: {
+            /**
+             * Extra
+             * @description The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them
+             */
+            extra?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Fps
+             * @description null for images
+             */
+            fps?: number | null;
+            /**
+             * Frames
+             * @description null for images
+             */
+            frames?: number | null;
+            /** Guidance */
+            guidance?: number | null;
+            /** Resolution */
+            resolution?: string | null;
+            /** Steps */
+            steps?: number | null;
         };
         /** RecipeList */
         RecipeList: {
