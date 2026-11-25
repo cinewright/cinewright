@@ -26,6 +26,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cinewright.api.problems import install_problem_handlers, problem_response
 from cinewright.api.routes import api_router
+from cinewright.api.routes.jobs import stream_event_schemas
 from cinewright.api.schemas import API_PREFIX, API_VERSION, PROBLEM_NOT_FOUND
 from cinewright.config import Config, load_config
 from cinewright.core.core import Core
@@ -134,6 +135,26 @@ def _build_mcp(app: FastAPI, port: int) -> tuple[Any, httpx.AsyncClient] | None:
     return build_mcp_app(client), client
 
 
+def _add_stream_event_schemas(app: FastAPI) -> None:
+    """Have the OpenAPI document also list the schemas the `text/event-stream` response of `GET /events` refers to.
+
+    FastAPI registers only models of JSON bodies and responses as components (see `stream_event_schemas`).
+    """
+    generate = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            document = generate()  # FastAPI keeps it as `app.openapi_schema`; completed in place
+            schemas = document.setdefault("components", {}).setdefault("schemas", {})
+            for name, schema in stream_event_schemas().items():
+                if schemas.setdefault(name, schema) != schema:
+                    raise RuntimeError(f"Two different OpenAPI schemas are named {name}")
+            document["components"]["schemas"] = dict(sorted(schemas.items()))
+        return app.openapi_schema
+
+    app.openapi = openapi
+
+
 def create_app(
     core: CoreService | None = None,
     config: Config | None = None,
@@ -216,6 +237,7 @@ def create_app(
     app.state.enrollment_token = getattr(core, "enrollment_token", None)
     install_problem_handlers(app)
     app.include_router(api_router())
+    _add_stream_event_schemas(app)
 
     built = _build_mcp(app, config.port)
     if built is not None:

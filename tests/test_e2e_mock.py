@@ -24,16 +24,20 @@ import anyio
 import httpx
 import pytest
 import uvicorn
+from conftest import mark_installed
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from PIL import Image
 
 from cinewright.app import create_app
 from cinewright.config import Config
+from cinewright.core.modelstore import plan_files
+from cinewright.core.registry import Registry
 
 API = "/api/v1"
-# z-image-turbo is bound to Wan2GP's z_image, which the mock worker serves as a stand-in for Wan2GP.
-MODEL = "z-image-turbo"
+# z-image-turbo is bound to Wan2GP's z_image, which the mock worker serves as a stand-in for Wan2GP. Only its int8 is
+# installed, so the job routes to int8 although bf16 comes first in the registry.
+MODEL, QUANT = "z-image-turbo", "int8"
 SEED = 1234
 PROMPT = "A lighthouse on a cliff at dusk"
 TOOLS = ["estimate", "fetch_asset", "job_status", "list_capabilities", "list_cast", "list_recipes", "submit"]
@@ -50,6 +54,10 @@ class LiveCore:
     @property
     def enrollment_token(self) -> str:
         return self.server.config.app.state.enrollment_token
+
+    @property
+    def core(self):
+        return self.server.config.app.state.core
 
 
 @pytest.fixture
@@ -130,6 +138,7 @@ async def mcp_session(url: str) -> tuple[list[str], dict]:
 
 def test_t2i_job_runs_end_to_end_with_the_mock_worker(live_core: LiveCore, mock_worker: Path):
     http = live_core.http
+    mark_installed(live_core.core, (MODEL, QUANT))  # the router routes only installed quantizations
     request = {"capability": "t2i", "prompt": PROMPT, "model": MODEL, "params": {"seed": SEED}}
 
     # Registration: the router finds a route as soon as the worker serves the model.
@@ -147,7 +156,7 @@ def test_t2i_job_runs_end_to_end_with_the_mock_worker(live_core: LiveCore, mock_
     assert submitted.status_code == 202, submitted.text
     job_id = submitted.json()["id"]
     route = submitted.json()["route"]
-    assert (route["model_id"], route["host_id"], route["engine"]) == (MODEL, "local", "wan2gp")
+    assert (route["model_id"], route["quant"], route["host_id"], route["engine"]) == (MODEL, QUANT, "local", "wan2gp")
 
     # A job-filtered stream replays the job's history and ends after its terminal state.
     with http.stream("GET", f"{API}/events", params={"job_id": job_id}, timeout=JOB_TIMEOUT_S) as stream:
@@ -191,7 +200,13 @@ def test_t2i_job_runs_end_to_end_with_the_mock_worker(live_core: LiveCore, mock_
     assert record["prompt"] == PROMPT
     assert record["job_id"] == job_id
     assert (record["model"]["id"], record["model"]["engine"], record["model"]["engine_version"]) == (MODEL, "wan2gp", "mock-1")
-    assert record["model"]["quant"] == route["quant"]
+    assert record["model"]["quant"] == QUANT
+    # The int8 transformer, then the shared files with the host's text encoder variant (int8 until one is chosen).
+    planned = plan_files(Registry.load(), MODEL, QUANT, "int8")
+    assert record["model"]["file_sha256"] == [file.sha256 for file in planned]
+    assert [file.shared for file in planned].count(False) == 1 and len(planned) > 1
+    # Registry defaults fill what the request left open; an image records no frames or fps. The mock reports no extras.
+    assert record["params"] == {"resolution": "1024x1024", "steps": 8, "frames": None, "fps": None, "guidance": 0, "extra": None}
     assert (record["host"]["id"], record["host"]["kind"]) == ("local", "local")
     assert record["client"]["kind"] == "ui"
 

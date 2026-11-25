@@ -229,6 +229,10 @@ a.cw-btn {
   gap: var(--space-4);
 }
 
+.stack--tight {
+  gap: var(--space-2);
+}
+
 .panel {
   padding: var(--space-4);
   border: 1px solid var(--line);
@@ -364,6 +368,11 @@ a.cw-btn {
   font-weight: 500;
 }
 
+.table .table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -487,6 +496,51 @@ a.cw-btn {
   color: var(--ink-strong);
 }
 
+.image-input {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.image-input__thumb {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.image-input__thumb > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.image-input__meta {
+  color: var(--ink-strong);
+}
+
+.image-input__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.job__reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.job-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
 @media (max-width: 1080px) {
   .generate {
     grid-template-columns: minmax(0, 1fr);
@@ -541,6 +595,27 @@ a.cw-btn {
     grid-column: 3;
     grid-row: 2;
   }
+}
+
+/* Models */
+
+.models-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.cw-model-card__foot {
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.model-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 /* Library */
@@ -660,7 +735,7 @@ a.cw-btn {
   color: var(--accent-ink);
 }
 
-/* About dialog */
+/* Dialogs (About, confirmations) */
 
 .dialog {
   width: min(560px, calc(100vw - 2 * var(--space-4)));
@@ -692,6 +767,12 @@ a.cw-btn {
 
 .dialog__body {
   padding: var(--space-4);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
 }
 
 .sr-only {

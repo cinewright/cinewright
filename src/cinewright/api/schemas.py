@@ -28,6 +28,7 @@ DEFAULT_PORT = 8737
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", description="Lowercase hex SHA-256")]
 ModelId = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9.]+)*$", max_length=80)]
+TextEncoderVariant = Literal["bf16", "int8"]
 
 
 class Contract(BaseModel):
@@ -95,6 +96,8 @@ class ClientKind(StrEnum):
 
 
 class EventKind(StrEnum):
+    """Kind of a job event, also its SSE event name; `JobEvent` describes the `data` of each kind."""
+
     STATE = "state"
     PROGRESS = "progress"
     PREVIEW = "preview"
@@ -198,8 +201,20 @@ class HardwareProfile(Contract):
 class Limits(Contract):
     resolutions: list[str] = Field(default_factory=list, description="`WIDTHxHEIGHT` values the model supports")
     max_frames: int | None = None
+    min_frames: int | None = Field(default=None, ge=1, description="Fewest frames of a clip; null for a model without frames (images only)")
+    frames_step: int | None = Field(
+        default=None,
+        ge=1,
+        description="A clip has `min_frames + n * frames_step` frames (n >= 0); null for a model without frames",
+    )
     fps: list[int] = Field(default_factory=list)
     max_duration_s: float | None = None
+
+    @model_validator(mode="after")
+    def _frame_grid(self) -> Self:
+        if (self.min_frames is None) != (self.frames_step is None):
+            raise ValueError("min_frames and frames_step are set together, or both are null")
+        return self
 
 
 class License(Contract):
@@ -293,6 +308,10 @@ class ModelDescriptor(Contract):
     )
     prompt_dialect: PromptDialect = Field(default_factory=PromptDialect)
     defaults: dict[str, Any] = Field(default_factory=dict)
+    preference: int = Field(
+        default=0,
+        description="Routing preference among candidates of equal cost, higher first; ranks before calibration and runtime",
+    )
     source: ModelSource
     engines: list[EngineBinding] = Field(min_length=1)
 
@@ -395,8 +414,12 @@ class CalibrationReport(Contract):
 class ModelQuantState(Contract):
     quant: str
     install_state: InstallState
-    size_bytes: int | None = None
+    size_bytes: int | None = Field(
+        default=None,
+        description="Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files",
+    )
     calibration: list[CalibrationResult] = Field(default_factory=list)
+    error: str | None = Field(default=None, description="Why the last install failed (`failed`), in one sentence; null otherwise")
 
 
 class ModelSummary(Contract):
@@ -407,6 +430,9 @@ class ModelSummary(Contract):
     capabilities: list[Capability]
     license: License
     quantizations: list[ModelQuantState]
+    installed_bytes: int = Field(
+        default=0, description="Disk space of the model's installed quantizations together, each shared file once; 0 when none is"
+    )
 
 
 class ModelDetail(ModelSummary):
@@ -417,8 +443,17 @@ class ModelDetail(ModelSummary):
     engines: list[EngineBinding]
 
 
+class ModelStoreUsage(Contract):
+    """The model store (`<data dir>/models`) as the Models view shows it."""
+
+    total_bytes: int = Field(description="Disk space of every file in the model store, each shared file once")
+    quota_bytes: int | None = Field(description="`settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota")
+    free_bytes: int = Field(description="Free space of the drive that holds the model store, measured for this answer")
+
+
 class ModelList(Contract):
-    items: list[ModelSummary]
+    items: list[ModelSummary] = Field(description="Registry models, without those whose licence excludes `settings.country`")
+    store: ModelStoreUsage | None = Field(default=None, description="Size, quota and free disk space of the model store")
 
 
 class CapabilityEntry(Contract):
@@ -512,25 +547,66 @@ class JobList(Contract):
 
 
 class JobEvent(Contract):
+    """A job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
+
+    Stored events (`state`, `progress`, `log`) have the SSE id `<job_id>:<seq>`. A reconnecting browser resends the
+    last one as `Last-Event-ID`, and the stream replays the stored events after it. Previews are not stored in
+    `job_events` and never replayed: a `preview` has no `id:` line and repeats the `seq` of the job's latest stored
+    event, so `Last-Event-ID` always names a stored event. After a stream opens or reconnects (after its replay), the
+    core sends the latest kept preview of each running job the stream covers once; later previews follow live.
+    """
+
     job_id: str
-    seq: int = Field(description="Per-job sequence number, starting at 1")
+    seq: int = Field(description="Per-job sequence number of the stored events, starting at 1; a `preview` repeats the latest one")
     kind: EventKind
-    data: dict[str, Any]
+    data: dict[str, Any] = Field(
+        description="By `kind`. "
+        "`state`: `state` (a JobState), plus where set: `worker_id` (`leased`), `reason` (why the job was queued again, "
+        "cancelled or failed after its last attempt), `outputs` (`succeeded`: the output SHA-256 values in completion "
+        "order) and `error` (a JobError: `failed`, or `cancelled` while running). "
+        "`progress`: a Progress (`phase`, `step`, `total_steps`, `percent`). "
+        "`preview`: `media_type` and `data_base64` (the frame as base64), as the worker sent them; the core does not "
+        "check them, the shipped worker sends `image/png`, `image/jpeg` or `image/webp` of at most 256 KiB. "
+        "`log`: `message`, a sentence for people. Log rows that cores before migration 0002 stored for an upload also "
+        "carry `output` (`name`, `sha256`, `media_type`, `size_bytes`), and replay still sends them as stored; uploads "
+        "are now the job's outputs, and workers may not send `output`."
+    )
     created_at: datetime
 
 
 class SystemEventKind(StrEnum):
+    """Kind of a non-job event, also its SSE event name and the `SystemEvent` field that carries its payload."""
+
     ENGINE = "engine"
+    MODEL = "model"
+
+
+class ModelInstall(Contract):
+    """A model quantization's new install state: download progress, the end of an install, or a removal."""
+
+    model_id: ModelId
+    quant: str
+    install_state: InstallState
+    progress: Progress | None = Field(
+        default=None, description="While `downloading`: share of the bytes this install downloads (`phase` `download`)"
+    )
+    downloaded_bytes: int | None = Field(default=None, description="While `downloading`: bytes downloaded so far")
+    total_bytes: int | None = Field(default=None, description="While `downloading`: bytes this install downloads")
+    error: SetupError | None = Field(default=None, description="Why the install failed (`failed`); null otherwise")
 
 
 class SystemEvent(Contract):
-    """A non-job event of `GET /events`: the SSE event name is `kind`; it has no id and is never replayed.
+    """A non-job event of `GET /events`: the SSE event name is `kind`, the `data:` line is this object.
 
+    Only a stream without `job_id` carries them. They have no id, are not stored and never replayed, so a stream
+    gets only those published while it is open; reload `GET /system` or `GET /models` whenever the stream opens.
     `engine`: progress or a state change of engine provisioning, with the engine as `GET /system` reports it.
+    `model`: progress or a state change of a model install, also a removal or an eviction (`absent`).
     """
 
     kind: SystemEventKind
     engine: EngineInfo | None = Field(default=None, description="For `engine`: the engine's new state, progress and error")
+    model: ModelInstall | None = Field(default=None, description="For `model`: the quantization's new install state and progress")
     created_at: datetime
 
 
@@ -559,6 +635,21 @@ class ProvenanceModel(Contract):
     engine: str
     engine_version: str | None = None
     file_sha256: list[Sha256] = Field(default_factory=list)
+
+
+class ProvenanceParams(Contract):
+    """The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
+    them, for example to a distilled model's fixed steps; a clip's frame count lies on the model's frame grid."""
+
+    resolution: str | None = None
+    steps: int | None = None
+    frames: int | None = Field(default=None, description="null for images")
+    fps: int | None = Field(default=None, description="null for images")
+    guidance: float | None = None
+    extra: dict[str, Any] | None = Field(
+        default=None,
+        description="The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them",
+    )
 
 
 class ProvenanceLora(Contract):
@@ -591,6 +682,7 @@ class Provenance(Contract):
     prompt: str | None = None
     negative_prompt: str | None = None
     seed: int | None = None
+    params: ProvenanceParams | None = Field(default=None, description="null for uploaded inputs and for records stored by earlier releases")
     loras: list[ProvenanceLora] = Field(default_factory=list)
     host: ProvenanceHost | None = None
     created_at: datetime
@@ -624,6 +716,15 @@ class WorkerHealth(Contract):
     detail: str | None = None
 
 
+class TextEncoderSwitch(Contract):
+    """A text encoder variant switch of a host since the core started: running, or failed."""
+
+    variant: TextEncoderVariant = Field(description="The variant the switch installs")
+    error: SetupError | None = Field(
+        default=None, description="Why the switch failed; the previous variant stays in use. null while the switch runs"
+    )
+
+
 class Host(Contract):
     id: str
     name: str
@@ -637,10 +738,27 @@ class Host(Contract):
         description="State and VRAM use of the host's worker, as last reported by a worker registered since the core started. "
         "On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker",
     )
+    text_encoder_variant: TextEncoderVariant | None = Field(
+        default=None,
+        description="Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies",
+    )
+    text_encoder_switch: TextEncoderSwitch | None = Field(
+        default=None,
+        description="The host's last text encoder switch while it runs or after it failed; null when none ran since the core "
+        "started or the last one succeeded, which `text_encoder_variant` then shows",
+    )
 
 
 class HostList(Contract):
     items: list[Host]
+
+
+class HostPatch(Contract):
+    text_encoder_variant: TextEncoderVariant | None = Field(
+        default=None,
+        description="Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, "
+        "restarts the worker and removes the previous variant's files. Refused while a job runs on the host",
+    )
 
 
 class Approval(Contract):
@@ -809,6 +927,11 @@ class JobCompletion(Contract):
     lease_id: str
     outputs: list[CompletedOutput] = Field(min_length=1)
     engine_version: str | None = None
+    accepted_extra: list[Annotated[str, Field(max_length=64)]] | None = Field(
+        default=None,
+        max_length=100,
+        description="Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them",
+    )
 
 
 class JobFailure(Contract):

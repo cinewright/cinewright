@@ -5,25 +5,28 @@ Pure functions over snapshots the core passes in. Check order for every candidat
 
 1. policy: the host accepts the job's data class (biometric data never leaves local hosts), and
    the model licence has no geo exclusion for the configured country (`EU` covers EU members)
-2. feasibility: capability, pinned quantization, model limits, an online worker on the host
-   that serves the engine model, calibration not `wont_run`
+2. feasibility: capability, pinned quantization, model limits (resolution; for a clip also frames, on the
+   model's grid, fps and duration, which a still image skips), the quantization installed on the host (only
+   for hosts whose installed quantizations the core passes in: the local model store), an online worker on
+   the host that serves the engine model, calibration not `wont_run`
 3. cost: local hosts cost 0 EUR; other hosts have no price yet, so their cost is unknown
 4. runtime: `seconds_per_step * steps` when calibrated, else unknown
 
-The first failing check is the candidate's reason. Feasible candidates are ranked by cost,
-calibration status and runtime, then by registry order.
+The first failing check is the candidate's reason. Feasible candidates are ranked by cost, the
+model's registry `preference` (higher first), calibration status and runtime, then by registry order.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import Any
 
 from cinewright.api.schemas import (
     CalibrationResult,
     CalibrationStatus,
+    Capability,
     DataClass,
     HostKind,
     JobParams,
@@ -36,6 +39,9 @@ from cinewright.api.schemas import (
 EU_COUNTRIES = frozenset("AT BE BG CY CZ DE DK EE ES FI FR GR HR HU IE IT LT LU LV MT NL PL PT RO SE SI SK".split())
 _DATA_CLASS_RANK = {DataClass.PUBLIC: 0, DataClass.PRIVATE: 1, DataClass.BIOMETRIC: 2}
 _STATUS_RANK = {CalibrationStatus.RUNS: 0, CalibrationStatus.SLOW: 1, None: 2}
+# Jobs that return one still image. Wan2GP's image mode renders the model's shortest clip and keeps its first frame, so
+# frames, fps and duration do not apply: neither the limit checks nor provenance (`core/assets.py`) use them.
+IMAGE_CAPABILITIES = frozenset({Capability.T2I, Capability.I2I})
 
 
 @dataclass(frozen=True)
@@ -98,17 +104,37 @@ def effective_params(request: JobRequest, model: ModelDescriptor, seed: int | No
     return JobParams.model_validate({**params, "extra": extra})
 
 
-def _limit_problem(params: JobParams, model: ModelDescriptor) -> str | None:
+def _limit_problem(params: JobParams, model: ModelDescriptor, capability: Capability) -> str | None:
     limits = model.limits
     if params.resolution and limits.resolutions and params.resolution not in limits.resolutions:
         return f"{model.id} does not support {params.resolution} (supported: {', '.join(limits.resolutions)})"
+    if capability in IMAGE_CAPABILITIES:  # the engine ignores frames, fps and duration for a still image
+        return None
     if params.frames and limits.max_frames and params.frames > limits.max_frames:
         return f"{model.id} renders at most {limits.max_frames} frames, {params.frames} requested"
+    if params.frames:
+        problem = _frame_grid_problem(params.frames, model)
+        if problem:
+            return problem
     if params.fps and limits.fps and params.fps not in limits.fps:
         return f"{model.id} does not support {params.fps} fps"
     if params.duration_s and limits.max_duration_s and params.duration_s > limits.max_duration_s:
         return f"{model.id} renders at most {limits.max_duration_s:g} s, {params.duration_s:g} s requested"
     return None
+
+
+def _frame_grid_problem(frames: int, model: ModelDescriptor) -> str | None:
+    """Why a clip of `frames` frames is off the model's grid (`min_frames + n * frames_step`); None when it is on it."""
+    first, step = model.limits.min_frames, model.limits.frames_step
+    if first is None or step is None:
+        return None
+    if frames < first:
+        return f"{model.id} renders at least {first} frames, {frames} requested"
+    if (frames - first) % step == 0:
+        return None
+    lower = frames - (frames - first) % step
+    nearest = [lower, lower + step] if model.limits.max_frames is None or lower + step <= model.limits.max_frames else [lower]
+    return f"{model.id} renders {first} + a multiple of {step} frames, {frames} requested (nearest: {' or '.join(str(n) for n in nearest)})"
 
 
 def _calibration(
@@ -131,6 +157,7 @@ def _calibration(
 class _Candidate:
     route: Route
     cost: float | None
+    preference: int
     status: CalibrationStatus | None
     eta: float | None
     order: tuple[int, int, int]
@@ -144,8 +171,14 @@ def plan(
     workers: Sequence[WorkerInfo],
     calibration: Sequence[CalibrationResult],
     settings: Settings,
+    *,
+    installed: Mapping[str, Set[tuple[str, str]]],
 ) -> Plan:
-    """Choose a route for `request`; `data_class` is the strictest class of the request and its inputs."""
+    """Choose a route for `request`; `data_class` is the strictest class of the request and its inputs.
+
+    `installed` maps a host id to the (model id, quantization) pairs installed on it. A host it does not name is
+    not checked: the core knows only the local model store (remote hosts follow with #17 and #18).
+    """
     if request.model is not None:
         candidates_models = [m for m in models if m.id == request.model]
         if not candidates_models:
@@ -181,7 +214,7 @@ def plan(
             reasons.append(f"feasibility: {model.id} has no quantization {request.quant}")
             continue
         params = effective_params(request, model)
-        problem = _limit_problem(params, model)
+        problem = _limit_problem(params, model, request.capability)
         if problem:
             reasons.append(f"feasibility: {problem}")
             continue
@@ -193,6 +226,10 @@ def plan(
                 reasons.append(f"feasibility: no engine binding for {model.id} {quant.id}")
                 continue
             for host_index, host in accepted_hosts:
+                host_installed = installed.get(host.id)
+                if host_installed is not None and (model.id, quant.id) not in host_installed:
+                    reasons.append(f"feasibility: {model.id} {quant.id} is not installed on {host.id}")
+                    continue
                 binding = next(
                     (
                         b
@@ -219,13 +256,14 @@ def plan(
                 route_reasons = [
                     f"policy: host {host.id} accepts {data_class} data",
                     f"policy: the licence of {model.id} allows {settings.country}",
+                    *([f"feasibility: {model.id} {quant.id} is installed on {host.id}"] if host_installed is not None else []),
                     f"feasibility: a worker on {host.id} serves {binding.engine} {binding.model_type}",
                     f"feasibility: calibration on {host.id}: {status or 'not measured'}",
                     f"cost: €{cost:.2f} on {host.id}" if cost is not None else f"cost: unknown on {host.id}",
                     f"runtime: {eta:.0f} s" if eta is not None else "runtime: unknown until calibrated",
                 ]
                 route = Route(model_id=model.id, quant=quant.id, host_id=host.id, engine=binding.engine, reasons=route_reasons)
-                feasible.append(_Candidate(route, cost, status, eta, (model_index, quant_index, host_index)))
+                feasible.append(_Candidate(route, cost, model.preference, status, eta, (model_index, quant_index, host_index)))
 
     if not feasible:
         return Plan(None, _unique(reasons))
@@ -233,6 +271,7 @@ def plan(
         feasible,
         key=lambda c: (
             math.inf if c.cost is None else c.cost,
+            -c.preference,
             _STATUS_RANK[c.status],
             math.inf if c.eta is None else c.eta,
             c.order,

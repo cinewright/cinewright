@@ -19,7 +19,7 @@ import httpx
 import psutil
 import pytest
 import uvicorn
-from conftest import fake_detect
+from conftest import fake_detect, mark_installed
 
 from cinewright.app import create_app
 from cinewright.config import Config
@@ -89,6 +89,7 @@ def supervised(home: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     core = Core(Config(home=home, port=port), detect=fake_detect)
+    mark_installed(core, ("z-image-turbo", "int8"))
     grace = getattr(request, "param", GRACE_S)
     supervisor = WorkerSupervisor(WorkerLaunch(python=Path(sys.executable), engine="mock"), grace_seconds=grace, backoff_initial=0.5)
     app = create_app(core, supervisor=supervisor)

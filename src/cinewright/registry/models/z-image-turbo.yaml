@@ -18,7 +18,10 @@ limits:
     544x960, 832x624, 624x832, 720x720, 832x480, 480x832, 672x384, 384x672, 512x512, 576x320,
     320x576, 448x448, 448x256, 256x448, 320x320,
   ]
+  # Images only: Wan2GP's z_image has no frames_minimum or frames_steps.
   max_frames: null
+  min_frames: null
+  frames_step: null
   fps: []
   max_duration_s: null
 license:
@@ -28,7 +31,8 @@ license:
   commercial_use: true
   geo_exclusions: []
 quantizations:
-  # Wan2GP picks the file by its transformer_quantization setting: bf16 = first URL, int8 = the quanto int8 file.
+  # Wan2GP picks the file by the transformer_quantization override that the Wan2GP adapter sets for each job:
+  # bf16 = first URL, int8 = the quanto int8 file.
   - id: bf16
     format: safetensors
     files:
@@ -54,6 +58,9 @@ defaults:
   steps: 8
   guidance: 0
   resolution: 1024x1024
+# Ranks first among t2i models of equal cost: it is made for images, while LTX-2.3 and Wan 2.2 T2V render a short
+# clip in image mode and keep its first frame. Z-Image offers only t2i, so no other capability is affected.
+preference: 1
 source:
   provider: huggingface
   repo: DeepBeepMeep/Z-Image
