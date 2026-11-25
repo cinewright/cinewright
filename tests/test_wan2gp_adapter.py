@@ -11,7 +11,7 @@ finds nothing; its global quantization is int8, and the session's own availabili
 only that one.
 
 The live probe runs only when CINEWRIGHT_WAN2GP_ROOT (a Wan2GP checkout) and CINEWRIGHT_WAN2GP_PYTHON
-(its Python) are set. It imports the adapter in that interpreter and calls capabilities() and
+(its Python) are set and CINEWRIGHT_GPU_TESTS=1 (marker `gpu`). It imports the adapter in that interpreter and calls capabilities() and
 health() with Hugging Face access switched off; it never generates and never loads model weights.
 """
 
@@ -1293,7 +1293,7 @@ print(sys.argv[4] + json.dumps({
 """
 
 
-@pytest.mark.skipif(not (LIVE_ROOT and LIVE_PYTHON), reason="set CINEWRIGHT_WAN2GP_ROOT and CINEWRIGHT_WAN2GP_PYTHON")
+@pytest.mark.gpu
 def test_wan2gp_live_probe(tmp_path):
     src = Path(__file__).resolve().parents[1] / "src"
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}

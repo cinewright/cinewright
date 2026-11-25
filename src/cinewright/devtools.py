@@ -3,12 +3,21 @@
   python -m cinewright.devtools openapi [PATH]            write the OpenAPI document (default: stdout)
   python -m cinewright.devtools surface                   print the public surface, one sorted line per item
   python -m cinewright.devtools upstream-check [--json]   report a Wan2GP commit eligible for a pin update
+  python -m cinewright.devtools smoke [--installer EXE [--model-store DIR]]
+                                                          GPU smoke test against the running core, or against a
+                                                          temporary installation of EXE, with a report
 
 The surface (routes, request and response schemas, MCP tools) is the public contract;
 compare it between base and head: a change there is a `feat`.
 
 upstream-check exits 0 when no upstream commit is eligible (and prints nothing), 10 when one
 is, and 1 when the check failed (see cinewright.upstream_check).
+
+smoke runs one short generation per installed smoke model and writes <data dir>/logs/smoke-<version>.json plus a
+Markdown summary. It exits 0 when every model produced its output, 1 when a generation failed and 2 when it could
+not run (see cinewright.smoke). With --installer it installs EXE silently into a temporary folder, puts the existing
+installation's uninstall entry and shortcuts back as they were, starts that installation's core with a temporary data
+directory, installs the smoke models there and tests them (see cinewright.smoke_installer).
 """
 
 from __future__ import annotations
@@ -92,7 +101,22 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("surface")
     upstream = sub.add_parser("upstream-check")
     upstream.add_argument("--json", action="store_true", help="print the report as one JSON object")
+    smoke_args = sub.add_parser("smoke")
+    smoke_args.add_argument(
+        "--installer", type=Path, metavar="EXE", help="test a temporary installation of this installer (CinewrightSetup-<version>.exe)"
+    )
+    smoke_args.add_argument(
+        "--model-store",
+        type=Path,
+        metavar="DIR",
+        help="with --installer: use DIR, a folder of downloaded models, as the temporary installation's models folder "
+        "(linked, not copied: installs reuse its files and add the ones it lacks)",
+    )
     args = parser.parse_args(argv)
+    if args.cmd == "smoke":
+        from cinewright import smoke
+
+        return smoke.run(installer=args.installer, model_store=args.model_store)
     if args.cmd == "upstream-check":
         from cinewright import upstream_check
 
