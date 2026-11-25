@@ -177,6 +177,20 @@ def test_an_estimate_pinned_to_a_quantization_that_is_not_installed_names_it(mvp
     assert estimate.reasons == [f"feasibility: {LTX} bf16 is not installed on local"]
 
 
+def test_a_t2i_estimate_with_every_mvp_model_installed_picks_z_image_turbo(mvp):
+    models = mvp.registry.all()
+    mark_installed(mvp, *((model.id, quant.id) for model in models for quant in model.quantizations))
+    register(mvp, *{binding.model_type for model in models for binding in model.engines})
+
+    estimate = mvp.estimate(JobRequest.model_validate({"capability": "t2i", "prompt": PROMPT}))
+
+    assert estimate.feasible
+    assert estimate.route.model_id == "z-image-turbo"
+    # Not because the video models could not run it: LTX-2.3 comes first in registry order.
+    for video_model in (LTX, "wan-2.2-t2v-14b"):
+        assert mvp.estimate(JobRequest.model_validate({"capability": "t2i", "prompt": PROMPT, "model": video_model})).feasible
+
+
 def test_an_asset_with_provenance_stored_in_the_0_0_1_format_still_loads(mvp):
     sha256 = "e" * 64
     # A record as release 0.0.1 stored it: no `params`, every field it knew.
