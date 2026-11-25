@@ -1,16 +1,3 @@
 {
-  "extraKnownMarketplaces": {
-    "nullthrone-governance": {
-      "source": {
-        "source": "github",
-        "repo": "nullthrone/governance",
-        "ref": "d298535cdb31d29ebb82c0fcebee3234338b2d18"
-      },
-      "autoUpdate": false
-    }
-  },
-  "enabledPlugins": {
-    "governance@nullthrone-governance": true
-  },
   "attribution": false
 }
