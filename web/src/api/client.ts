@@ -17,6 +17,7 @@ export type Estimate = Schemas['Estimate'];
 export type HardwareProfile = Schemas['HardwareProfile'];
 export type Host = Schemas['Host'];
 export type HostPatch = Schemas['HostPatch'];
+export type InstallRefusal = Schemas['InstallRefusal'];
 export type Job = Schemas['Job'];
 export type JobError = Schemas['JobError'];
 export type JobRequest = Schemas['JobRequest'];
@@ -27,6 +28,7 @@ export type ModelSummary = Schemas['ModelSummary'];
 export type Priority = Schemas['Priority'];
 export type Progress = Schemas['Progress'];
 export type Provenance = Schemas['Provenance'];
+export type QuotaEviction = Schemas['QuotaEviction'];
 export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
 export type WorkerHealth = Schemas['WorkerHealth'];
@@ -59,6 +61,12 @@ export class ApiError extends Error {
     this.problem = problem;
   }
 
+  /** The stable `code` of a refusal, e.g. `eviction_needed` or `not_enough_space`, or null. */
+  get code(): string | null {
+    const code = this.problem?.code;
+    return typeof code === 'string' ? code : null;
+  }
+
   /** Router findings attached to an infeasible problem (409). */
   get reasons(): string[] {
     const reasons = this.problem?.reasons;
@@ -83,22 +91,46 @@ export function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function isQuotaEviction(value: unknown): value is QuotaEviction {
+  if (typeof value !== 'object' || value === null) return false;
+  const { model_id, quant, name, size_bytes } = value as Record<string, unknown>;
+  return typeof model_id === 'string' && typeof quant === 'string' && typeof name === 'string' && typeof size_bytes === 'number';
+}
+
+/**
+ * The removals an install refused with `eviction_needed` (409) asks to confirm, or null for any other error. Send the
+ * install again with these as `evict` to remove them first.
+ */
+export function evictionNeeded(error: unknown): { evictions: QuotaEviction[]; freesBytes: number } | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'eviction_needed' || !error.problem) return null;
+  const { evictions, frees_bytes: freesBytes } = error.problem;
+  if (!Array.isArray(evictions) || evictions.length === 0 || !evictions.every(isQuotaEviction)) return null;
+  if (typeof freesBytes !== 'number') return null;
+  return { evictions, freesBytes };
+}
+
+/** A query parameter: one value, a value per repetition (`?evict=a&evict=b`), or left out when undefined. */
+export type QueryValue = string | readonly string[] | undefined;
+
 /** Substitute `{name}` segments of a contract path. */
-export function apiUrl(path: ApiPath, params: Record<string, string> = {}, query: Record<string, string | undefined> = {}): string {
+export function apiUrl(path: ApiPath, params: Record<string, string> = {}, query: Record<string, QueryValue> = {}): string {
   const filled = path.replace(/\{(\w+)\}/g, (_, name: string) => {
     const value = params[name];
     if (value === undefined) throw new Error(`Missing path parameter ${name} for ${path}`);
     return encodeURIComponent(value);
   });
   const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) if (value !== undefined) search.set(key, value);
+  for (const [key, value] of Object.entries(query)) {
+    if (typeof value === 'string') search.append(key, value);
+    else for (const item of value ?? []) search.append(key, item);
+  }
   const qs = search.toString();
   return qs ? `${filled}?${qs}` : filled;
 }
 
 interface RequestOptions {
   params?: Record<string, string>;
-  query?: Record<string, string | undefined>;
+  query?: Record<string, QueryValue>;
   /** Sent as JSON. */
   body?: unknown;
   /** Sent as the raw body, with `mediaType` as its Content-Type (uploads; the core refuses multipart). */
@@ -179,9 +211,15 @@ export const api = {
   capabilities: (signal?: AbortSignal) => request<Schemas['CapabilityList']>('GET', '/api/v1/capabilities', { signal }),
   calibration: (signal?: AbortSignal) => request<Schemas['CalibrationReport']>('GET', '/api/v1/calibration', { signal }),
   models: (signal?: AbortSignal) => request<Schemas['ModelList']>('GET', '/api/v1/models', { signal }),
-  /** Starts the install in the background (202); progress follows as `model` events. */
-  installModel: (modelId: string, quant: string) =>
-    request<void>('POST', '/api/v1/models/{model_id}/install', { params: { model_id: modelId }, query: { quant } }),
+  /**
+   * Starts the install in the background (202); progress follows as `model` events. `evict` confirms the removals an
+   * `eviction_needed` refusal listed (see `evictionNeeded`).
+   */
+  installModel: (modelId: string, quant: string, evict: readonly Pick<QuotaEviction, 'model_id' | 'quant'>[] = []) =>
+    request<void>('POST', '/api/v1/models/{model_id}/install', {
+      params: { model_id: modelId },
+      query: { quant, evict: evict.map((item) => `${item.model_id}:${item.quant}`) },
+    }),
   /** Removes one quantization, or every one of the model when `quant` is left out. */
   removeModel: (modelId: string, quant?: string) =>
     request<void>('DELETE', '/api/v1/models/{model_id}', { params: { model_id: modelId }, query: { quant } }),

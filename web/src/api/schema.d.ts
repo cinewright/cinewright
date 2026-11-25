@@ -463,8 +463,11 @@ export interface paths {
          * Install Model
          * @description Install a quantization with the shared files it needs, in the background.
          *
-         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota
-         *     (it may remove the least recently used models first), an install in progress, the licence's country exclusions.
+         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota, an
+         *     install in progress, the licence's country exclusions. With a quota, the least recently used quantizations no job
+         *     needs are removed once the install is registered, so a failed download removes nothing. When the drive holds the
+         *     download only after removing them, the install is refused with `eviction_needed`, which lists them with their sizes;
+         *     sent again with each of them in `evict`, it removes them first, and they stay removed if the download fails.
          *     Progress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.
          */
         post: operations["installModel"];
@@ -1041,6 +1044,42 @@ export interface components {
              * @description Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, restarts the worker and removes the previous variant's files. Refused while a job runs on the host
              */
             text_encoder_variant?: ("bf16" | "int8") | null;
+        };
+        /**
+         * InstallRefusal
+         * @description An install refused before any byte was downloaded or removed (409); `detail` gives cause and consequence.
+         */
+        InstallRefusal: {
+            /**
+             * Code
+             * @description Stable reason, for example `eviction_needed`, `quota_exceeded`, `not_enough_space`, `installing`, `switching` or `licence`
+             */
+            code?: string | null;
+            /** Detail */
+            detail?: string | null;
+            /**
+             * Evictions
+             * @description Only with `eviction_needed`: the installed quantizations the quota removes first, in removal order; send each as `evict` to confirm
+             */
+            evictions?: components["schemas"]["QuotaEviction"][] | null;
+            /**
+             * Frees Bytes
+             * @description Only with `eviction_needed`: disk space removing all of them frees, less than the sum of their sizes when they share files with quantizations that stay
+             */
+            frees_bytes?: number | null;
+            /** Instance */
+            instance?: string | null;
+            /** Status */
+            status: number;
+            /** Title */
+            title: string;
+            /**
+             * Type
+             * @default about:blank
+             */
+            type: string;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * InstallState
@@ -3462,6 +3501,8 @@ export interface operations {
             query?: {
                 /** @description Quantization to install (required) */
                 quant?: string | null;
+                /** @description An installed quantization you agree to remove before the download, written `<model_id>:<quant>`; repeat it for each one that an `eviction_needed` refusal listed */
+                evict?: string[];
             };
             header?: never;
             path: {
@@ -3496,7 +3537,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Problem"];
+                    "application/json": components["schemas"]["InstallRefusal"];
                     "application/problem+json": unknown;
                 };
             };

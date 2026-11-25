@@ -482,6 +482,26 @@ class ModelList(Contract):
     store: ModelStoreUsage | None = Field(default=None, description="Size, quota and free disk space of the model store")
 
 
+class InstallRefusal(Problem):
+    """An install refused before any byte was downloaded or removed (409); `detail` gives cause and consequence."""
+
+    code: str | None = Field(
+        default=None,
+        description="Stable reason, for example `eviction_needed`, `quota_exceeded`, `not_enough_space`, `installing`, `switching` "
+        "or `licence`",
+    )
+    evictions: list[QuotaEviction] | None = Field(
+        default=None,
+        description="Only with `eviction_needed`: the installed quantizations the quota removes first, in removal order; send each "
+        "as `evict` to confirm",
+    )
+    frees_bytes: int | None = Field(
+        default=None,
+        description="Only with `eviction_needed`: disk space removing all of them frees, less than the sum of their sizes when they "
+        "share files with quantizations that stay",
+    )
+
+
 class CapabilityEntry(Contract):
     capability: Capability
     model_id: ModelId

@@ -23,12 +23,19 @@ from conftest import API, BASE_URL, FakeClock, assert_problem, fake_detect, fini
 from fastapi.testclient import TestClient
 from test_core_modelstore import UMT5_INT8, WAN_I2V_INT8, WAN_T2V_INT8, Z_IMAGE_INT8_FILES, FakeHub, fixture_registry
 
-from cinewright.api.schemas import ClientKind, JobRequest, LeaseRequest, ModelInstall, SystemEventKind, WorkerRegistration
+from cinewright.api.schemas import (
+    ClientKind,
+    InstallRefusal,
+    JobRequest,
+    LeaseRequest,
+    ModelInstall,
+    SystemEventKind,
+    WorkerRegistration,
+)
 from cinewright.app import create_app
 from cinewright.config import Config
 from cinewright.core.clock import to_iso
 from cinewright.core.core import Core
-from cinewright.core.errors import Conflict
 from cinewright.core.modelstore import GB, STAGING_DIR, plan_files
 from cinewright.core.supervisor import SupervisorStatus
 from cinewright.db.database import Database
@@ -238,10 +245,13 @@ def test_install_requests_must_name_a_known_quantization(store):
 def test_an_install_that_does_not_fit_is_refused_before_any_byte_is_downloaded(store):
     store.free = 100
 
-    problem = assert_problem(store.client.post(f"{API}/models/z-image-turbo/install", params={"quant": "int8"}), 409)
+    response = store.client.post(f"{API}/models/z-image-turbo/install", params={"quant": "int8"})
+    problem = assert_problem(response, 409)
 
     assert problem.model_extra["code"] == "not_enough_space"
     assert problem.detail.startswith("Installing Z-Image Turbo 6B int8 needs ") and "more free space" in problem.detail
+    refusal = InstallRefusal.model_validate(response.json())  # the 409 as openapi.json declares it
+    assert (refusal.code, refusal.evictions, refusal.frees_bytes) == ("not_enough_space", None, None)
     assert store.hub.requests == []
     assert store.quant("z-image-turbo", "int8")["install_state"] == "absent"
 
@@ -445,12 +455,15 @@ def test_closing_the_core_during_an_install_leaves_the_model_the_quota_would_rem
         restarted.core.close()
 
 
-def test_with_room_on_the_drive_the_quota_removes_the_least_recently_used_model_after_the_install(store, monkeypatch):
+@pytest.mark.parametrize("evict", [[], ["z-image-turbo:int8"]], ids=["no-evict", "evict-ignored"])
+def test_with_room_on_the_drive_the_quota_removes_the_least_recently_used_model_after_the_install(store, monkeypatch, evict):
     two_installed_and_a_quota_for_ltx(store, monkeypatch)
     store.gate = threading.Event()
     restarts, events, started = store.supervisor.restarts, len(store.events), store.clock()
 
-    assert store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}).status_code == 202
+    # Room on the drive: no confirmation is needed, and one that names the victim does not remove it before the download.
+    response = store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1], "evict": evict})
+    assert response.status_code == 202, response.text
     # While the download waits at the gate, the least recently used model is still installed with its files.
     assert store.quant("z-image-turbo", "int8")["install_state"] == "installed" and Z_IMAGE_INT8_FILES <= store.placed()
     assert model_states(store, events) == [] and store.supervisor.restarts == restarts
@@ -521,11 +534,14 @@ def test_an_install_that_fits_on_the_drive_only_after_removing_a_model_is_refuse
     store.free = store.size(*LTX_Q4) - 1  # the download fits only once Z-Image is gone
     requests, placed = len(store.hub.requests), store.placed()
 
-    problem = assert_problem(store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]}), 409)
+    response = store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1]})
+    problem = assert_problem(response, 409)
 
     assert problem.model_extra["code"] == "eviction_needed"
     assert problem.model_extra["evictions"] == [z_image_eviction(store)]
     assert problem.model_extra["frees_bytes"] == store.size("z-image-turbo", "int8")  # Z-Image shares no file
+    refusal = InstallRefusal.model_validate(response.json())  # the 409 as openapi.json declares it
+    assert refusal.code == "eviction_needed" and [e.model_dump() for e in refusal.evictions or []] == [z_image_eviction(store)]
     assert problem.detail == (
         "LTX-2 2.3 Distilled 1.0 22B Q4_K_M fits on the drive of the model store only after removing Z-Image Turbo 6B int8 (1.2 KB), "
         "so nothing was installed or removed; name it in `evict` to remove it first."
@@ -538,14 +554,32 @@ def test_an_install_that_fits_on_the_drive_only_after_removing_a_model_is_refuse
 def test_naming_another_quantization_than_the_planned_one_removes_nothing(store, monkeypatch):
     two_installed_and_a_quota_for_ltx(store, monkeypatch)
     store.free = store.size(*LTX_Q4) - 1
+    requests, placed = len(store.hub.requests), store.placed()
 
-    with pytest.raises(Conflict) as refused:
-        store.core.install_model(*LTX_Q4, evict=[("wan-2.2-t2v-14b", "int8"), ("z-image-turbo", "bf16")])
+    evict = ["wan-2.2-t2v-14b:int8", "z-image-turbo:bf16"]
+    problem = assert_problem(store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params={"quant": LTX_Q4[1], "evict": evict}), 409)
 
-    assert refused.value.extensions["code"] == "eviction_needed"
-    assert refused.value.extensions["evictions"] == [z_image_eviction(store)]
+    assert problem.model_extra["code"] == "eviction_needed"
+    assert problem.model_extra["evictions"] == [z_image_eviction(store)]  # the current list
+    assert len(store.hub.requests) == requests and store.placed() == placed
+    assert store.quant(*LTX_Q4)["install_state"] == "absent"
     assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
     assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "installed"
+
+
+@pytest.mark.parametrize("value", ["z-image-turbo", "z-image-turbo/int8", ""])
+def test_an_evict_value_without_a_colon_is_invalid_before_anything_is_planned(store, monkeypatch, value):
+    two_installed_and_a_quota_for_ltx(store, monkeypatch)
+    store.free = store.size(*LTX_Q4) - 1
+    requests, events = len(store.hub.requests), len(store.events)
+
+    params = {"quant": LTX_Q4[1], "evict": ["wan-2.2-t2v-14b:int8", value]}
+    problem = assert_problem(store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params=params), 422)
+
+    assert [error["loc"] for error in problem.model_extra["errors"]] == [["query", "evict", 1]]
+    assert len(store.hub.requests) == requests and store.events[events:] == []
+    assert store.quant(*LTX_Q4)["install_state"] == "absent"
+    assert store.quant("z-image-turbo", "int8")["install_state"] == "installed"
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["installs", "download-fails"])
@@ -565,13 +599,16 @@ def test_a_confirmed_removal_happens_before_the_download_and_stays_when_it_fails
     monkeypatch.setattr(store.hub, "handler", first_request)
     restarts, events = store.supervisor.restarts, len(store.events)
 
-    store.core.install_model(*LTX_Q4, evict=[("z-image-turbo", "int8")])
+    params = {"quant": LTX_Q4[1], "evict": ["z-image-turbo:int8", "wan-2.2-t2v-14b:int8"]}  # Wan: not in the plan, so it stays
+    response = store.client.post(f"{API}/models/{LTX_Q4[0]}/install", params=params)
+    assert response.status_code == 202, response.text
     store.idle()
 
     assert seen and ("z-image-turbo", "int8") not in seen[0]  # removed before the first request for LTX-2
     assert model_states(store, events) == [("z-image-turbo", "int8", "absent"), (*LTX_Q4, "failed" if fails else "installed")]
     assert store.quant("z-image-turbo", "int8")["install_state"] == "absent" and not Z_IMAGE_INT8_FILES & store.placed()
     assert store.quant(*LTX_Q4)["install_state"] == ("failed" if fails else "installed")
+    assert store.quant("wan-2.2-t2v-14b", "int8")["install_state"] == "installed"
     eviction = store.client.get(f"{API}/models").json()["store"]["last_eviction"]
     assert (eviction["model_id"], eviction["quant"], eviction["evicted"]) == (*LTX_Q4, [z_image_eviction(store)])
     assert store.supervisor.restarts == restarts + (1 if fails else 2)  # after the removal, and after the install

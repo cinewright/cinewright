@@ -982,6 +982,92 @@
         "title": "HostPatch",
         "type": "object"
       },
+      "InstallRefusal": {
+        "additionalProperties": true,
+        "description": "An install refused before any byte was downloaded or removed (409); `detail` gives cause and consequence.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stable reason, for example `eviction_needed`, `quota_exceeded`, `not_enough_space`, `installing`, `switching` or `licence`",
+            "title": "Code"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "evictions": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/QuotaEviction"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only with `eviction_needed`: the installed quantizations the quota removes first, in removal order; send each as `evict` to confirm",
+            "title": "Evictions"
+          },
+          "frees_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only with `eviction_needed`: disk space removing all of them frees, less than the sum of their sizes when they share files with quantizations that stay",
+            "title": "Frees Bytes"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "default": "about:blank",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "status"
+        ],
+        "title": "InstallRefusal",
+        "type": "object"
+      },
       "InstallState": {
         "enum": [
           "absent",
@@ -5349,7 +5435,7 @@
     },
     "/api/v1/models/{model_id}/install": {
       "post": {
-        "description": "Install a quantization with the shared files it needs, in the background.\n\nChecks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota\n(it may remove the least recently used models first), an install in progress, the licence's country exclusions.\nProgress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.",
+        "description": "Install a quantization with the shared files it needs, in the background.\n\nChecks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota, an\ninstall in progress, the licence's country exclusions. With a quota, the least recently used quantizations no job\nneeds are removed once the install is registered, so a failed download removes nothing. When the drive holds the\ndownload only after removing them, the install is refused with `eviction_needed`, which lists them with their sizes;\nsent again with each of them in `evict`, it removes them first, and they stay removed if the download fails.\nProgress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.",
         "operationId": "installModel",
         "parameters": [
           {
@@ -5380,6 +5466,22 @@
               "description": "Quantization to install (required)",
               "title": "Quant"
             }
+          },
+          {
+            "description": "An installed quantization you agree to remove before the download, written `<model_id>:<quant>`; repeat it for each one that an `eviction_needed` refusal listed",
+            "in": "query",
+            "name": "evict",
+            "required": false,
+            "schema": {
+              "default": [],
+              "description": "An installed quantization you agree to remove before the download, written `<model_id>:<quant>`; repeat it for each one that an `eviction_needed` refusal listed",
+              "items": {
+                "pattern": "^[^:]*:.*$",
+                "type": "string"
+              },
+              "title": "Evict",
+              "type": "array"
+            }
           }
         ],
         "responses": {
@@ -5406,7 +5508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "$ref": "#/components/schemas/InstallRefusal"
                 }
               },
               "application/problem+json": {}

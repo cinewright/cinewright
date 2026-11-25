@@ -145,7 +145,7 @@ While Cinewright runs, point an MCP client that supports streamable HTTP at `htt
 While Cinewright runs:
 
 1. Open **Models**. The Model store panel shows how much is installed, the storage quota and the free disk space. Each card is one model in one quantization.
-2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright.
+2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright. With a storage quota set, the models used least recently make room only once the new model is installed, and the Model store panel says which ones were removed. If the drive has room for the new model only after removing them, a dialog names them with their sizes first: **Remove and install** removes them before the download, and they stay removed even if the download fails; **Cancel** keeps everything as it is.
 3. To remove a model, choose **Remove** on its card and confirm with **Remove model**. Text encoders and VAEs that another installed model needs stay.
 
 Jobs run only on installed quantizations. If no quantization of the model you choose in the Generate view is installed, the estimate lists the missing ones. A request through the API can pin one quantization with `quant`; if that one is not installed, the estimate names it.
@@ -180,7 +180,7 @@ A switch is refused while a job runs or a model is being installed, and when the
 While Cinewright runs, with WanGP set up:
 
 1. Pick a model id and quantization from `GET http://127.0.0.1:8737/api/v1/models`, for example `z-image-turbo` and `int8`.
-2. Start the install: `curl -X POST "http://127.0.0.1:8737/api/v1/models/z-image-turbo/install?quant=int8"`. The answer is `202`, or `409` with one sentence that says why the install cannot run now (for example, how much free disk space is missing).
+2. Start the install: `curl -X POST "http://127.0.0.1:8737/api/v1/models/z-image-turbo/install?quant=int8"`. The answer is `202`, or `409` with one sentence that says why the install cannot run now (for example, how much free disk space is missing). With a storage quota set, a `409` with the `code` `eviction_needed` means the drive has room only after removing the models listed in `evictions`. To remove them first, send the request again with each of them as `evict`, for example `?quant=int8&evict=wan-2.2-t2v-14b:int8`. They stay removed if the download fails.
 3. Follow it in `GET /api/v1/events` (`model` events with the downloaded bytes) or in `GET /api/v1/models`, where the quantization goes from `downloading` to `installed`, or to `failed` with the reason in `error`.
 4. To remove it: `curl -X DELETE "http://127.0.0.1:8737/api/v1/models/z-image-turbo?quant=int8"`.
 
