@@ -2,7 +2,7 @@
 
 Per job: download the inputs, `prepare`, `submit`, poll `status` every `poll_interval` seconds and
 post progress and preview events in batches, honour cancel requests (events acknowledgement or
-heartbeat), upload the outputs and complete with the `params.extra` keys the adapter reports as applied, or
+heartbeat), upload the outputs and complete with the `params.extra` keys the adapter reports as passed on, or
 report a failure. A cancelled job is reported as a
 failure with code `cancelled`; a job interrupted by the worker's own shutdown as `worker_stopped`
 (retryable). Completing or failing a job is retried with backoff on connection errors and 5xx answers

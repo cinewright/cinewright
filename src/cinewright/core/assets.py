@@ -169,7 +169,7 @@ def provenance_params(params: JobParams, capability: Capability, accepted_extra:
     """The parameters a job ran with, from its effective parameters (`router.effective_params`).
 
     An image job records no frames or fps: the registry defaults of video models fill them, but the engine renders
-    one still image. Of `params.extra` only the keys the worker reports as applied count; None when it reports none.
+    one still image. Of `params.extra` only the keys the worker reports as passed on count; None when it reports none.
     """
     image = capability in IMAGE_CAPABILITIES
     extra = None if accepted_extra is None else {key: params.extra[key] for key in accepted_extra if key in params.extra}

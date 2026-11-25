@@ -52,8 +52,8 @@ class EngineStatus:
     preview_path: str | None = None
     error_code: str | None = None  # "oom", "engine_failed", "cancelled", ...
     error_message: str | None = None
-    # Keys of the job's `params.extra` the engine applied; None when the adapter does not report them. The worker
-    # sends them with the completion, and the core records them in provenance.
+    # Keys of the job's `params.extra` the adapter passed on to the engine as asked; None when it does not report them.
+    # The worker sends them with the completion, and the core records them in provenance.
     accepted_extra: tuple[str, ...] | None = None
 
 

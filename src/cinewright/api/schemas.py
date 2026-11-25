@@ -608,7 +608,8 @@ class ProvenanceParams(Contract):
     fps: int | None = Field(default=None, description="null for images")
     guidance: float | None = None
     extra: dict[str, Any] | None = Field(
-        default=None, description="The entries of `params.extra` the engine applied; null when the worker did not report them"
+        default=None,
+        description="The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them",
     )
 
 
@@ -890,7 +891,7 @@ class JobCompletion(Contract):
     accepted_extra: list[Annotated[str, Field(max_length=64)]] | None = Field(
         default=None,
         max_length=100,
-        description="Keys of the job's `params.extra` the engine applied; null when the worker does not report them",
+        description="Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them",
     )
 
 

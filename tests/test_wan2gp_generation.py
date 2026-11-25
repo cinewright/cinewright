@@ -108,7 +108,7 @@ def test_an_i2v_job_runs_the_installed_int8_and_its_provenance_records_it(served
     core = served
     with wan2gp_worker(core, tmp_path, monkeypatch, "int8") as sessions:  # only int8, although bf16 comes first
         image = core.add_asset(stage(core, PNG), "image/png", DataClass.PRIVATE).sha256
-        extra = {"denoising_strength": 0.7, "guidance_phases": 2}
+        extra = {"denoising_strength": 0.7, "guidance_phases": 1}
         request = JobRequest.model_validate(
             {"capability": "i2v", "prompt": "The lighthouse beam sweeps", "model": LTX, "inputs": [image], "params": {"extra": extra}}
         )
@@ -116,8 +116,9 @@ def test_an_i2v_job_runs_the_installed_int8_and_its_provenance_records_it(served
         job = core.submit_job(request, ClientKind.UI, None)
         assert job.route.quant == "int8"
 
-        settings = finish(sessions, tmp_path, "lighthouse.mp4")
+        settings = finish(sessions, tmp_path, "lighthouse.mp4")  # as Wan2GP runs it
         assert settings["overrides"] == "transformer_quantization='int8'"
+        assert (settings["guidance_phases"], settings["denoising_strength"]) == (1, 1.0)
         assert (settings["model_type"], settings["image_start"].endswith(f"{image}.png")) == (LTX_TYPE, True)
         wait_for(lambda: core.get_job(job.id).state == JobState.SUCCEEDED, "the job to succeed")
 
@@ -129,14 +130,15 @@ def test_an_i2v_job_runs_the_installed_int8_and_its_provenance_records_it(served
     planned = plan_files(core.registry, LTX, "int8", "int8")
     assert provenance.model.file_sha256 == [file.sha256 for file in planned]
     assert provenance.model.file_sha256[0] == core.registry.get(LTX).quantizations[1].files[0].sha256
-    # Registry defaults fill the parameters; of the extras, only the one Wan2GP's defaults have was applied.
+    # Registry defaults fill the parameters. Of the extras, Wan2GP runs only guidance_phases as asked: it resets
+    # denoising_strength without a control image, so the worker does not report it.
     assert provenance.params.model_dump() == {
         "resolution": "1280x704",
         "steps": 8,
         "frames": 241,
         "fps": 24,
         "guidance": None,
-        "extra": {"denoising_strength": 0.7},
+        "extra": {"guidance_phases": 1},
     }
 
 

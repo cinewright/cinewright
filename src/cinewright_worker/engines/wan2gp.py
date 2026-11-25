@@ -11,11 +11,12 @@ Cinewright's data directory, not in the checkout. The adapter never triggers dow
 offline, `prepare()` and `submit()` refuse models whose files are not all present, and Wan2GP is not
 started while its ffmpeg binaries are missing (its `init()` would fetch unpinned ones from GitHub).
 
-Each job runs the quantization the core routed it to: `submit` names it in the task's `overrides` setting,
-because Wan2GP otherwise loads its global default (`transformer_quantization`, int8). For the same reason the
-adapter checks files per quantization itself, from the Wan2GP root as `shared.api` does, instead of asking
-`shared.api`'s availability, which checks only the global default. Image jobs (t2i, i2i) on a video model run
-in Wan2GP's image mode.
+Each job runs the quantization the core routed it to: `submit` names it in the task's `overrides` setting with
+Wan2GP's own `set_override` (a checkout without it is not started), because Wan2GP otherwise loads its global
+default (`transformer_quantization`, int8). For the same reason the adapter checks files per quantization itself,
+from the Wan2GP root as `shared.api` does, instead of asking `shared.api`'s availability, which checks only the
+global default. Image jobs (t2i, i2i) on a video model run in Wan2GP's image mode. Of `params.extra` the adapter
+reports only the keys Wan2GP runs as asked, leaving out those its validation would reset or limit for the job.
 
 Engine provisioning (`cinewright.core.provisioning`) writes `PROVISIONING_RECORD` into
 `<data dir>/engines/wan2gp/` once the engine is installed. For the checkout it describes, the adapter
@@ -24,7 +25,6 @@ reports the record's commit as its engine version and passes the attention mode 
 
 from __future__ import annotations
 
-import ast
 import collections
 import contextlib
 import dataclasses
@@ -36,9 +36,9 @@ import re
 import shutil
 import sys
 import threading
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from cinewright_worker.adapter import EngineHealth, EngineJob, EngineModel, EngineStatus, OutputFile
 from cinewright_worker.engines import EngineError, media_type_for
@@ -91,15 +91,8 @@ _VIDEO_SETTINGS = frozenset({"video_length", "force_fps", "duration_seconds"})
 IMAGE_CAPABILITIES = frozenset({"t2i", "i2i"})  # jobs that return one still image
 # Wan2GP's `transformer_quantization_choices` at the pinned commit; `submit` reads the live list from wgp.
 TRANSFORMER_QUANTIZATIONS = ("int8", "fp8", "bf16")
-# The names Wan2GP's `overrides` setting accepts and their defaults, in the order Wan2GP writes them
-# (shared/utils/generation_overrides.py at the pinned commit).
-_OVERRIDE_DEFAULTS = (
-    ("memory_profile", -1),
-    ("compilation", ""),
-    ("attention_mode", ""),
-    ("transformer_quantization", ""),
-    ("text_encoder_quantization", ""),
-)
+# Wan2GP's writer of the task setting `overrides` (`set_override`), which the adapter needs to select a quantization.
+OVERRIDES_MODULE = "shared.utils.generation_overrides"
 
 
 def is_oom(messages: list[str]) -> bool:
@@ -136,50 +129,39 @@ def _accepted(key: str, value: Any) -> bool:
     return isinstance(value, (int, float)) or (isinstance(value, str) and _TOKEN.fullmatch(value) is not None)
 
 
-def set_override(text: str, name: str, value: Any) -> str:
-    """Wan2GP's `overrides` text with `name` set to `value`, written as Wan2GP's own `set_override` writes it:
-    `name=repr(value)` pairs joined by ", " in Wan2GP's order, defaults left out, other overrides kept. The adapter
-    uses Wan2GP's function when the checkout provides it; this one writes the same text."""
-    values = {**_parse_overrides(text), name: value}
-    return ", ".join(f"{key}={values[key]!r}" for key, default in _OVERRIDE_DEFAULTS if key in values and values[key] != default)
-
-
-def _parse_overrides(text: str) -> dict[str, Any]:
-    """The `name=value` pairs of an `overrides` text (Python keyword syntax, literal values only)."""
-    if not text.strip():
-        return {}
-    problem = ValueError(f"overrides must be name=value pairs separated by commas, not {text[:200]!r}")
-    try:
-        call = ast.parse(f"overrides({text})", mode="eval").body
-    except SyntaxError:
-        raise problem from None
-    if (
-        not isinstance(call, ast.Call)
-        or not isinstance(call.func, ast.Name)
-        or call.args
-        or any(keyword.arg is None for keyword in call.keywords)
-    ):
-        raise problem
-    values: dict[str, Any] = {}
-    for keyword in call.keywords:
-        if keyword.arg in values:
-            raise problem
-        try:
-            values[str(keyword.arg)] = ast.literal_eval(keyword.value)
-        except (ValueError, SyntaxError):
-            raise problem from None
-    unknown = sorted(set(values) - {key for key, _ in _OVERRIDE_DEFAULTS})
-    if unknown:
-        raise ValueError(f"Unknown overrides {', '.join(unknown)}")
-    return values
-
-
 def _image_job(job: EngineJob) -> bool:
     return job.capability in IMAGE_CAPABILITIES
 
 
-def _extra_settings(defaults: dict[str, Any], job: EngineJob) -> tuple[dict[str, Any], list[str]]:
-    """The allowed `params.extra` values for keys Wan2GP's defaults have, and the names of the keys left out."""
+def _validated(settings: Mapping[str, Any], model_def: Mapping[str, Any]) -> dict[str, Any]:
+    """The values Wan2GP's `validate_settings` (wgp.py at the pinned commit) ends with for the allowlisted settings it
+    resets or limits, whatever the task asks for: `denoising_strength` stays only with a control image ("V" and "G" in
+    `video_prompt_type`), `guidance_phases` is capped at the model's `guidance_max_phases` (fixed there with
+    `lock_guidance_phases`), and `model_switch_phase` stays only with three phases."""
+    video_prompt_type = str(settings.get("video_prompt_type") or "")
+    values: dict[str, Any] = {}
+    if not ("V" in video_prompt_type and "G" in video_prompt_type):
+        values["denoising_strength"] = 1.0
+    phases = settings.get("guidance_phases", 1)
+    most = model_def.get("guidance_max_phases", 0)
+    if model_def.get("lock_guidance_phases"):
+        phases = most
+    elif isinstance(phases, (int, float)) and not isinstance(phases, bool):
+        phases = min(phases, most)
+    else:
+        phases = None  # Wan2GP cannot compare it with the maximum
+    values["guidance_phases"] = phases
+    if phases != 3:
+        values["model_switch_phase"] = 1
+    return values
+
+
+def _extra_settings(
+    defaults: dict[str, Any], job: EngineJob, inputs: dict[str, Any], model_def: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """The allowed `params.extra` values for keys Wan2GP's defaults have, and the names of the keys left out: those the
+    adapter does not accept, and those Wan2GP would reset or limit for this job (`_validated`), which therefore do not
+    run as asked. `inputs` are the job's input settings (`_input_settings`)."""
     applied: dict[str, Any] = {}
     ignored = []
     for key, value in (job.params.get("extra") or {}).items():
@@ -187,7 +169,14 @@ def _extra_settings(defaults: dict[str, Any], job: EngineJob) -> tuple[dict[str,
             applied[key] = value
         else:
             ignored.append(str(key)[:64])
-    return applied, ignored
+    while True:  # leaving one out can change what Wan2GP does with another (guidance_phases, model_switch_phase)
+        validated = _validated({**defaults, **applied, **inputs}, model_def)
+        changed = [key for key in applied if key in validated and validated[key] != applied[key]]
+        if not changed:
+            return applied, ignored
+        for key in changed:
+            del applied[key]
+            ignored.append(key)
 
 
 def _job_settings(job: EngineJob) -> dict[str, Any]:
@@ -253,19 +242,22 @@ def build_settings(
     defaults: dict[str, Any],
     job: EngineJob,
     *,
+    override: Callable[[str, str, Any], str],
     quantizations: Collection[str] = TRANSFORMER_QUANTIZATIONS,
-    override: Callable[[str, str, Any], str] = set_override,
+    model_def: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Wan2GP task settings: the model's pristine defaults, overlaid with the accepted `params.extra` values, then
     with the job's own values, its input images, image mode for an image job and the routed quantization.
 
-    `quantizations` are Wan2GP's transformer quantizations, which the task's `overrides` can select; a GGUF
-    quantization has its own model type and gets no override. `override` is Wan2GP's `set_override`.
+    `override` is Wan2GP's `set_override`. `quantizations` are Wan2GP's transformer quantizations, which the task's
+    `overrides` can select; a GGUF quantization has its own model type and gets no override. `model_def` is Wan2GP's
+    definition of the model type (`wgp.get_model_def`), whose limits decide which extras run as asked.
     """
-    applied, ignored = _extra_settings(defaults, job)
+    inputs = _input_settings(job)
+    applied, ignored = _extra_settings(defaults, job, inputs, model_def or {})
     if ignored:
-        log.warning("Ignored params.extra keys the Wan2GP adapter does not accept: %r", sorted(ignored)[:20])
-    settings = {**defaults, **applied, **_job_settings(job), **_input_settings(job)}
+        log.warning("Ignored params.extra keys the Wan2GP adapter does not accept or Wan2GP resets: %r", sorted(ignored)[:20])
+    settings = {**defaults, **applied, **_job_settings(job), **inputs}
     if _image_job(job) and not defaults.get("image_mode"):
         settings["image_mode"] = 1  # exactly 1, Wan2GP's image generation (2 is inpainting)
     if job.quant in quantizations:
@@ -276,34 +268,55 @@ def build_settings(
     return settings
 
 
-def accepted_extra(defaults: dict[str, Any], job: EngineJob) -> tuple[str, ...]:
-    """The `params.extra` keys `build_settings` applies and the job's own values do not replace, sorted."""
-    applied, _ = _extra_settings(defaults, job)
+def accepted_extra(defaults: dict[str, Any], job: EngineJob, model_def: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """The `params.extra` keys `build_settings` passes on to Wan2GP as asked and the job's own values do not replace,
+    sorted. Whether a model's code then uses a key is up to Wan2GP."""
+    applied, _ = _extra_settings(defaults, job, _input_settings(job), model_def or {})
     return tuple(sorted(set(applied) - set(_job_settings(job))))
 
 
-def _denoising_step(update: Any) -> tuple[int, int | None, str] | None:
-    """(completed steps, steps of the pass, pass name) of a progress update from a denoising step, else None.
+class DenoisingStep(NamedTuple):
+    """The denoising step a job reached: completed steps of the pass, its steps, its name, and whether it completed."""
 
-    Loading (blocks, phases) and the tiles of LTX-2's tiled second pass report a unit; decoding and saving have
-    another phase. LTX-2 distilled counts each pass from 0, so the pass name comes from `raw_phase`.
+    done: int
+    total: int | None
+    phase: str
+    completed: bool = False
+
+
+def _denoising_step(update: Any, previous: DenoisingStep | None) -> DenoisingStep | None:
+    """The denoising step reached once a progress update arrived; `previous` if the update reports none.
+
+    Wan2GP labels the update after the last step of a pass "VAE Decoding" (phase `decoding`, current step = total),
+    also between the two passes of LTX-2 distilled, so the pass completed; its name stays that of the step before.
+    LTX-2 distilled counts each pass from 0, so the pass name comes from `raw_phase`. Loading (blocks, phases) and the
+    tiles of LTX-2's tiled second pass report a unit, and saving has another phase.
     """
-    step = getattr(update, "current_step", None)
-    if step is None or getattr(update, "unit", None) is not None or not str(getattr(update, "phase", "") or "").startswith("inference"):
-        return None
-    return int(step), getattr(update, "total_steps", None), " ".join(str(getattr(update, "raw_phase", "") or "").split())[:80]
+    step, total = getattr(update, "current_step", None), getattr(update, "total_steps", None)
+    phase = str(getattr(update, "phase", "") or "")
+    if step is None or getattr(update, "unit", None) is not None:
+        return previous
+    if phase == "decoding":
+        if not total or step != total:
+            return previous
+        name = previous.phase if previous is not None and previous.total == total else ""
+        return DenoisingStep(int(step), total, name, completed=True)
+    if not phase.startswith("inference"):
+        return previous
+    return DenoisingStep(int(step), total, " ".join(str(getattr(update, "raw_phase", "") or "").split())[:80])
 
 
-def oom_message(step: tuple[int, int | None, str] | None, message: str) -> str:
+def oom_message(step: DenoisingStep | None, message: str) -> str:
     """Wan2GP's out-of-memory message, led by the denoising step the job had reached."""
     if step is None:
         where = "before the first denoising step"
+    elif step.completed:
+        where = f"after the last step of {step.phase}" if step.phase else "after the last denoising step"
+        where += f" (step {step.done} of {step.total})"
+    elif step.done:
+        where = f"at step {step.done}" + (f" of {step.total}" if step.total else "") + (f" ({step.phase})" if step.phase else "")
     else:
-        done, total, phase = step
-        if done:
-            where = f"at step {done}" + (f" of {total}" if total else "") + (f" ({phase})" if phase else "")
-        else:
-            where = "before the first step" + (f" of {phase}" if phase else "")
+        where = "before the first step" + (f" of {step.phase}" if step.phase else "")
     return f"Out of memory {where}. Wan2GP: {message}"
 
 
@@ -330,7 +343,7 @@ class _Job:
     errors: list[str] = dataclasses.field(default_factory=list)
     stream_tail: collections.deque = dataclasses.field(default_factory=lambda: collections.deque(maxlen=20))
     previews: int = 0
-    step: tuple[int, int | None, str] | None = None  # the last denoising step reached (`_denoising_step`)
+    step: DenoisingStep | None = None  # the last denoising step reached (`_denoising_step`)
 
 
 class Wan2GPAdapter:
@@ -348,7 +361,7 @@ class Wan2GPAdapter:
         self._cli_args = tuple(cli_args) if cli_args is not None else wgp_args(attention_mode(self._provisioning))
         self._session: Any = None
         self._version: str | None = None
-        self._override: Callable[[str, str, Any], str] = set_override
+        self._override: Callable[[str, str, Any], str] | None = None  # Wan2GP's set_override, once it is imported
         self._init_lock = threading.Lock()
         self._lock = threading.Lock()
         self._jobs: dict[str, _Job] = {}
@@ -408,8 +421,12 @@ class Wan2GPAdapter:
     def submit(self, job: EngineJob) -> str:
         self.prepare(job.engine_model, job.quant)  # also guards against a download started by generation
         session = self._ensure_session()
+        wgp = self._wgp()
         defaults = session.get_default_settings(job.engine_model)
-        settings = build_settings(defaults, job, quantizations=self._quantizations(self._wgp()), override=self._override)
+        model_def = wgp.get_model_def(job.engine_model) or {}
+        if self._override is None:  # imported with the session
+            raise EngineError("engine_unavailable", f"Wan2GP's {OVERRIDES_MODULE}.set_override is not loaded.")
+        settings = build_settings(defaults, job, override=self._override, quantizations=self._quantizations(wgp), model_def=model_def)
         with self._lock:
             if any(record.status.state in ("queued", "running") for record in self._jobs.values()):
                 raise EngineError("engine_busy", "Wan2GP runs one job at a time and is busy.")
@@ -418,7 +435,7 @@ class Wan2GPAdapter:
         except (ValueError, TypeError) as exc:
             raise EngineError("invalid_request", f"Wan2GP rejected the job settings: {exc}") from exc
         output_dir = job.output_dir or str(self._output_dir)
-        status = EngineStatus(state="queued", accepted_extra=accepted_extra(defaults, job))
+        status = EngineStatus(state="queued", accepted_extra=accepted_extra(defaults, job, model_def))
         record = _Job(handle=handle, output_dir=output_dir, status=status, image=_image_job(job))
         with self._lock:
             self._jobs[job.job_id] = record
@@ -480,10 +497,14 @@ class Wan2GPAdapter:
                 if str(self._root) not in sys.path:
                     sys.path.insert(0, str(self._root))
                 api = importlib.import_module("shared.api")
-                try:  # Wan2GP's own writer of the `overrides` setting; the local `set_override` writes the same text
-                    self._override = importlib.import_module("shared.utils.generation_overrides").set_override
+                try:
+                    self._override = importlib.import_module(OVERRIDES_MODULE).set_override
                 except (ImportError, AttributeError):
-                    self._override = set_override
+                    raise EngineError(
+                        "engine_unavailable",
+                        f"Wan2GP is not started because its checkout has no {OVERRIDES_MODULE}.set_override, "
+                        "which the adapter needs to run each job in its routed quantization.",
+                    ) from None
                 self._config_path.parent.mkdir(parents=True, exist_ok=True)
                 self._output_dir.mkdir(parents=True, exist_ok=True)
                 self._session = api.init(
@@ -597,7 +618,7 @@ class Wan2GPAdapter:
                     total_steps=data.total_steps,
                     percent=float(data.progress or 0),
                 )
-                record.step = _denoising_step(data) or record.step
+                record.step = _denoising_step(data, record.step)
             elif kind == "preview" and getattr(data, "image", None) is not None:
                 self._save_preview(record, data.image)
             elif kind == "error":

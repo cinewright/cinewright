@@ -50,7 +50,8 @@ import shutil
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -484,6 +485,13 @@ class ModelStore:
             (self.host_id,),
         )
         return {(row["model_id"], row["quant"]) for row in rows if row["model_id"] and row["quant"]}
+
+    @contextmanager
+    def routing(self) -> Iterator[None]:
+        """Hold off removals and evictions while a job is routed to installed quantizations and queued, so that its
+        quantization stays installed until `needed_by_jobs` counts the job. Enter it before the database transaction."""
+        with self._lock:
+            yield
 
     def mark_used(self, model_id: str, quant: str) -> None:
         """Record that a job routed to the quantization used it now; eviction removes the least recently used first."""

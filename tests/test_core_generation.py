@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 import httpx
@@ -29,6 +30,7 @@ from cinewright.api.schemas import (
 from cinewright.app import create_app
 from cinewright.core import dialect
 from cinewright.core.core import Core
+from cinewright.core.errors import CoreError
 from cinewright.core.registry import Registry
 
 LTX, LTX_TYPE = "ltx-2.3-distilled-22b", "ltx2_22B_distilled"
@@ -87,8 +89,9 @@ def test_an_i2v_job_routes_to_the_installed_int8_and_records_what_it_ran_with(mv
     job = lease(mvp, worker_id)
     assert (job.quant, job.engine_model) == ("int8", LTX_TYPE)
 
-    # The worker applied one of the two extras and names a key the job does not have, which is not recorded.
-    provenance = complete(mvp, worker_id, job, accepted_extra=["denoising_strength", "guidance_phases"])
+    # The worker passed one of the two extras on (Wan2GP resets denoising_strength without a control image) and names
+    # a key the job does not have, which is not recorded.
+    provenance = complete(mvp, worker_id, job, accepted_extra=["flow_shift", "guidance_phases"])
 
     assert provenance.model.quant == "int8"
     assert provenance.model.file_sha256 == expected_files(mvp.registry, LTX, "int8", "int8")
@@ -100,7 +103,7 @@ def test_an_i2v_job_routes_to_the_installed_int8_and_records_what_it_ran_with(mv
         "frames": 241,
         "fps": 24,
         "guidance": None,
-        "extra": {"denoising_strength": 0.7},
+        "extra": {"flow_shift": 5},
     }
 
 
@@ -175,6 +178,35 @@ def test_an_estimate_pinned_to_a_quantization_that_is_not_installed_names_it(mvp
 
     assert not estimate.feasible
     assert estimate.reasons == [f"feasibility: {LTX} bf16 is not installed on local"]
+
+
+def test_a_removal_waits_until_the_job_routed_to_the_quantization_is_queued(mvp, monkeypatch):
+    mark_installed(mvp, (LTX, "int8"))
+    register(mvp, LTX_TYPE)
+    plan, refusals = mvp._plan, []
+
+    def remove() -> None:
+        try:
+            mvp.remove_model(LTX, "int8")
+        except CoreError as exc:
+            refusals.append(exc)
+
+    remover = threading.Thread(target=remove, daemon=True)
+
+    def plan_then_remove(request: JobRequest):
+        planned = plan(request)  # routed to int8, the job not yet queued
+        remover.start()
+        remover.join(timeout=0.3)
+        assert remover.is_alive(), "the removal did not wait for the job to be queued"
+        return planned
+
+    monkeypatch.setattr(mvp, "_plan", plan_then_remove)
+    job_id = submit(mvp, capability="t2v", model=LTX)
+    remover.join(timeout=5)
+
+    assert mvp.get_job(job_id).route.quant == "int8"
+    assert [refusal.extensions.get("code") for refusal in refusals] == ["in_use"]  # the queued job needs it
+    assert (LTX, "int8") in mvp.models.installed()
 
 
 def test_a_t2i_estimate_with_every_mvp_model_installed_picks_z_image_turbo(mvp):

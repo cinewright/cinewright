@@ -91,7 +91,7 @@ class WorkerClient:
         engine_version: str | None,
         accepted_extra: list[str] | None = None,
     ) -> None:
-        """`POST /worker/jobs/{id}/complete`; `accepted_extra` (the `params.extra` keys the engine applied) is sent only
+        """`POST /worker/jobs/{id}/complete`; `accepted_extra` (the `params.extra` keys passed on to the engine) is sent only
         when the adapter reported them."""
         body: dict[str, Any] = {"lease_id": lease_id, "outputs": outputs, "engine_version": engine_version}
         if accepted_extra is not None:

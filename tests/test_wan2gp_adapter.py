@@ -2,11 +2,13 @@
 live probe.
 
 The fakes follow the pinned commit where the adapter depends on it: Wan2GP's default settings carry the keys only the
-adapter sets (`overrides`, `image_mode`, `image_guide`, `video_prompt_type`); a task drops its `image_guide` unless "V"
-is in `video_prompt_type` (validate_settings); `wgp` picks file names per quantization and dtype policy as
-`get_model_filename` does and finds files only relative to the working directory, through the checkpoint roots
-`ckpts` and `.`, so a lookup outside the Wan2GP root finds nothing; its global quantization is int8, and the
-session's own availability (`get_model_availability`) checks only that one.
+adapter sets (`overrides`, `image_mode`, `image_guide`, `video_prompt_type`) and every key of the `params.extra`
+allowlist, with the values of models/_settings.json and the handlers; a submitted task is validated as validate_task does
+for what the adapter depends on (`validate`); `shared.utils.generation_overrides` writes and reads `overrides` as Wan2GP's
+does; `wgp` picks file names per quantization and dtype policy as `get_model_filename` does and finds files only
+relative to the working directory, through the checkpoint roots `ckpts` and `.`, so a lookup outside the Wan2GP root
+finds nothing; its global quantization is int8, and the session's own availability (`get_model_availability`) checks
+only that one.
 
 The live probe runs only when CINEWRIGHT_WAN2GP_ROOT (a Wan2GP checkout) and CINEWRIGHT_WAN2GP_PYTHON
 (its Python) are set. It imports the adapter in that interpreter and calls capabilities() and
@@ -15,6 +17,7 @@ health() with Hugging Face access switched off; it never generates and never loa
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import dataclasses
 import json
@@ -42,14 +45,15 @@ from cinewright_worker.engines.mock import render_png
 from cinewright_worker.engines.wan2gp import (
     FFMPEG_BINARIES,
     FFMPEG_DIR,
+    OVERRIDES_MODULE,
     PROVISIONING_RECORD,
+    DenoisingStep,
     Wan2GPAdapter,
     accepted_extra,
-    build_settings,
     is_oom,
     oom_message,
-    set_override,
 )
+from cinewright_worker.engines.wan2gp import build_settings as adapter_build_settings
 
 COMMIT = "38758d3c73366422efcf609abb63cab8385f3552"
 
@@ -68,6 +72,14 @@ DEFAULTS = {
     "duration_seconds": 0,
     "force_fps": "",
     "guidance_scale": 5,
+    "guidance2_scale": 5,
+    "guidance3_scale": 5,
+    "guidance_phases": 1,
+    "model_switch_phase": 1,
+    "switch_threshold": 0,
+    "switch_threshold2": 0,
+    "embedded_guidance_scale": 6.0,
+    "sample_solver": "",
     "flow_shift": 5.0,
     "denoising_strength": 1.0,
     "output_filename": "",
@@ -80,8 +92,14 @@ DEFAULTS = {
     "video_prompt_type": "",
     "image_guide": None,
 }
-# What get_factory_settings changes per model type: Z-Image is an image model, Wan 2.2 I2V starts from an image.
-MODEL_DEFAULTS = {"z_image": {"image_mode": 1}, "i2v_2_2": {"image_prompt_type": "S"}}
+# What get_factory_settings changes per model type: Z-Image is an image model, Wan 2.2 I2V starts from an image and
+# runs two guidance phases (defaults/i2v_2_2.json), and the LTX-2 handler sets two (update_default_settings).
+MODEL_DEFAULTS = {
+    "z_image": {"image_mode": 1},
+    "i2v_2_2": {"image_prompt_type": "S", "guidance_phases": 2},
+    "ltx2_22B_distilled": {"guidance_phases": 2},
+    "ltx2_22B_distilled_gguf_q6_k": {"guidance_phases": 2},
+}
 MODEL_DEFS = [
     {"model_type": "z_image", "name": "Z-Image Turbo 6B", "metadata": {"main_output": ["image"], "outputs": ["image"]}},
     {
@@ -99,20 +117,24 @@ MODEL_DEFS = [
 HF = "https://huggingface.co/DeepBeepMeep"
 _LTX_SHARED = {
     "dtype": "bf16",
+    "guidance_max_phases": 2,
     "text_encoder_URLs": ["gemma-3-12b-it_bf16.safetensors", "gemma-3-12b-it_quanto_bf16_int8.safetensors"],
     "text_encoder_folder": "gemma-3-12b-it",
     "VAE_URLs": ["ltx-2.3-22b_vae.safetensors"],
 }
 _WAN_SHARED = {
+    "guidance_max_phases": 3,
     "text_encoder_URLs": ["umt5-xxl-enc-bf16.safetensors", "umt5-xxl-enc-quanto_int8.safetensors"],
     "text_encoder_folder": "umt5-xxl",
     "VAE_URLs": ["Wan2.1_VAE.safetensors"],
 }
 # Model definitions as wgp.get_model_def returns them: the transformer choices of defaults/*.json, the dtype a handler
-# pins (LTX-2 and Z-Image) and the secondary files has_secondary_model_files_for_status checks.
+# pins (LTX-2 and Z-Image), the guidance phases a handler allows and the secondary files
+# has_secondary_model_files_for_status checks.
 WGP_DEFS: dict[str, dict[str, Any]] = {
     "z_image": {
         "dtype": "bf16",
+        "guidance_max_phases": 0,  # Turbo
         "URLs": [
             f"{HF}/Z-Image/resolve/main/ZImageTurbo_bf16.safetensors",
             f"{HF}/Z-Image/resolve/main/ZImageTurbo_quanto_bf16_int8.safetensors",
@@ -144,6 +166,55 @@ WGP_DEFS: dict[str, dict[str, Any]] = {
     },
 }
 STATUS = {0: "missing", 1: "partial", 2: "available"}  # model_dropdowns.MODEL_FILE_STATUS_*
+# The names the task setting `overrides` takes and their defaults, in the order Wan2GP writes them.
+OVERRIDE_DEFAULTS = {
+    "memory_profile": -1,
+    "compilation": "",
+    "attention_mode": "",
+    "transformer_quantization": "",
+    "text_encoder_quantization": "",
+}
+
+
+def parse_overrides(text: str) -> dict[str, Any]:
+    """Stand-in for Wan2GP's parse_overrides: Python keyword arguments with literal values and known names only."""
+    if not isinstance(text, str):
+        raise TypeError("overrides must be a string")
+    if not text.strip():
+        return {}
+    try:
+        call = ast.parse(f"f({text})", mode="eval").body
+        values = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+    except (SyntaxError, ValueError, AttributeError) as exc:
+        raise ValueError(f"malformed overrides {text!r}") from exc
+    if call.args or len(values) != len(call.keywords) or not set(values) <= set(OVERRIDE_DEFAULTS):
+        raise ValueError(f"malformed or unknown overrides {text!r}")
+    return values
+
+
+def set_override(text: str, name: str, value: Any) -> str:
+    """Stand-in for Wan2GP's set_override: `name=repr(value)` pairs joined by ", " in Wan2GP's order, without defaults,
+    the other overrides kept."""
+    values = {**parse_overrides(text), name: value}
+    return ", ".join(f"{key}={values[key]!r}" for key, default in OVERRIDE_DEFAULTS.items() if values.get(key, default) != default)
+
+
+def overrides_module() -> types.ModuleType:
+    module = types.ModuleType(OVERRIDES_MODULE)
+    module.OVERRIDE_DEFAULTS = dict(OVERRIDE_DEFAULTS)
+    module.parse_overrides = parse_overrides
+    module.set_override = set_override
+    return module
+
+
+def build_settings(defaults: dict, job: EngineJob, **kwargs) -> dict:
+    """The adapter's build_settings with the stand-in for Wan2GP's set_override."""
+    return adapter_build_settings(defaults, job, override=set_override, **kwargs)
+
+
+def defaults_of(model_type: str) -> dict:
+    """Wan2GP's default settings of a model type (shared.api get_default_settings)."""
+    return {**DEFAULTS, **MODEL_DEFAULTS.get(model_type, {}), "model_type": model_type}
 
 
 def basename(name: str) -> str:
@@ -378,17 +449,36 @@ class FakeSession:
         return {"model_type": model_type, "status": STATUS[status], "available": status == 2}
 
     def get_default_settings(self, model_type: str) -> dict:
-        return {**DEFAULTS, **MODEL_DEFAULTS.get(model_type, {}), "model_type": model_type}
+        return defaults_of(model_type)
 
     def submit_task(self, settings: dict) -> FakeJob:
-        if not isinstance(settings.get("overrides", ""), str):  # parse_overrides calls .strip()
-            raise TypeError("overrides must be a string")
-        settings = dict(settings)
-        if "V" not in str(settings.get("video_prompt_type") or ""):
-            settings["image_guide"] = None  # validate_settings: a control image needs "V"
+        """Record the task as Wan2GP runs it, validated at submission rather than when generation starts."""
         job = FakeJob()
-        self.submitted.append((settings, job))
+        self.submitted.append((validate(settings, self.wgp), job))
         return job
+
+
+def validate(settings: dict, wgp: FakeWgp, model_def: dict | None = None) -> dict:
+    """The settings as Wan2GP's validate_task leaves them, for what the adapter depends on (validate_settings at the
+    pinned commit): `overrides` must parse, with a transformer quantization among Wan2GP's choices; without "V" in
+    `video_prompt_type` the control image is dropped; `denoising_strength` is 1.0 unless "V" and "G" are set;
+    `guidance_phases` is capped at the model's maximum; `model_switch_phase` is 1 unless there are three phases.
+    `model_def` stands in for Wan2GP's definition of the task's model type."""
+    settings = dict(settings)
+    quantization = parse_overrides(settings.get("overrides", "")).get("transformer_quantization", "")
+    if quantization and quantization not in [value for _label, value in wgp.transformer_quantization_choices]:
+        raise ValueError(f"Unknown transformer quantization {quantization!r}")
+    model_def = model_def or wgp.get_model_def(settings["model_type"]) or {}
+    video_prompt_type = str(settings.get("video_prompt_type") or "")
+    if "V" not in video_prompt_type:
+        settings["image_guide"] = None
+    if "V" not in video_prompt_type or "G" not in video_prompt_type:
+        settings["denoising_strength"] = 1.0
+    most = model_def.get("guidance_max_phases", 0)
+    settings["guidance_phases"] = most if model_def.get("lock_guidance_phases") else min(settings["guidance_phases"], most)
+    if settings["guidance_phases"] != 3:
+        settings["model_switch_phase"] = 1
+    return settings
 
 
 class FakeImage:
@@ -419,6 +509,8 @@ def fake_wan2gp(monkeypatch: pytest.MonkeyPatch) -> list[FakeSession]:
     api.init = init
     monkeypatch.setitem(sys.modules, "shared", types.ModuleType("shared"))
     monkeypatch.setitem(sys.modules, "shared.api", api)
+    monkeypatch.setitem(sys.modules, "shared.utils", types.ModuleType("shared.utils"))
+    monkeypatch.setitem(sys.modules, OVERRIDES_MODULE, overrides_module())
     monkeypatch.setitem(sys.modules, "wgp", wgp)
     monkeypatch.setitem(sys.modules, "torch", None)  # no torch in the core venv: VRAM figures stay null
     monkeypatch.setattr(sys, "path", list(sys.path))
@@ -772,53 +864,61 @@ def checkout(tmp_path: Path, *installs: tuple[str, str]) -> Wan2GPAdapter:
     return Wan2GPAdapter(root=str(root), data_dir=str(tmp_path / "data"))
 
 
-@pytest.mark.parametrize(
-    ("defaults", "quant", "expected"),
-    [
-        ("", "int8", "transformer_quantization='int8'"),
-        ("", "bf16", "transformer_quantization='bf16'"),
-        ("attention_mode='veda'", "int8", "attention_mode='veda', transformer_quantization='int8'"),
-        ("transformer_quantization='bf16', memory_profile=4", "int8", "memory_profile=4, transformer_quantization='int8'"),
-        ('text_encoder_quantization="bf16"', "bf16", "transformer_quantization='bf16', text_encoder_quantization='bf16'"),
-        ("attention_mode='veda'", "Q6_K", "attention_mode='veda'"),  # a GGUF quantization is its own model type
-        ("", "Q6_K", ""),
-    ],
-)
-def test_the_task_overrides_name_the_routed_quantization(tmp_path, defaults, quant, expected):
-    settings = build_settings({**DEFAULTS, "overrides": defaults}, make_job(tmp_path, quant=quant))
-    assert settings["overrides"] == expected  # exactly the text Wan2GP's set_override (format_overrides) writes
+@pytest.mark.parametrize("quant", ["int8", "fp8", "bf16", "Q6_K"])
+def test_the_task_overrides_come_from_wan2gps_set_override(tmp_path, quant):
+    calls = []
+
+    def override(text: str, name: str, value: Any) -> str:
+        calls.append((text, name, value))
+        return "written by set_override"
+
+    defaults = {**DEFAULTS, "overrides": "attention_mode='sage2'"}
+    settings = adapter_build_settings(defaults, make_job(tmp_path, quant=quant), override=override)
+    if quant == "Q6_K":  # a GGUF quantization is its own model type
+        assert (calls, settings["overrides"]) == ([], "attention_mode='sage2'")
+    else:  # the other overrides of the defaults go in, so set_override keeps them
+        assert calls == [("attention_mode='sage2'", "transformer_quantization", quant)]
+        assert settings["overrides"] == "written by set_override"
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        "attention_mode=",
-        "'sage2'",
-        "**settings",
-        "attention_mode='a', attention_mode='b'",
-        "attention_mode=open('x')",
-        "attention_mode='a')(memory_profile=4",
-        "unknown_choice=1",
+        ("", "transformer_quantization='int8'"),
+        ("attention_mode='veda'", "attention_mode='veda', transformer_quantization='int8'"),
+        ("transformer_quantization='bf16', memory_profile=4", "memory_profile=4, transformer_quantization='int8'"),
     ],
 )
-def test_set_override_refuses_what_wan2gp_refuses(tmp_path, text):
-    with pytest.raises(ValueError):
-        set_override(text, "transformer_quantization", "int8")
-    with pytest.raises(EngineError) as raised:  # Wan2GP's own defaults: the engine is broken, not the request
-        build_settings({**DEFAULTS, "overrides": text}, make_job(tmp_path))
+def test_the_stand_in_set_override_writes_what_wan2gp_writes(text, expected):
+    """The tests' set_override follows Wan2GP's (shared/utils/generation_overrides.py at the pinned commit)."""
+    assert set_override(text, "transformer_quantization", "int8") == expected
+
+
+def test_unreadable_default_overrides_fail_the_engine_not_the_request(tmp_path):
+    with pytest.raises(EngineError) as raised:  # Wan2GP's set_override refuses its own defaults: the engine is broken
+        build_settings({**DEFAULTS, "overrides": "attention_mode="}, make_job(tmp_path))
     assert raised.value.code == "engine_failed"
-    assert set_override("  ", "transformer_quantization", "int8") == "transformer_quantization='int8'"
 
 
 def test_the_checkouts_own_set_override_writes_the_overrides(fake_api, adapter, tmp_path, monkeypatch):
     calls = []
-    module = types.ModuleType("shared.utils.generation_overrides")
+    module = types.ModuleType(OVERRIDES_MODULE)
     module.set_override = lambda text, name, value: calls.append((text, name, value)) or f"{name}={value!r}"
-    monkeypatch.setitem(sys.modules, "shared.utils", types.ModuleType("shared.utils"))
-    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", module)
+    monkeypatch.setitem(sys.modules, OVERRIDES_MODULE, module)
     adapter.submit(make_job(tmp_path))
     assert calls == [("", "transformer_quantization", "bf16")]
     assert fake_api[0].submitted[0][0]["overrides"] == "transformer_quantization='bf16'"
+
+
+def test_a_checkout_without_set_override_is_not_started(fake_api, adapter, monkeypatch):
+    monkeypatch.delitem(sys.modules, OVERRIDES_MODULE)
+    for call in (adapter.capabilities, lambda: adapter.prepare("z_image", "bf16")):
+        with pytest.raises(EngineError) as raised:
+            call()
+        assert raised.value.code == "engine_unavailable"
+        assert OVERRIDES_MODULE in raised.value.message
+    assert fake_api == []  # shared.api's init never ran
+    assert adapter.health().state == "starting"
 
 
 def test_an_int8_job_reaches_wan2gp_with_its_quantization(fake_api, wgp, tmp_path):
@@ -826,15 +926,17 @@ def test_an_int8_job_reaches_wan2gp_with_its_quantization(fake_api, wgp, tmp_pat
     wgp.transformer_quantization = wgp.server_config["transformer_quantization"] = "bf16"  # Wan2GP's own default
     image = tmp_path / "start.png"
     image.write_bytes(render_png(3, 4, 4))
-    extra = {"denoising_strength": 0.7, "guidance_phases": 2}  # Wan2GP's defaults here have no guidance_phases
+    extra = {"denoising_strength": 0.7, "guidance_phases": 1}
     job = make_job(tmp_path / "job", "ltx2_22B_distilled", (str(image),), quant="int8", steps=8, extra=extra)
 
     engine_job_id = adapter.submit(job)
 
-    settings, _ = fake_api[0].submitted[0]
+    settings, _ = fake_api[0].submitted[0]  # as Wan2GP runs it
     assert settings["overrides"] == "transformer_quantization='int8'"
-    assert (settings["image_start"], settings["image_mode"], settings["denoising_strength"]) == (str(image), 0, 0.7)
-    assert adapter.status(engine_job_id).accepted_extra == ("denoising_strength",)
+    assert (settings["image_start"], settings["image_mode"], settings["guidance_phases"]) == (str(image), 0, 1)
+    # Wan2GP runs denoising_strength only with a control image, so the adapter neither passes nor reports it.
+    assert settings["denoising_strength"] == 1.0
+    assert adapter.status(engine_job_id).accepted_extra == ("guidance_phases",)
     assert fake_api[0].get_model_availability("ltx2_22B_distilled")["available"] is False  # bf16, its default, is absent
 
 
@@ -1003,57 +1105,99 @@ def test_extra_cannot_set_the_settings_only_the_adapter_sets(tmp_path, caplog):
     assert all(key in logged for key in ADAPTER_SETTINGS) and "secret" not in logged
 
 
-def test_accepted_extra_lists_the_extras_that_reach_wan2gp(tmp_path):
+def test_accepted_extra_lists_the_extras_wan2gp_runs_as_asked(tmp_path):
     extra = {
         "flow_shift": 7.0,
-        "denoising_strength": 0.6,
+        "denoising_strength": 0.6,  # Wan2GP resets it without a control image
         "video_length": 17,
+        "guidance_phases": 3,  # Wan 2.2 allows three
+        "model_switch_phase": 2,  # counts only with three phases
         "num_inference_steps": 30,  # the job's steps win
         "negative_prompt": "noise",  # the job's negative prompt wins
         "seed": 5,  # the job's resolved seed wins
         "sample_solver": "C:/x",  # not a plain token
-        "guidance_phases": 2,  # not in these defaults
+        "not_a_setting": 1,  # not in Wan2GP's defaults
     }
+    model_def = WGP_DEFS["i2v_2_2"]
     video = make_job(tmp_path, steps=8, extra=extra)
     image = dataclasses.replace(video, capability="t2i")  # image mode forces the frame count
     no_negative = dataclasses.replace(video, negative_prompt=None)
     for job, expected in (
-        (video, ("denoising_strength", "flow_shift", "video_length")),
-        (image, ("denoising_strength", "flow_shift")),
-        (no_negative, ("denoising_strength", "flow_shift", "negative_prompt", "video_length")),
+        (video, ("flow_shift", "guidance_phases", "model_switch_phase", "video_length")),
+        (image, ("flow_shift", "guidance_phases", "model_switch_phase")),
+        (no_negative, ("flow_shift", "guidance_phases", "model_switch_phase", "negative_prompt", "video_length")),
     ):
-        assert accepted_extra(DEFAULTS, job) == expected
-        settings = build_settings(DEFAULTS, job)
-        assert {key for key, value in extra.items() if settings.get(key) == value} == set(expected)
+        assert accepted_extra(defaults_of("i2v_2_2"), job, model_def) == expected
+        ran = validate(build_settings(defaults_of("i2v_2_2"), job, model_def=model_def), FakeWgp())  # as Wan2GP runs it
+        assert {key for key, value in extra.items() if ran.get(key) == value} == set(expected)
+
+
+LOCKED = {**WGP_DEFS["ltx2_22B_distilled"], "lock_guidance_phases": True}
+
+
+@pytest.mark.parametrize(
+    ("model_type", "model_def", "extra", "expected"),
+    [
+        ("ltx2_22B_distilled", None, {"guidance_phases": 1}, ("guidance_phases",)),
+        ("ltx2_22B_distilled", None, {"guidance_phases": 3, "model_switch_phase": 2}, ()),  # LTX-2 allows two phases
+        ("ltx2_22B_distilled", LOCKED, {"guidance_phases": 1}, ()),  # a locked model always runs its maximum
+        ("z_image", None, {"guidance_phases": 1}, ()),  # Z-Image Turbo has no guidance phases
+        ("i2v_2_2", None, {"guidance_phases": 5, "model_switch_phase": 2}, ()),  # so the job keeps its default two
+        ("i2v_2_2", None, {"guidance_phases": "3"}, ()),  # Wan2GP compares a number with the maximum
+        ("i2v_2_2", None, {"denoising_strength": 1.0}, ("denoising_strength",)),  # what Wan2GP runs anyway
+    ],
+)
+def test_extras_wan2gp_would_change_are_left_out(tmp_path, model_type, model_def, extra, expected):
+    model_def = model_def or WGP_DEFS[model_type]
+    job = make_job(tmp_path, model_type, capability="t2v", extra=extra)
+    assert accepted_extra(defaults_of(model_type), job, model_def) == expected
+    ran = validate(build_settings(defaults_of(model_type), job, model_def=model_def), FakeWgp(), model_def)
+    assert {key for key in extra if ran[key] == extra[key]} == set(expected)
 
 
 # ---------------------------------------------------------------------- out of memory and prompts
 
 
-def test_an_oom_names_the_denoising_step_it_reached(fake_api, adapter, tmp_path):
+PASS_1 = [
+    progress("loading_model", None, None, "Loading - transformer"),
+    progress("inference", 0, 8, "Denoising First Phase"),
+    progress("inference", 7, 8, "Denoising First Phase"),
+    progress("decoding", 8, 8, "VAE Decoding"),  # Wan2GP's label for the update after the last step of a pass
+]
+PASS_2 = [
+    progress("inference", 0, 3, "Denoising Second Phase"),
+    progress("inference", 2, 3, "Denoising Second Phase"),
+    progress("inference", 5, 9, "Denoising Second Phase", unit="tiles"),  # tiled fusion counts tiles, not steps
+    progress("inference", 12, 40, "Saving File ...", unit="blocks"),  # a model reload under a stale phase
+]
+
+
+@pytest.mark.parametrize(
+    ("updates", "where"),
+    [
+        ([], "before the first denoising step"),
+        (PASS_1[:3], "at step 7 of 8 (Denoising First Phase)"),
+        (PASS_1, "after the last step of Denoising First Phase (step 8 of 8)"),  # LTX-2 distilled: before its second pass
+        (PASS_1 + PASS_2[:1], "before the first step of Denoising Second Phase"),
+        (PASS_1 + PASS_2, "at step 2 of 3 (Denoising Second Phase)"),
+        (PASS_1 + PASS_2 + [progress("decoding", 3, 3, "VAE Decoding")], "after the last step of Denoising Second Phase (step 3 of 3)"),
+    ],
+)
+def test_an_oom_names_the_denoising_step_it_reached(fake_api, adapter, tmp_path, updates, where):
     engine_job_id = adapter.submit(make_job(tmp_path))
     handle = fake_api[0].submitted[0][1]
-    for update in (
-        progress("loading_model", None, None, "Loading - transformer"),
-        progress("inference", 0, 8, "Denoising First Phase"),
-        progress("inference", 8, 8, "Denoising First Phase"),
-        progress("inference", 0, 3, "Denoising Second Phase"),
-        progress("inference", 2, 3, "Denoising Second Phase"),
-        progress("inference", 5, 9, "Denoising Second Phase", unit="tiles"),  # tiled fusion counts tiles, not steps
-        progress("inference", 12, 40, "Saving File ...", unit="blocks"),  # a model reload under a stale phase
-        progress("decoding", 3, 3, "VAE Decoding"),
-    ):
+    for update in updates:
         handle.events.put("progress", update)
     handle.finish(success=False, errors=[WAN2GP_VRAM_ERROR])
     status = wait_state(adapter, engine_job_id, ("failed", "succeeded"))
     assert status.error_code == "oom"
-    assert status.error_message == f"Out of memory at step 2 of 3 (Denoising Second Phase). Wan2GP: {WAN2GP_VRAM_ERROR}"
+    assert status.error_message == f"Out of memory {where}. Wan2GP: {WAN2GP_VRAM_ERROR}"
 
 
-def test_oom_messages_without_a_completed_step():
-    assert oom_message((0, 3, "Denoising Second Phase"), "x") == "Out of memory before the first step of Denoising Second Phase. Wan2GP: x"
-    assert oom_message((4, 8, ""), "x") == "Out of memory at step 4 of 8. Wan2GP: x"
-    assert oom_message(None, "x") == "Out of memory before the first denoising step. Wan2GP: x"
+def test_oom_messages_without_a_pass_name():
+    assert oom_message(DenoisingStep(4, 8, ""), "x") == "Out of memory at step 4 of 8. Wan2GP: x"
+    completed = DenoisingStep(8, 8, "", completed=True)
+    assert oom_message(completed, "x") == "Out of memory after the last denoising step (step 8 of 8). Wan2GP: x"
 
 
 def test_the_prompt_reaches_wan2gp_as_the_core_translated_it(fake_api, adapter, tmp_path):
@@ -1065,13 +1209,15 @@ def test_the_prompt_reaches_wan2gp_as_the_core_translated_it(fake_api, adapter, 
 # ---------------------------------------------------------------------- with the worker loop
 
 
-def test_the_worker_uploads_an_image_jobs_jpeg_and_reports_the_applied_extras(fake_api, tmp_path):
+def test_the_worker_uploads_an_image_jobs_jpeg_and_reports_the_extras_passed_on(fake_api, tmp_path):
     adapter = checkout(tmp_path, ("ltx2_22B_distilled", "int8"))
     core = FakeCore()  # validates every request against the core's contract and upload media types
     work = tmp_path / "work"
     work.mkdir()
     try:
-        params = {"steps": 8, "frames": 121, "fps": 24, "extra": {"denoising_strength": 0.5, "video_length": 17}}
+        # Wan2GP resets denoising_strength without a control image; image mode renders its own frame count.
+        extra = {"flow_shift": 4.0, "denoising_strength": 0.5, "video_length": 17}
+        params = {"steps": 8, "frames": 121, "fps": 24, "extra": extra}
         job = worker_job(engine_model="ltx2_22B_distilled", params=params).model_copy(update={"quant": "int8"})
         assert job.capability == "t2i"
         core.queue.append(job)
@@ -1093,7 +1239,7 @@ def test_the_worker_uploads_an_image_jobs_jpeg_and_reports_the_applied_extras(fa
     completion = core.completed[0]
     assert [(output.name, output.media_type) for output in completion.outputs] == [("image.jpg", "image/jpeg")]
     assert core.uploads["image.jpg"] == ("image/jpeg", b"jpeg bytes")
-    assert completion.accepted_extra == ["denoising_strength"]
+    assert completion.accepted_extra == ["flow_shift"]
 
 
 # ---------------------------------------------------------------------- live probe (opt-in)

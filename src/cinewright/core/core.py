@@ -890,6 +890,13 @@ class Core:
         )
 
     def submit_job(self, request: JobRequest, client: ClientKind, agent: str | None) -> Job:
+        # Store lock before the transaction: no removal or eviction takes the routed quantization away until it is queued.
+        with self.models.routing():
+            job_id = self._queue_job(request, client, agent)
+        return self.get_job(job_id)
+
+    def _queue_job(self, request: JobRequest, client: ClientKind, agent: str | None) -> str:
+        """Route the request and store the job; returns its id."""
         plan, data_class = self._plan(request)
         if plan.route is None:
             raise Infeasible("No model and host can run this request; the reasons list each candidate.", plan.reasons)
@@ -933,7 +940,7 @@ class Core:
                 )
             tx.emit(job_id, EventKind.STATE, {"state": state.value})
             tx.wake_workers = state == JobState.QUEUED
-        return self.get_job(job_id)
+        return job_id
 
     @staticmethod
     def _agent_id(tx: Tx, name: str) -> str:

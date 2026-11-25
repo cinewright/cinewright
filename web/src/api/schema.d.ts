@@ -1074,7 +1074,7 @@ export interface components {
         JobCompletion: {
             /**
              * Accepted Extra
-             * @description Keys of the job's `params.extra` the engine applied; null when the worker does not report them
+             * @description Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them
              */
             accepted_extra?: string[] | null;
             /** Engine Version */
@@ -1522,7 +1522,7 @@ export interface components {
         ProvenanceParams: {
             /**
              * Extra
-             * @description The entries of `params.extra` the engine applied; null when the worker did not report them
+             * @description The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them
              */
             extra?: {
                 [key: string]: unknown;

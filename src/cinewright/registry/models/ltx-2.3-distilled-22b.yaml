@@ -35,7 +35,8 @@ license:
   commercial_use: null
   geo_exclusions: []
 quantizations:
-  # bf16 / int8: Wan2GP model type ltx2_22B_distilled, file picked by its transformer_quantization setting.
+  # bf16 / int8: Wan2GP model type ltx2_22B_distilled, file picked by the transformer_quantization override that the
+  # Wan2GP adapter sets for each job.
   - id: bf16
     format: safetensors
     files:

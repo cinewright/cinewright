@@ -1116,7 +1116,7 @@
                 "type": "null"
               }
             ],
-            "description": "Keys of the job's `params.extra` the engine applied; null when the worker does not report them",
+            "description": "Keys of the job's `params.extra` the worker passed on to the engine as asked; null when it does not report them",
             "title": "Accepted Extra"
           },
           "engine_version": {
@@ -2437,7 +2437,7 @@
                 "type": "null"
               }
             ],
-            "description": "The entries of `params.extra` the engine applied; null when the worker did not report them",
+            "description": "The entries of `params.extra` the worker passed on to the engine as asked; null when it did not report them",
             "title": "Extra"
           },
           "fps": {

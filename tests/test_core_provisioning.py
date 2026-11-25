@@ -972,6 +972,10 @@ def test_the_worker_reports_the_provisioned_commit(setup, monkeypatch):
     api.init = lambda **kwargs: calls.append(kwargs) or SimpleNamespace(list_model_availability=lambda: [], list_model_defs=lambda: [])
     monkeypatch.setitem(sys.modules, "shared", types.ModuleType("shared"))
     monkeypatch.setitem(sys.modules, "shared.api", api)
+    overrides = types.ModuleType("shared.utils.generation_overrides")
+    overrides.set_override = lambda text, name, value: f"{name}={value!r}"
+    monkeypatch.setitem(sys.modules, "shared.utils", types.ModuleType("shared.utils"))
+    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", overrides)
     # No model definitions, so the adapter checks no files (test_wan2gp_adapter covers that).
     wgp = SimpleNamespace(WanGP_version="10.0", transformer_quantization_choices=[("16-bit", "bf16")], _get_dropdown_deps=lambda: None)
     monkeypatch.setitem(sys.modules, "wgp", wgp)
