@@ -725,17 +725,18 @@ class Core:
         try:
             merged = self.models.run_install(install, progress=progress, cancelled=lambda: self._closed)
         except ModelStoreError as exc:
-            if exc.code == "config_invalid":  # registered, but WanGP does not see the store until its config is fixed
-                log.error("%s", exc.message)
-                self._publish_model(*install.key, InstallState.INSTALLED)
-                if install.missing:
-                    self._restart_for_models()
-            else:  # a cancellation (Cinewright closes) too: the quantization stays `failed`, so Remove deletes its downloads
+            if exc.code != "config_invalid":  # a cancellation (Cinewright closes) too: `failed`, so Remove deletes its downloads
                 log.warning("%s", exc.message)
                 error = SetupError(code=exc.code, message=exc.message, action="retry" if exc.code in _STORE_RETRY else None)
                 self._publish_model(*install.key, InstallState.FAILED, error=error)
-            return
-        log.info("Installed %s.", install.label)
+                return
+            log.error("%s", exc.message)  # registered, but WanGP does not see the store until its config is fixed
+            merged = "unchanged"
+        except OSError as exc:  # only the config merge raises it, after the files were registered
+            log.error("Installed %s, but writing WanGP's configuration failed (%s), so WanGP does not see it yet.", install.label, exc)
+            merged = "unchanged"
+        else:
+            log.info("Installed %s.", install.label)
         self._publish_model(*install.key, InstallState.INSTALLED)
         if install.missing or merged == "updated":
             self._restart_for_models()
@@ -765,11 +766,12 @@ class Core:
             return
         self._switch = None
         log.info("Switched the text encoder to %s.", switch.variant)
-        if switch.missing or merged == "updated":
+        restarts = bool(switch.missing or merged == "updated") and self.supervisor is not None and not self._closed
+        if restarts:
             self._restart_for_models()
-        # The previous variant's files; a job leased during the download still runs with them, so then they go once the
-        # worker's replacement registered.
-        if not self._local_job_active():
+        # The previous variant's files go once the worker's replacement registered (`_local_worker_registered`): until it
+        # stopped, the old worker may hold them open, and a job leased during the download still runs with them.
+        if not restarts and not self._local_job_active():
             self.models.collect_garbage()
 
     def _local_job_active(self) -> bool:
@@ -811,8 +813,9 @@ class Core:
 
         WanGP writes its config at its first start, so an install before that could not merge into it; a merge that
         changes the config restarts the worker once per core start, since WanGP reads its config only at import.
-        A file the previous worker held open could not be deleted before this worker built its model list; once this
-        collection deletes such a file, the worker restarts again to register without it.
+        After a text encoder switch this collection removes the previous variant's files. A file the previous worker
+        held open, or one the last core start left, could not be deleted before this worker built its model list; once
+        this collection deletes such a file, the worker restarts again to register without it.
         """
         try:
             merged = self.models.register_in_wan2gp() if self.models.has_installs() else "unchanged"

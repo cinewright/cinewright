@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -425,6 +425,55 @@ def test_a_removed_file_the_old_worker_held_open_restarts_its_replacement_once_i
     assert store.supervisor.restarts == restarts + 2
 
 
+def test_a_file_left_undeleted_when_cinewright_closed_restarts_the_first_worker_of_the_next_start(store, config, clock, monkeypatch):
+    store.install("z-image-turbo", "int8")
+    transformer = "ZImageTurbo_quanto_bf16_int8.safetensors"
+    original = Path.unlink
+    held = {"open": True}
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == transformer and held["open"]:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert store.client.delete(f"{API}/models/z-image-turbo", params={"quant": "int8"}).status_code == 204
+    store.core.close()  # before the replacement worker registered: the file stays registered without a reference
+    assert transformer in store.placed()
+
+    held["open"] = False  # the old worker process ended with Cinewright
+    restarted = Store(config, clock)
+    try:
+        # The first worker of this start found the file and lists z_image; deleting the file must restart it.
+        registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["z_image"], health={"state": "ready"})
+        restarted.core.register_worker(registration, restarted.core.enrollment_token)
+        assert transformer not in restarted.placed() and restarted.rows("SELECT * FROM store_files") == []
+        assert restarted.supervisor.restarts == 1
+
+        registration = WorkerRegistration(host_id="local", engine="wan2gp", models=[], health={"state": "ready"})
+        restarted.core.register_worker(registration, restarted.core.enrollment_token)
+        assert restarted.supervisor.restarts == 1
+    finally:
+        restarted.core.close()
+
+
+def test_an_install_whose_wgp_config_cannot_be_written_still_ends_installed_and_restarts_the_worker(store, monkeypatch):
+    store.write_config(OTHER_KEYS)
+
+    def refuse(path: Path, data: object) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("cinewright.core.modelstore._write_json", refuse)
+
+    state = store.install("z-image-turbo", "int8")
+
+    assert state["install_state"] == "installed" and store.placed() == Z_IMAGE_INT8_FILES
+    assert store.config() == OTHER_KEYS  # WanGP does not see the store until its config can be written
+    assert (store.events[-1].model_id, store.events[-1].quant, store.events[-1].install_state) == ("z-image-turbo", "int8", "installed")
+    assert not [event for event in store.events if event.install_state == "failed"]
+    assert store.supervisor.restarts == 1
+
+
 def test_wgp_config_written_by_wan2gp_after_an_install_is_merged_when_the_worker_registers(store):
     store.install("z-image-turbo", "int8")  # WanGP has not started yet: no config to merge into
     assert not store.core.models.config_path.exists() and store.supervisor.restarts == 1
@@ -451,6 +500,10 @@ def test_switching_the_local_text_encoder_from_int8_to_bf16(store):
     response = store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"})
     assert response.status_code == 202, response.text
     store.idle()
+    assert {QWEN3_INT8, QWEN3_BF16} <= store.placed()  # the previous variant goes once the restarted worker registered
+    store.supervisor.since = store.clock()
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["z_image"], health={"state": "ready"})
+    store.core.register_worker(registration, store.core.enrollment_token)
 
     placed = store.placed()
     assert QWEN3_BF16 in placed and QWEN3_INT8 not in placed
@@ -464,6 +517,35 @@ def test_switching_the_local_text_encoder_from_int8_to_bf16(store):
     assert store.supervisor.restarts == 2
     assert {r["path"] for r in store.rows("SELECT path FROM installed_model_files")} == placed
     assert store.quant("z-image-turbo", "int8")["size_bytes"] == store.size("z-image-turbo", "int8", "bf16")
+
+
+def test_a_switch_deletes_the_previous_text_encoder_only_once_the_restarted_worker_registered(store, monkeypatch):
+    store.write_config(OTHER_KEYS)
+    store.install("z-image-turbo", "int8")
+    previous = PurePosixPath(QWEN3_INT8).name
+    original = Path.unlink
+    held = {"open": True}  # the idle old worker holds the text encoder until its restart stopped it
+    tried: list[bool] = []
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == previous:
+            tried.append(held["open"])
+            if held["open"]:
+                raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"}).status_code == 202
+    store.idle()
+    assert store.supervisor.restarts == 2 and QWEN3_INT8 in store.placed() and tried == []
+
+    held["open"] = False
+    store.supervisor.since = store.clock()
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["z_image"], health={"state": "ready"})
+    store.core.register_worker(registration, store.core.enrollment_token)  # the replacement
+
+    assert QWEN3_INT8 not in store.placed() and tried == [False]
+    assert store.supervisor.restarts == 2  # no further restart: the text encoder was never held at a collection
 
 
 def test_switching_the_text_encoder_is_refused_while_a_job_runs_on_the_host(store):

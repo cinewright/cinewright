@@ -531,6 +531,27 @@ def test_a_file_a_worker_held_open_goes_with_the_next_collection_which_reports_i
     assert env.store.collect_garbage() is False
 
 
+def test_the_store_of_the_next_core_start_reports_deleting_a_file_the_last_start_could_not_delete(env, monkeypatch):
+    env.store.install("z-image-turbo", "int8")
+    transformer = "ZImageTurbo_quanto_bf16_int8.safetensors"
+    original = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == transformer:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    env.store.remove("z-image-turbo", "int8")
+    monkeypatch.setattr(Path, "unlink", original)  # Cinewright closed, and the worker holding the file with it
+
+    store = env.new_store()
+    assert env.placed() == {transformer}  # a new store deletes nothing by itself
+    assert store.collect_garbage() is True
+    assert env.placed() == set() and env.rows("SELECT * FROM store_files") == []
+    assert store.collect_garbage() is False
+
+
 def test_a_shared_file_a_queued_job_needs_stays_after_its_last_model_goes(env):
     env.store.install("wan-2.2-i2v-14b", "int8")
     env.add_job("wan-2.2-t2v-14b", "int8")  # needs the same text encoder, not installed

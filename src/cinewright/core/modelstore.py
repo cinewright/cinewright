@@ -394,7 +394,8 @@ class ModelStore:
         `transport` replaces the network (tests); `engine_root` names the provisioned Wan2GP root, None while there is
         none. `architectures` maps a model type Wan2GP does not define to the architecture of its finetune definition;
         the core passes none yet, as every registry type is a Wan2GP built-in.
-        One store per core start: it marks an install the previous start left `downloading` as failed.
+        One store per core start: it marks an install the previous start left `downloading` as failed, and counts the
+        files that start left unreferenced as files a collection could not delete.
         """
         self.db = db
         self.registry = registry
@@ -414,12 +415,17 @@ class ModelStore:
         self._switching: str | None = None  # the text encoder variant a switch in progress installs
         self._previous_variant: str | None = None  # the variant a switch replaced, until the worker no longer uses it
         self._reserved: Counter[str] = Counter()  # path keys of the files active installs and a switch need
-        self._undeletable: set[str] = set()  # path keys a collection could not delete (a worker held them open)
         # An install the last core start did not finish (Cinewright closed) left its row `downloading`.
         self.db.execute(
             "UPDATE installed_models SET state = 'failed', error = ? WHERE state = 'downloading'",
             ("The install stopped when Cinewright closed; install the model again to continue its downloads.",),
         )
+        # Path keys a collection could not delete (a worker held them open). A file nothing references any more is one
+        # that the last core start left, so the first worker of this start registered while it was there.
+        self._undeletable: set[str] = {
+            row["path"].casefold()
+            for row in self.db.query("SELECT path FROM store_files WHERE path NOT IN (SELECT path FROM installed_model_files)")
+        }
 
     # ------------------------------------------------------------------ queries
 
@@ -792,8 +798,8 @@ class ModelStore:
         Call it once the local worker runs with the current text encoder variant: after a variant switch, this removes
         the previous variant's files, which until then stay for the waiting and running jobs that need them. A file that
         cannot be deleted (on Windows, one a worker process still holds open) stays registered and goes with a later
-        collection. Returns whether this deleted such a file, so that a worker which registered while the file was still
-        there must register again.
+        collection, of a later core start too. Returns whether this deleted such a file, so that a worker which
+        registered while the file was still there must register again.
         """
         with self._lock:
             self._previous_variant = None
