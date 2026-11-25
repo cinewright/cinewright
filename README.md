@@ -223,7 +223,7 @@ End users never need these. They exist for CI and development.
 | --- | --- |
 | `python -m cinewright` | Starts the core and opens the web UI in the browser |
 | `python -m cinewright --version` | Prints `cinewright <version>` |
-| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core; the installed app starts one on WanGP once WanGP is set up. `mock` stands in for WanGP and serves its model types. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
+| `python -m cinewright_worker --engine mock\|wan2gp [--wan2gp-root PATH] [--once] [--stop-on-stdin-eof]` | Runs a worker. It needs `CINEWRIGHT_ENROLLMENT_TOKEN` from the core; the installed app starts one on WanGP once WanGP is set up. `mock` stands in for WanGP and serves its model types; the core routes jobs only to quantizations recorded as installed, so a hand-started mock worker gets jobs only for those. With `--stop-on-stdin-eof` the worker stops when its standard input closes; the core starts its worker this way |
 | `python -m cinewright.devtools openapi [PATH]` | Writes the OpenAPI document |
 | `python -m cinewright.devtools surface` | Prints the public surface: routes, schemas and MCP tools |
 | `python -m cinewright.devtools upstream-check [--json]` | Reports a Wan2GP commit that is eligible for a pin update. Exit code 0: none, 10: one is eligible, 1: the check failed |
@@ -299,9 +299,9 @@ The core listens on `127.0.0.1` only. A web page in your browser can still send 
 
 ### Provenance
 
-Every output asset has a provenance record: prompt, seed, the parameters the job ran with, model, quantization, the model files, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
+Every output asset has a provenance record: prompt, seed, the requested parameters, model, quantization, the model files, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
 
-- **Parameters** are the request's, with the model's registry defaults filled in where the request left them open: resolution, steps, guidance, and for videos frames and fps. `extra` lists the model-specific settings the worker passed on to the engine unchanged, or is `null` when the worker did not report them. The WanGP worker reports them. It leaves out a setting it does not accept, one the job's own parameters replace, and one WanGP would change for this job, for example `denoising_strength` without an input image to edit, or more guidance phases than the model has. A listed setting reached WanGP as asked; whether the model uses it is up to WanGP.
+- **Parameters** are the request's, with the model's registry defaults filled in where the request left them open: resolution, steps, guidance, and for videos frames and fps. WanGP can still adjust them: LTX-2 2.3 Distilled always runs 8 steps at guidance 1.0, and WanGP rounds a video's frame count to one the model can render. `extra` lists the model-specific settings the worker passed on to the engine unchanged, or is `null` when the worker did not report them. The WanGP worker reports them. It leaves out a setting it does not accept, one the job's own parameters replace, and one WanGP would change for this job, for example `denoising_strength` without an input image to edit, more guidance phases than the model has, or `guidance_scale` on LTX-2 2.3 Distilled. The worker knows these rules for the registry's models at the pinned WanGP commit. A listed setting reached WanGP as asked; whether the model uses it is up to WanGP.
 - **Model files** are the SHA-256 of the quantization's own files plus the shared files the model loads: the text encoder in the variant your computer's worker ran, the VAE and the other engine files.
 - Records stored by earlier releases have no parameters (`params` is `null`) and list only the quantization's own files.
 

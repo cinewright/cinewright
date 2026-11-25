@@ -489,7 +489,8 @@ class ModelStore:
     @contextmanager
     def routing(self) -> Iterator[None]:
         """Hold off removals and evictions while a job is routed to installed quantizations and queued, so that its
-        quantization stays installed until `needed_by_jobs` counts the job. Enter it before the database transaction."""
+        quantization stays installed until `needed_by_jobs` counts the job. Enter it before the database transaction.
+        It waits while an install or a text encoder switch places files under the store's lock, a copy included."""
         with self._lock:
             yield
 

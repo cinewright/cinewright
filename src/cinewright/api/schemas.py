@@ -600,7 +600,8 @@ class ProvenanceModel(Contract):
 
 
 class ProvenanceParams(Contract):
-    """The generation parameters a job ran with: the request's, with the model's registry defaults filled in."""
+    """The requested generation parameters, with the model's registry defaults filled in. The engine may still adjust
+    them, for example to a distilled model's fixed steps or to a frame count the model can render."""
 
     resolution: str | None = None
     steps: int | None = None

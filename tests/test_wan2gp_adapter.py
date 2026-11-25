@@ -93,10 +93,11 @@ DEFAULTS = {
     "image_guide": None,
 }
 # What get_factory_settings changes per model type: Z-Image is an image model, Wan 2.2 I2V starts from an image and
-# runs two guidance phases (defaults/i2v_2_2.json), and the LTX-2 handler sets two (update_default_settings).
+# runs two guidance phases (defaults/i2v_2_2.json) with the Wan handler's solver, and the LTX-2 handler sets two phases
+# (update_default_settings).
 MODEL_DEFAULTS = {
     "z_image": {"image_mode": 1},
-    "i2v_2_2": {"image_prompt_type": "S", "guidance_phases": 2},
+    "i2v_2_2": {"image_prompt_type": "S", "guidance_phases": 2, "sample_solver": "unipc"},
     "ltx2_22B_distilled": {"guidance_phases": 2},
     "ltx2_22B_distilled_gguf_q6_k": {"guidance_phases": 2},
 }
@@ -117,6 +118,7 @@ MODEL_DEFS = [
 HF = "https://huggingface.co/DeepBeepMeep"
 _LTX_SHARED = {
     "dtype": "bf16",
+    "ltx2_pipeline": "distilled",  # defaults/ltx2_22B_distilled.json
     "guidance_max_phases": 2,
     "text_encoder_URLs": ["gemma-3-12b-it_bf16.safetensors", "gemma-3-12b-it_quanto_bf16_int8.safetensors"],
     "text_encoder_folder": "gemma-3-12b-it",
@@ -462,7 +464,8 @@ def validate(settings: dict, wgp: FakeWgp, model_def: dict | None = None) -> dic
     """The settings as Wan2GP's validate_task leaves them, for what the adapter depends on (validate_settings at the
     pinned commit): `overrides` must parse, with a transformer quantization among Wan2GP's choices; without "V" in
     `video_prompt_type` the control image is dropped; `denoising_strength` is 1.0 unless "V" and "G" are set;
-    `guidance_phases` is capped at the model's maximum; `model_switch_phase` is 1 unless there are three phases.
+    `guidance_phases` is capped at the model's maximum; `model_switch_phase` is 1 unless there are three phases; and
+    the LTX-2 handler's `validate_generative_settings` sets 8 steps and guidance 1.0 for its distilled pipeline.
     `model_def` stands in for Wan2GP's definition of the task's model type."""
     settings = dict(settings)
     quantization = parse_overrides(settings.get("overrides", "")).get("transformer_quantization", "")
@@ -478,6 +481,8 @@ def validate(settings: dict, wgp: FakeWgp, model_def: dict | None = None) -> dic
     settings["guidance_phases"] = most if model_def.get("lock_guidance_phases") else min(settings["guidance_phases"], most)
     if settings["guidance_phases"] != 3:
         settings["model_switch_phase"] = 1
+    if model_def.get("ltx2_pipeline", "two_stage") == "distilled":  # models/ltx2/ltx2_handler.py
+        settings.update(num_inference_steps=8, guidance_scale=1.0)
     return settings
 
 
@@ -1145,6 +1150,13 @@ LOCKED = {**WGP_DEFS["ltx2_22B_distilled"], "lock_guidance_phases": True}
         ("i2v_2_2", None, {"guidance_phases": 5, "model_switch_phase": 2}, ()),  # so the job keeps its default two
         ("i2v_2_2", None, {"guidance_phases": "3"}, ()),  # Wan2GP compares a number with the maximum
         ("i2v_2_2", None, {"denoising_strength": 1.0}, ("denoising_strength",)),  # what Wan2GP runs anyway
+        # LTX-2's distilled pipeline runs 8 steps at guidance 1.0, whatever the task asks for.
+        ("ltx2_22B_distilled", None, {"guidance_scale": 3.0}, ()),
+        ("ltx2_22B_distilled", None, {"guidance_scale": 1.0}, ("guidance_scale",)),
+        ("ltx2_22B_distilled", None, {"num_inference_steps": 12}, ()),
+        ("ltx2_22B_distilled_gguf_q6_k", None, {"guidance_scale": 3.0}, ()),
+        ("i2v_2_2", None, {"guidance_scale": 3.0}, ("guidance_scale",)),  # Wan 2.2 runs the guidance asked for
+        ("i2v_2_2", None, {"sample_solver": ""}, ()),  # Wan's handler replaces an empty solver with its default
     ],
 )
 def test_extras_wan2gp_would_change_are_left_out(tmp_path, model_type, model_def, extra, expected):

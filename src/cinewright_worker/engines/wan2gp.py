@@ -16,7 +16,8 @@ Wan2GP's own `set_override` (a checkout without it is not started), because Wan2
 default (`transformer_quantization`, int8). For the same reason the adapter checks files per quantization itself,
 from the Wan2GP root as `shared.api` does, instead of asking `shared.api`'s availability, which checks only the
 global default. Image jobs (t2i, i2i) on a video model run in Wan2GP's image mode. Of `params.extra` the adapter
-reports only the keys Wan2GP runs as asked, leaving out those its validation would reset or limit for the job.
+passes on and reports only the keys Wan2GP's validation leaves unchanged, as far as the adapter mirrors that validation
+(`_validated`, for the registry's model types at the pinned commit).
 
 Engine provisioning (`cinewright.core.provisioning`) writes `PROVISIONING_RECORD` into
 `<data dir>/engines/wan2gp/` once the engine is installed. For the checkout it describes, the adapter
@@ -126,6 +127,8 @@ def _accepted(key: str, value: Any) -> bool:
         return isinstance(value, str) and len(value) <= _MAX_TEXT_CHARS
     if key not in _PLAIN_SETTINGS or isinstance(value, bool):
         return False
+    if key == "sample_solver" and value == "":  # Wan's handler (fix_settings) replaces an empty solver with its default
+        return False
     return isinstance(value, (int, float)) or (isinstance(value, str) and _TOKEN.fullmatch(value) is not None)
 
 
@@ -135,11 +138,17 @@ def _image_job(job: EngineJob) -> bool:
 
 def _validated(settings: Mapping[str, Any], model_def: Mapping[str, Any]) -> dict[str, Any]:
     """The values Wan2GP's `validate_settings` (wgp.py at the pinned commit) ends with for the allowlisted settings it
-    resets or limits, whatever the task asks for: `denoising_strength` stays only with a control image ("V" and "G" in
-    `video_prompt_type`), `guidance_phases` is capped at the model's `guidance_max_phases` (fixed there with
-    `lock_guidance_phases`), and `model_switch_phase` stays only with three phases."""
+    resets or limits, whatever the task asks for. Mirrored for the registry's model types, so a pin update or a new
+    model type must check them again:
+    - `denoising_strength` stays only with a control image ("V" and "G" in `video_prompt_type`);
+    - `guidance_phases` is capped at the model's `guidance_max_phases` (fixed there with `lock_guidance_phases`);
+    - `model_switch_phase` stays only with three phases;
+    - LTX-2's distilled pipeline runs 8 steps at guidance 1.0 (`validate_generative_settings` of models/ltx2).
+    """
     video_prompt_type = str(settings.get("video_prompt_type") or "")
     values: dict[str, Any] = {}
+    if model_def.get("ltx2_pipeline") == "distilled":
+        values.update(num_inference_steps=8, guidance_scale=1.0)
     if not ("V" in video_prompt_type and "G" in video_prompt_type):
         values["denoising_strength"] = 1.0
     phases = settings.get("guidance_phases", 1)
@@ -160,8 +169,8 @@ def _extra_settings(
     defaults: dict[str, Any], job: EngineJob, inputs: dict[str, Any], model_def: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
     """The allowed `params.extra` values for keys Wan2GP's defaults have, and the names of the keys left out: those the
-    adapter does not accept, and those Wan2GP would reset or limit for this job (`_validated`), which therefore do not
-    run as asked. `inputs` are the job's input settings (`_input_settings`)."""
+    adapter does not accept, and those Wan2GP's validation would change for this job (`_validated`).
+    `inputs` are the job's input settings (`_input_settings`)."""
     applied: dict[str, Any] = {}
     ignored = []
     for key, value in (job.params.get("extra") or {}).items():
@@ -269,8 +278,8 @@ def build_settings(
 
 
 def accepted_extra(defaults: dict[str, Any], job: EngineJob, model_def: Mapping[str, Any] | None = None) -> tuple[str, ...]:
-    """The `params.extra` keys `build_settings` passes on to Wan2GP as asked and the job's own values do not replace,
-    sorted. Whether a model's code then uses a key is up to Wan2GP."""
+    """The `params.extra` keys `build_settings` passes on to Wan2GP, which its validation leaves unchanged (`_validated`)
+    and the job's own values do not replace, sorted. Whether a model's code then uses a key is up to Wan2GP."""
     applied, _ = _extra_settings(defaults, job, _input_settings(job), model_def or {})
     return tuple(sorted(set(applied) - set(_job_settings(job))))
 

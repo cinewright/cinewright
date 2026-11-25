@@ -166,7 +166,8 @@ def input_provenance(sha256: str, media_type: str, size_bytes: int, created_at: 
 
 
 def provenance_params(params: JobParams, capability: Capability, accepted_extra: Sequence[str] | None) -> ProvenanceParams:
-    """The parameters a job ran with, from its effective parameters (`router.effective_params`).
+    """The parameters a job requested, from its effective parameters (`router.effective_params`); the engine may still
+    adjust them (a distilled model's fixed steps, a frame count fitted to the model).
 
     An image job records no frames or fps: the registry defaults of video models fill them, but the engine renders
     one still image. Of `params.extra` only the keys the worker reports as passed on count; None when it reports none.
@@ -200,7 +201,7 @@ def output_provenance(
     agent: str | None,
     created_at: datetime,
 ) -> Provenance:
-    """Provenance of a job output, built from the job, its route, the files and parameters it ran with, and the host."""
+    """Provenance of a job output, built from the job, its route, the files it ran with, its parameters and the host."""
     return Provenance(
         asset=asset,
         model=ProvenanceModel(

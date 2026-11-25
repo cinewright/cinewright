@@ -312,7 +312,7 @@ class ReportingAdapter(MockAdapter):
         return status
 
 
-def test_the_completion_names_the_extras_the_engine_applied(core, tmp_path):
+def test_the_completion_names_the_extras_passed_on_to_the_engine(core, tmp_path):
     adapter = ReportingAdapter(("flow_shift", "x" * 65))  # a key the contract would refuse is left out
     core.queue.append(make_job(params={"steps": 2, "extra": {"flow_shift": 3.0, "seed_offset": 1}}))
     _, thread, _ = start_loop(core, tmp_path, adapter=adapter, once=True)
