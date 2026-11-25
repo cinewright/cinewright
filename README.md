@@ -18,12 +18,12 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Windows installer.** `scripts/build.py` builds it.
 - **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
 - **WanGP setup.** On the first start of the installed app, the core sets up WanGP in the background: the pinned WanGP commit, ffmpeg and WanGP's own Python environment, with every file checked against its pinned SHA-256. The Setup view shows the progress. Once WanGP is ready, the core starts its worker on it. Later starts reuse the installation. Windows only.
-- **Model installs through the API.** The core installs a model with the shared files it needs into its model store, checked by SHA-256, and removes it again (`POST /api/v1/models/{model_id}/install?quant=`, `DELETE /api/v1/models/{model_id}`). Each computer's text encoder variant can be switched (`PATCH /api/v1/hosts/local`). After every change the core restarts the local worker, so a model can run seconds after its install. The install buttons of the Models view follow in the next step; `tests/test_e2e_model_install.py` runs an install end to end with the mock engine.
+- **Model installs.** In the Models view you install a model in one quantization, follow its download, and remove it again. The core installs it with the shared files it needs into its model store, each file checked by SHA-256. The view also shows each installed model's size, the store's total, the storage quota and the free disk space, and lets you switch your computer's text encoder variant. After every change the core restarts the local worker, so a model can run seconds after its install. The API offers the same (`POST /api/v1/models/{model_id}/install?quant=`, `DELETE /api/v1/models/{model_id}`, `PATCH /api/v1/hosts/local`); `tests/test_e2e_model_install.py` runs an install end to end with the mock engine.
 - **Worker supervision.** The installed app starts the local worker in WanGP's own Python environment once the WanGP setup is ready, restarts it after a crash and stops it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
 
 ## What does not work yet
 
-- **Real generation.** The Models view cannot install models yet, and calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
+- **Real generation.** Models can be installed, but generation on WanGP has not been checked on real hardware yet, and a job is not yet routed to the quantization you installed. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
@@ -73,6 +73,7 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
 2. Run it. Setup installs Cinewright for your user account, into `%LOCALAPPDATA%\Programs\Cinewright`, and needs no administrator rights. It downloads Python 3.12 and Cinewright's Python packages during installation, so it needs an internet connection.
 3. Start Cinewright from the Start menu. The web UI opens in your browser. If Cinewright already runs, starting it again only opens the browser.
 4. On the first start, Cinewright sets up its engine WanGP in the background. It downloads several gigabytes, so this takes a while; open **Setup** to watch the progress. Once the Engine panel shows **Ready**, Cinewright starts its worker on WanGP, and the **Hosts** view shows the local worker as ready. Later starts skip the setup.
+5. Install a model in the **Models** view (see [Install or remove a model](#install-or-remove-a-model)).
 
 For a silent installation, run `CinewrightSetup-<version>.exe /S /D=<folder>`. `/D=` must come last and must not be quoted.
 
@@ -137,6 +138,25 @@ cd web && npm run gen:api
 ### Connect an MCP client
 
 While Cinewright runs, point an MCP client that supports streamable HTTP at `http://127.0.0.1:8737/mcp`. The server accepts only the `Host` values `127.0.0.1` and `localhost`.
+
+### Install or remove a model
+
+While Cinewright runs:
+
+1. Open **Models**. The Model store panel shows how much is installed, the storage quota and the free disk space. Each card is one model in one quantization.
+2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright.
+3. To remove a model, choose **Remove** on its card and confirm with **Remove model**. Text encoders and VAEs that another installed model needs stay.
+
+If an install fails, its card says why. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
+
+### Switch the text encoder variant
+
+Every model on your computer uses the same text encoder variant: `int8` (WanGP's default, about half the size) or `bf16`.
+
+1. Open **Models**. The Text encoder panel marks the variant in use.
+2. Select the other variant and choose **Switch to bf16** (or **Switch to int8**). The panel shows **Switching** while Cinewright downloads the new variant's files, restarts the worker and removes the previous variant's files. **Install** and **Remove** are unavailable until the switch is done.
+
+A switch is refused while a job runs or a model is being installed, and when the new files do not fit on the drive; a message says why. If the panel still shows **Switching** long after the download should have finished, open `logs/cinewright.log` in the data directory: a switch that failed is logged there, and the previous variant stays in use.
 
 ### Install or remove a model through the API
 
@@ -300,6 +320,7 @@ The core keeps every model file in one model store, `models/` in the data direct
 - **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default. Switching first checks the free space, then installs the other variant's files, restarts the worker and removes the previous variant's files. It is refused while a job runs.
 - **The worker learns about new models.** WanGP reports its models only when its worker starts, so the core restarts the worker after every install, removal and switch. If a job is running, the restart waits until the job ended.
 - **Licence.** Models whose licence excludes your country (`country` in the settings) are not offered and cannot be installed.
+- **Sizes.** The Models view shows each installed model's size with the shared files it uses, and the store's total, which counts every shared file once. So the models' sizes can add up to more than the total. Free disk space is measured each time the view loads the model list.
 - **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.
 - **Download hosts.** Model files come only over HTTPS from `huggingface.co` and the download host it forwards to, `us.aws.cdn.hf.co` (later also `civitai.com`).
 
