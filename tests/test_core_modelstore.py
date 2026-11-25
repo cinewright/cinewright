@@ -676,8 +676,8 @@ def test_with_room_on_the_drive_the_quota_step_removes_the_least_recently_used_m
     caplog.set_level("INFO", logger="cinewright.core.modelstore")
     during: list[tuple[bool, bool]] = []
 
-    install = env.store.prepare_install(*LTX)
-    assert install.evicted == ()  # nothing removed before the download
+    install = env.store.prepare_install(*LTX, evict={T2V})  # a confirmation changes nothing when the drive has room
+    assert install.evicted == () and T2V in env.store.installed()  # nothing removed before the download
     env.store.run_install(install, progress=lambda _: during.append((T2V in env.store.installed(), set(WAN_T2V_INT8) <= env.placed())))
     assert during and set(during) == {(True, True)}  # installed, routable and on disk while LTX-2 downloads
     assert env.store.installed() == {Z_IMAGE, T2V, I2V, LTX} and store_total(env) > env.quota
