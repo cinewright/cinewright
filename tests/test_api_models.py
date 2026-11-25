@@ -30,6 +30,7 @@ from cinewright.core.clock import to_iso
 from cinewright.core.core import Core
 from cinewright.core.modelstore import GB, STAGING_DIR, plan_files
 from cinewright.core.supervisor import SupervisorStatus
+from cinewright.db.database import Database
 
 TIMEOUT_S = 10
 QWEN3_INT8 = "Qwen3/qwen3_quanto_bf16_int8.safetensors"
@@ -381,6 +382,45 @@ def test_switching_the_text_encoder_is_refused_while_a_job_runs_on_the_host(stor
     assert store.local_host()["text_encoder_variant"] == "int8"
     assert QWEN3_INT8 in store.placed() and QWEN3_BF16 not in store.placed()
     assert store.hub.served(store.url("z-image-shared", QWEN3_BF16)) == 0
+
+
+def test_a_job_leased_during_a_switch_keeps_the_previous_variant_until_the_worker_was_replaced(store):
+    store.install("z-image-turbo", "int8")
+    store.gate = threading.Event()
+    assert store.client.patch(f"{API}/hosts/local", json={"text_encoder_variant": "bf16"}).status_code == 202
+    worker_id, job_id, lease_id = store.leased_job("z-image-turbo", "int8", "z_image")  # while the bf16 files download
+
+    store.gate.set()
+    store.idle()
+    assert store.local_host()["text_encoder_variant"] == "bf16"
+    assert {QWEN3_INT8, QWEN3_BF16} <= store.placed()  # the running job still uses the int8 text encoder
+    assert store.supervisor.restarts == 1  # the restart waits for the job
+
+    finish_job(store.core, worker_id, job_id, lease_id)
+    assert store.supervisor.restarts == 2
+    store.supervisor.since = store.clock()
+    registration = WorkerRegistration(host_id="local", engine="wan2gp", models=["z_image"], health={"state": "ready"})
+    store.core.register_worker(registration, store.core.enrollment_token)  # the replacement
+    assert QWEN3_BF16 in store.placed() and QWEN3_INT8 not in store.placed()
+
+
+def test_closing_the_core_cancels_an_install_and_registers_nothing(store):
+    store.gate = threading.Event()
+    assert store.client.post(f"{API}/models/z-image-turbo/install", params={"quant": "int8"}).status_code == 202
+
+    closing = threading.Thread(target=store.core.close)
+    closing.start()
+    wait_for(lambda: store.core._closed, "the core to start closing")
+    store.gate.set()
+    closing.join(TIMEOUT_S)
+
+    assert not closing.is_alive() and not store.core._background
+    assert store.placed() == set()
+    reopened = Database.open(store.core.paths.db_file)
+    try:
+        assert reopened.query("SELECT * FROM installed_models") == [] and reopened.query("SELECT * FROM store_files") == []
+    finally:
+        reopened.close()
 
 
 def test_a_text_encoder_switch_that_does_not_fit_is_refused(store):

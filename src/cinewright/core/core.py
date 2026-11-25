@@ -751,7 +751,10 @@ class Core:
         log.info("Switched the text encoder to %s.", switch.variant)
         if switch.missing or merged == "updated":
             self._restart_for_models()
-        self.models.collect_garbage()  # the previous variant's files
+        # The previous variant's files; a job leased during the download still runs with them, so then they go once the
+        # worker's replacement registered.
+        if not self._local_job_active():
+            self.models.collect_garbage()
 
     def _local_job_active(self) -> bool:
         row = self.db.query_one(

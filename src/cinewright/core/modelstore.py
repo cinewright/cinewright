@@ -818,8 +818,12 @@ class ModelStore:
             with self._lock, self.db.transaction() as conn:
                 self._place(conn, switch.missing, ready, now)
                 for key, files in switch.plans.items():
-                    installed = "SELECT 1 FROM installed_models WHERE model_id = ? AND quant = ? AND state = 'installed'"
-                    if conn.execute(installed, key).fetchone() is None:
+                    if (
+                        conn.execute(
+                            "SELECT 1 FROM installed_models WHERE model_id = ? AND quant = ? AND state = 'installed'", key
+                        ).fetchone()
+                        is None
+                    ):
                         continue
                     conn.execute("DELETE FROM installed_model_files WHERE model_id = ? AND quant = ?", key)
                     conn.executemany(
