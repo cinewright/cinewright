@@ -1,7 +1,8 @@
 """Asset store: content-addressed blobs (`assets/<sha[:2]>/<sha>`) and one provenance record per asset.
 
 Identical bytes are one asset. When a second upload or job produces them again, the first
-provenance record stays and the data class becomes the stricter of the two.
+provenance record stays and the data class becomes the stricter of the two. Each job's own output
+provenance is kept in `job_outputs` (see `Core.complete_job`).
 """
 
 from __future__ import annotations
