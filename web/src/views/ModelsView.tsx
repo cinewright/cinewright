@@ -195,7 +195,8 @@ function TextEncoderPanel({
       ) : null}
       {!switchingTo && failed?.error ? (
         <div className="stack stack--tight">
-          <Light state="fail" word={`Switch to ${failed.variant} failed`} detail={`${current} stays in use`} />
+          {/* A config that could not be rewritten fails after the variant was stored. */}
+          <Light state="fail" word={`Switch to ${failed.variant} failed`} detail={failed.variant === current ? null : `${current} stays in use`} />
           <p className="text-caption">{failed.error.message}</p>
         </div>
       ) : null}
