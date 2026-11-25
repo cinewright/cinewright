@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from conftest import TEST_MODELS
 
 from cinewright.api.schemas import CalibrationResult, CalibrationStatus, DataClass, HostKind, JobRequest, Settings
+from cinewright.core.registry import Registry
 from cinewright.core.router import HostInfo, WorkerInfo, effective_params, geo_excluded, plan
 
 ALL = frozenset(DataClass)
+EVERY_QUANT = frozenset((m.id, q.id) for m in TEST_MODELS for q in m.quantizations)
 LOCAL = HostInfo(id="local", name="Local", kind=HostKind.LOCAL, allowed_data_classes=ALL)
 REMOTE = HostInfo(id="remote-1", name="Remote", kind=HostKind.REMOTE_OWN, allowed_data_classes=ALL)
 REMOTE_PUBLIC = HostInfo(id="remote-2", name="Remote public", kind=HostKind.REMOTE_OWN, allowed_data_classes=frozenset({DataClass.PUBLIC}))
@@ -37,8 +39,19 @@ def calibration(status: CalibrationStatus, quant: str = "bf16", seconds_per_step
     )
 
 
-def run(req: JobRequest, data_class: DataClass | None = None, hosts=(LOCAL,), workers=(), calib=(), settings: Settings | None = None):
-    return plan(req, data_class or req.data_class, TEST_MODELS, list(hosts), list(workers), list(calib), settings or Settings())
+def run(
+    req: JobRequest,
+    data_class: DataClass | None = None,
+    hosts=(LOCAL,),
+    workers=(),
+    calib=(),
+    settings: Settings | None = None,
+    installed=EVERY_QUANT,
+    models=TEST_MODELS,
+):
+    """Plan with every test quantization installed on the local host, unless `installed` says otherwise."""
+    args = (req, data_class or req.data_class, models, list(hosts), list(workers), list(calib), settings or Settings())
+    return plan(*args, installed={"local": installed})
 
 
 def test_routes_to_local_with_reasons_in_check_order():
@@ -53,7 +66,16 @@ def test_routes_to_local_with_reasons_in_check_order():
     assert result.cost_eur == 0.0
     assert result.eta_seconds is None
     assert not result.requires_approval
-    assert [reason.split(":")[0] for reason in result.reasons] == ["policy", "policy", "feasibility", "feasibility", "cost", "runtime"]
+    assert [reason.split(":")[0] for reason in result.reasons] == [
+        "policy",
+        "policy",
+        "feasibility",
+        "feasibility",
+        "feasibility",
+        "cost",
+        "runtime",
+    ]
+    assert result.reasons[2] == "feasibility: test-image bf16 is installed on local"
     assert result.reasons == result.route.reasons
 
 
@@ -136,3 +158,55 @@ def test_remote_hosts_need_approval_and_have_unknown_cost():
 def test_effective_params_fill_registry_defaults():
     params = effective_params(request(params={"steps": 2, "extra": {"tile": 1}}), TEST_MODELS[0], seed=7)
     assert (params.steps, params.resolution, params.seed, params.extra) == (2, "512x512", 7, {"tile": 1})
+
+
+def test_only_installed_quantizations_route_and_the_rest_name_model_and_quantization():
+    only_q8 = run(request(), workers=[worker()], installed={("test-image", "Q8_0")})
+    assert only_q8.route.quant == "Q8_0"  # although bf16 comes first in the registry
+
+    nothing = run(request(), workers=[worker()], installed=set())
+    assert not nothing.feasible
+    assert nothing.reasons == [
+        "feasibility: test-image bf16 is not installed on local",
+        "feasibility: test-image Q8_0 is not installed on local",
+    ]
+
+    # A failed or unfinished install is not installed: the core passes only complete installs.
+    pinned = run(request(quant="bf16"), workers=[worker()], installed={("test-image", "Q8_0")})
+    assert pinned.reasons == ["feasibility: test-image bf16 is not installed on local"]
+
+
+def test_hosts_without_a_known_model_store_are_not_checked_for_installs():
+    # The core knows only the local model store; a remote host it does not name keeps routing as before (#17, #18).
+    result = run(request(data_class="public"), hosts=[LOCAL, REMOTE], workers=[worker("remote-1")], installed=set())
+    assert result.route.host_id == "remote-1"
+    assert not any("installed" in reason for reason in result.reasons)
+
+
+def test_preference_ranks_after_cost_and_before_calibration_and_registry_order():
+    preferred = TEST_MODELS[1].model_copy(update={"capabilities": ["t2i"], "preference": 1, "license": TEST_MODELS[0].license})
+    models = [TEST_MODELS[0], preferred]
+    result = run(request(), workers=[worker()], models=models)
+    assert result.route.model_id == "test-video"  # registry order alone would pick test-image
+
+    measured = [calibration(CalibrationStatus.RUNS, seconds_per_step=1.0)]  # test-image bf16 runs, test-video is not measured
+    assert run(request(), workers=[worker()], models=models, calib=measured).route.model_id == "test-video"
+
+    remote_preferred = run(
+        request(data_class="public", model=None),
+        hosts=[LOCAL, REMOTE],
+        workers=[worker("local", models=("test_image",)), worker("remote-1", models=("test_video",))],
+        models=models,
+    )
+    assert (remote_preferred.route.model_id, remote_preferred.route.host_id) == ("test-image", "local")  # cost first
+
+
+def test_t2i_with_every_mvp_model_installed_prefers_z_image_turbo():
+    registry = Registry.load()
+    models = registry.all()
+    installed = frozenset((m.id, q.id) for m in models for q in m.quantizations)
+    served = frozenset(b.model_type for m in models for b in m.engines)
+    result = run(request(), workers=[worker(models=tuple(served))], installed=installed, models=models)
+    assert result.route.model_id == "z-image-turbo"
+    candidates = {m.id for m in models if "t2i" in m.capabilities}
+    assert candidates == {"ltx-2.3-distilled-22b", "wan-2.2-t2v-14b", "z-image-turbo"}

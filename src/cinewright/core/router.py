@@ -5,19 +5,20 @@ Pure functions over snapshots the core passes in. Check order for every candidat
 
 1. policy: the host accepts the job's data class (biometric data never leaves local hosts), and
    the model licence has no geo exclusion for the configured country (`EU` covers EU members)
-2. feasibility: capability, pinned quantization, model limits, an online worker on the host
-   that serves the engine model, calibration not `wont_run`
+2. feasibility: capability, pinned quantization, model limits, the quantization installed on the
+   host (only for hosts whose installed quantizations the core passes in: the local model store),
+   an online worker on the host that serves the engine model, calibration not `wont_run`
 3. cost: local hosts cost 0 EUR; other hosts have no price yet, so their cost is unknown
 4. runtime: `seconds_per_step * steps` when calibrated, else unknown
 
-The first failing check is the candidate's reason. Feasible candidates are ranked by cost,
-calibration status and runtime, then by registry order.
+The first failing check is the candidate's reason. Feasible candidates are ranked by cost, the
+model's registry `preference` (higher first), calibration status and runtime, then by registry order.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -131,6 +132,7 @@ def _calibration(
 class _Candidate:
     route: Route
     cost: float | None
+    preference: int
     status: CalibrationStatus | None
     eta: float | None
     order: tuple[int, int, int]
@@ -144,8 +146,14 @@ def plan(
     workers: Sequence[WorkerInfo],
     calibration: Sequence[CalibrationResult],
     settings: Settings,
+    *,
+    installed: Mapping[str, Set[tuple[str, str]]],
 ) -> Plan:
-    """Choose a route for `request`; `data_class` is the strictest class of the request and its inputs."""
+    """Choose a route for `request`; `data_class` is the strictest class of the request and its inputs.
+
+    `installed` maps a host id to the (model id, quantization) pairs installed on it. A host it does not name is
+    not checked: the core knows only the local model store (remote hosts follow with #17 and #18).
+    """
     if request.model is not None:
         candidates_models = [m for m in models if m.id == request.model]
         if not candidates_models:
@@ -193,6 +201,10 @@ def plan(
                 reasons.append(f"feasibility: no engine binding for {model.id} {quant.id}")
                 continue
             for host_index, host in accepted_hosts:
+                host_installed = installed.get(host.id)
+                if host_installed is not None and (model.id, quant.id) not in host_installed:
+                    reasons.append(f"feasibility: {model.id} {quant.id} is not installed on {host.id}")
+                    continue
                 binding = next(
                     (
                         b
@@ -219,13 +231,14 @@ def plan(
                 route_reasons = [
                     f"policy: host {host.id} accepts {data_class} data",
                     f"policy: the licence of {model.id} allows {settings.country}",
+                    *([f"feasibility: {model.id} {quant.id} is installed on {host.id}"] if host_installed is not None else []),
                     f"feasibility: a worker on {host.id} serves {binding.engine} {binding.model_type}",
                     f"feasibility: calibration on {host.id}: {status or 'not measured'}",
                     f"cost: €{cost:.2f} on {host.id}" if cost is not None else f"cost: unknown on {host.id}",
                     f"runtime: {eta:.0f} s" if eta is not None else "runtime: unknown until calibrated",
                 ]
                 route = Route(model_id=model.id, quant=quant.id, host_id=host.id, engine=binding.engine, reasons=route_reasons)
-                feasible.append(_Candidate(route, cost, status, eta, (model_index, quant_index, host_index)))
+                feasible.append(_Candidate(route, cost, model.preference, status, eta, (model_index, quant_index, host_index)))
 
     if not feasible:
         return Plan(None, _unique(reasons))
@@ -233,6 +246,7 @@ def plan(
         feasible,
         key=lambda c: (
             math.inf if c.cost is None else c.cost,
+            -c.preference,
             _STATUS_RANK[c.status],
             math.inf if c.eta is None else c.eta,
             c.order,

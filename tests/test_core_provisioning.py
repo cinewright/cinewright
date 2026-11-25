@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 import yaml
-from conftest import API, BASE_URL, fake_detect
+from conftest import API, BASE_URL, TEST_INSTALLED, fake_detect, mark_installed
 from fastapi.testclient import TestClient
 
 from cinewright.api.routes.jobs import sse_frame
@@ -875,6 +875,7 @@ def test_process_runner_names_a_program_that_cannot_start(tmp_path):
 def provisioned_core(setup, config, registry_dir, clock):
     """A core whose provisioner downloads from the fake server and runs the fake uv (same data directory)."""
     instance = Core(config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock, provisioner=setup.provisioner())
+    mark_installed(instance, *TEST_INSTALLED)
     yield instance
     instance.close()
 

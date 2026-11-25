@@ -1102,6 +1102,23 @@
       "JobCompletion": {
         "additionalProperties": false,
         "properties": {
+          "accepted_extra": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "maxItems": 100,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Keys of the job's `params.extra` the engine applied; null when the worker does not report them",
+            "title": "Accepted Extra"
+          },
           "engine_version": {
             "anyOf": [
               {
@@ -2173,6 +2190,17 @@
             ],
             "title": "Negative Prompt"
           },
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvenanceParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for uploaded inputs and for records stored by earlier releases"
+          },
           "parents": {
             "items": {
               "description": "Lowercase hex SHA-256",
@@ -2393,6 +2421,84 @@
           "engine"
         ],
         "title": "ProvenanceModel",
+        "type": "object"
+      },
+      "ProvenanceParams": {
+        "additionalProperties": false,
+        "description": "The generation parameters a job ran with: the request's, with the model's registry defaults filled in.",
+        "properties": {
+          "extra": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The entries of `params.extra` the engine applied; null when the worker did not report them",
+            "title": "Extra"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for images",
+            "title": "Fps"
+          },
+          "frames": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null for images",
+            "title": "Frames"
+          },
+          "guidance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guidance"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "title": "ProvenanceParams",
         "type": "object"
       },
       "RecipeList": {

@@ -103,14 +103,33 @@ from cinewright.api.schemas import (
     WorkerRegistration,
 )
 from cinewright.config import Config
-from cinewright.core import hardware, router
-from cinewright.core.assets import BlobStore, BlobWriter, StagedBlob, asset_from_row, input_provenance, output_provenance, record_asset
+from cinewright.core import dialect, hardware, router
+from cinewright.core.assets import (
+    BlobStore,
+    BlobWriter,
+    StagedBlob,
+    asset_from_row,
+    input_provenance,
+    output_provenance,
+    provenance_params,
+    record_asset,
+)
 from cinewright.core.clock import Clock, from_iso, to_iso, utcnow
 from cinewright.core.engines import load_engine_pins
 from cinewright.core.errors import Conflict, CoreError, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
 from cinewright.core.events import EventLog, Published
 from cinewright.core.licenses import WANGP_NAME, WANGP_NOTICE, license_notices
-from cinewright.core.modelstore import GB, Install, InstallProgress, ModelStore, ModelStoreError, StoreUsage, VariantSwitch, disk_free
+from cinewright.core.modelstore import (
+    GB,
+    Install,
+    InstallProgress,
+    ModelStore,
+    ModelStoreError,
+    StoreUsage,
+    VariantSwitch,
+    disk_free,
+    plan_files,
+)
 from cinewright.core.provisioning import ENGINE_ID as WAN2GP
 from cinewright.core.provisioning import EngineProvisioner, ProvisioningStatus, bundled_uv
 from cinewright.core.registry import Registry
@@ -855,6 +874,7 @@ class Core:
             self._online_workers(),
             self._calibration_rows(),
             self.get_settings(),
+            installed={LOCAL_HOST_ID: self.models.installed()},
         )
         return plan, data_class
 
@@ -1249,8 +1269,7 @@ class Core:
             model_id=route.model_id,
             quant=route.quant,
             engine_model=binding.model_type,
-            # Every MVP model reads natural language; dialect translation arrives with the first `tags` model.
-            prompt=request.prompt,
+            prompt=dialect.translate_prompt(request.prompt, model.prompt_dialect),
             negative_prompt=request.negative_prompt,
             inputs=inputs,
             params=router.effective_params(request, model, row["seed"]),
@@ -1325,11 +1344,35 @@ class Core:
         rows = conn.execute("SELECT name, sha256, size_bytes, media_type FROM job_outputs WHERE job_id = ?", (job_id,))
         return {row["name"]: _Upload(row["sha256"], row["size_bytes"], row["media_type"]) for row in rows}
 
+    def _model_files(self, model: ModelDescriptor | None, route: Route, variant: str) -> list[str]:
+        """SHA-256 of the files a job's model ran with, as the model store plans them (`plan_files`).
+
+        On the local host: the transformer files of the routed quantization, then the shared files the descriptor
+        `requires`, those of the text encoder `variant` included. Other hosts have no model store of this core yet,
+        so only the transformer files are known; so too when the registry entry cannot be planned.
+        """
+        if model is None:
+            return []
+        if route.host_id == LOCAL_HOST_ID:
+            try:
+                return [file.sha256 for file in plan_files(self.registry, route.model_id, route.quant, variant)]
+            except ModelStoreError as exc:
+                log.warning("Provenance of a %s %s job lists only its transformer files: %s", route.model_id, route.quant, exc.message)
+        quant = next((q for q in model.quantizations if q.id == route.quant), None)
+        return [file.sha256 for file in quant.files] if quant else []
+
     def complete_job(self, worker_id: str, job_id: str, completion: JobCompletion) -> None:
+        variant = self.models.worker_variant()  # before the transaction: store calls never run inside it
         with self._tx() as tx:
             row = self._active_job(tx.conn, worker_id, job_id, completion.lease_id)
             request = JobRequest.model_validate_json(row["request"])
             route = Route.model_validate_json(row["route"])
+            model = self.registry.get(route.model_id)
+            files = self._model_files(model, route, variant)
+            params = None
+            if model is not None:
+                effective = router.effective_params(request, model, row["seed"])
+                params = provenance_params(effective, request.capability, completion.accepted_extra)
             worker = self._worker_record(tx.conn, worker_id)
             host = tx.conn.execute("SELECT * FROM hosts WHERE id = ?", (route.host_id,)).fetchone()
             agent = tx.conn.execute("SELECT name FROM agents WHERE id = ?", (row["agent_id"],)).fetchone() if row["agent_id"] else None
@@ -1352,7 +1395,9 @@ class Core:
                     job_id=job_id,
                     request=request,
                     route=route,
-                    model=self.registry.get(route.model_id),
+                    model=model,
+                    file_sha256=files,
+                    params=params,
                     engine_version=completion.engine_version or worker.engine_version,
                     seed=row["seed"],
                     host=host,

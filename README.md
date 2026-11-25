@@ -23,7 +23,7 @@ Cinewright is a platform for generating images, video and audio on your own comp
 
 ## What does not work yet
 
-- **Real generation.** Models can be installed, but generation on WanGP has not been checked on real hardware yet, and a job is not yet routed to the quantization you installed. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
+- **Real generation.** Models can be installed, and jobs are routed only to the quantizations you installed. But generation on WanGP has not been checked on real hardware yet, and WanGP still runs its own default quantization (`int8`) instead of the one a job is routed to. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
@@ -146,6 +146,8 @@ While Cinewright runs:
 1. Open **Models**. The Model store panel shows how much is installed, the storage quota and the free disk space. Each card is one model in one quantization.
 2. Choose **Install** on a card. If the model does not fit on the drive, a message at the top of the view says how much space is missing, and nothing is downloaded. Otherwise the card shows the download's progress. Once every file has passed its hash check, the card shows **Installed**, and the Generate view can use the model a few seconds later, without restarting Cinewright.
 3. To remove a model, choose **Remove** on its card and confirm with **Remove model**. Text encoders and VAEs that another installed model needs stay.
+
+Jobs run only on installed quantizations. If the model or quantization you choose in the Generate view is not installed, the estimate says which one is missing.
 
 If an install fails, its card says why. An install that was still running when Cinewright closed shows as failed too. **Try again** keeps the files that were already downloaded and checked; **Remove** deletes them. Removing a model that a queued or running job needs is refused with a message.
 
@@ -289,7 +291,7 @@ The core keeps one long-running worker on your computer, so WanGP's models stay 
 
 ### Routing
 
-For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a registered worker for the engine model, and calibration. Then come cost (local jobs cost €0.00) and runtime. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
+For each request, the router checks four things in order. Policy comes first: the data class and the licence's geographic exclusions. Feasibility comes next: capability, a pinned model, limits, a quantization installed on your computer, a registered worker for the engine model, and calibration. Then come cost (local jobs cost €0.00) and runtime. When several routes remain, the cheapest wins; among equally cheap ones, a model the registry prefers comes first (Z-Image Turbo for text-to-image, as a model made for images), then calibration, runtime and registry order. The estimate lists every decision, so the UI and MCP clients can show why a request cannot run.
 
 ### Local only
 
@@ -297,7 +299,11 @@ The core listens on `127.0.0.1` only. A web page in your browser can still send 
 
 ### Provenance
 
-Every output asset has a provenance record: prompt, seed, model, quantization, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
+Every output asset has a provenance record: prompt, seed, the parameters the job ran with, model, quantization, the model files, engine version, host, client and job. `GET /api/v1/assets/{sha256}/provenance` exports it as sidecar JSON.
+
+- **Parameters** are the request's, with the model's registry defaults filled in where the request left them open: resolution, steps, guidance, and for videos frames and fps. `extra` lists the model-specific settings the engine applied, or is `null` when the worker did not report them.
+- **Model files** are the SHA-256 of the quantization's own files plus the shared files the model loads: the text encoder in the variant your computer's worker ran, the VAE and the other engine files.
+- Records stored by earlier releases have no parameters (`params` is `null`) and list only the quantization's own files.
 
 ### WanGP setup
 

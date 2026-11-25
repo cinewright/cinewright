@@ -1072,6 +1072,11 @@ export interface components {
         };
         /** JobCompletion */
         JobCompletion: {
+            /**
+             * Accepted Extra
+             * @description Keys of the job's `params.extra` the engine applied; null when the worker does not report them
+             */
+            accepted_extra?: string[] | null;
             /** Engine Version */
             engine_version?: string | null;
             /** Lease Id */
@@ -1442,6 +1447,8 @@ export interface components {
             model?: components["schemas"]["ProvenanceModel"] | null;
             /** Negative Prompt */
             negative_prompt?: string | null;
+            /** @description null for uploaded inputs and for records stored by earlier releases */
+            params?: components["schemas"]["ProvenanceParams"] | null;
             /** Parents */
             parents?: string[];
             /** Prompt */
@@ -1507,6 +1514,35 @@ export interface components {
             name: string;
             /** Quant */
             quant: string;
+        };
+        /**
+         * ProvenanceParams
+         * @description The generation parameters a job ran with: the request's, with the model's registry defaults filled in.
+         */
+        ProvenanceParams: {
+            /**
+             * Extra
+             * @description The entries of `params.extra` the engine applied; null when the worker did not report them
+             */
+            extra?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Fps
+             * @description null for images
+             */
+            fps?: number | null;
+            /**
+             * Frames
+             * @description null for images
+             */
+            frames?: number | null;
+            /** Guidance */
+            guidance?: number | null;
+            /** Resolution */
+            resolution?: string | null;
+            /** Steps */
+            steps?: number | null;
         };
         /** RecipeList */
         RecipeList: {
