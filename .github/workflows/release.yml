@@ -8,14 +8,14 @@ on:
   push:
     branches: [main]
 permissions: {}
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
 jobs:
   release-please:
     name: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: ${{ github.workflow }}-release-please
+      cancel-in-progress: false
     permissions:
       contents: write # release commits, tags and GitHub releases
       pull-requests: write # the release PR
