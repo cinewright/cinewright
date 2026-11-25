@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -217,9 +218,16 @@ def config(home: Path) -> Config:
     return Config(home=home)
 
 
+def no_network(request: httpx.Request) -> httpx.Response:
+    """The download transport of test cores: model installs never reach the network."""
+    return httpx.Response(404)
+
+
 @pytest.fixture
 def core(config: Config, registry_dir: Path, clock: FakeClock) -> Core:
-    instance = Core(config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock)
+    instance = Core(
+        config, registry=Registry.load(registry_dir), detect=fake_detect, clock=clock, download_transport=httpx.MockTransport(no_network)
+    )
     yield instance
     instance.close()
 

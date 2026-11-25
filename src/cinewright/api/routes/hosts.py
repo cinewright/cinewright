@@ -6,7 +6,7 @@ from fastapi import APIRouter, Response
 
 from cinewright.api.deps import Core
 from cinewright.api.problems import PROBLEM_RESPONSE
-from cinewright.api.schemas import ApprovalList, CastList, HostList, PresetList, RecipeList
+from cinewright.api.schemas import ApprovalList, CastList, HostList, HostPatch, PresetList, RecipeList
 
 router = APIRouter(responses={404: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501: PROBLEM_RESPONSE})
 
@@ -14,6 +14,18 @@ router = APIRouter(responses={404: PROBLEM_RESPONSE, 422: PROBLEM_RESPONSE, 501:
 @router.get("/hosts", response_model=HostList, tags=["hosts"], operation_id="listHosts")
 def list_hosts(core: Core) -> HostList:
     return core.list_hosts()
+
+
+@router.patch("/hosts/{host_id}", status_code=202, tags=["hosts"], operation_id="updateHost", responses={409: PROBLEM_RESPONSE})
+def update_host(host_id: str, patch: HostPatch, core: Core) -> Response:
+    """Change a host's settings. A new `text_encoder_variant` is switched in the background.
+
+    Checks first and refuses with 409 while a job runs on the host or a model is being installed, and when the
+    variant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's
+    configuration names it.
+    """
+    core.update_host(host_id, patch)
+    return Response(status_code=202)
 
 
 @router.post("/hosts", status_code=201, tags=["hosts"], operation_id="addHost")

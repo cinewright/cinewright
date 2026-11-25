@@ -501,6 +501,93 @@ def test_an_install_the_quota_cannot_hold_is_refused_and_evicts_nothing(env):
     assert len(env.rows("SELECT * FROM installed_models")) == 3
 
 
+# ---------------------------------------------------------------------- text encoder variant
+
+QWEN3_INT8 = "Qwen3/qwen3_quanto_bf16_int8.safetensors"
+QWEN3_BF16 = "Qwen3/qwen3_bf16.safetensors"
+
+
+def test_a_variant_switch_installs_the_other_variant_and_frees_the_previous_one(env):
+    env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."], "text_encoder_quantization": "int8"})
+    env.store.install("z-image-turbo", "int8")
+    env.store.install("wan-2.2-t2v-14b", "int8")
+
+    switch = env.store.prepare_switch("bf16")
+    assert {file.path for file in switch.missing} == {QWEN3_BF16, "umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors"}
+    assert env.store.run_switch(switch) == "updated"
+
+    # Until the worker restarted and the garbage was collected, both variants are on disk.
+    assert {QWEN3_INT8, QWEN3_BF16, UMT5_INT8} <= env.placed()
+    assert env.config()["text_encoder_quantization"] == "bf16"
+    assert env.rows("SELECT text_encoder_variant FROM hosts")[0]["text_encoder_variant"] == "bf16"
+    for model_id in ("z-image-turbo", "wan-2.2-t2v-14b"):
+        planned = {f.path for f in plan_files(env.registry, model_id, "int8", "bf16")}
+        assert {r["path"] for r in env.rows("SELECT path FROM installed_model_files WHERE model_id = ?", (model_id,))} == planned
+        [row] = env.rows("SELECT size_bytes FROM installed_models WHERE model_id = ?", (model_id,))
+        assert row["size_bytes"] == env.size(model_id, "int8", "bf16")
+
+    env.store.collect_garbage()
+    placed = env.placed()
+    assert QWEN3_BF16 in placed and QWEN3_INT8 not in placed and UMT5_INT8 not in placed
+    assert {r["path"] for r in env.rows("SELECT path FROM store_files")} == placed
+
+
+def test_a_failed_variant_switch_changes_nothing(env):
+    env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."], "text_encoder_quantization": "int8"})
+    env.store.install("z-image-turbo", "int8")
+    url = env.url("z-image-shared", QWEN3_BF16)
+    env.hub.files[url] = env.hub.files[url][:-1] + b"!"
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.run_switch(env.store.prepare_switch("bf16"))
+
+    assert failure.value.code == "hash_mismatch" and QWEN3_BF16 in failure.value.message
+    assert env.rows("SELECT text_encoder_variant FROM hosts")[0]["text_encoder_variant"] == "int8"
+    assert env.config()["text_encoder_quantization"] == "int8"
+    assert env.placed() == Z_IMAGE_INT8_FILES
+    env.store.collect_garbage()
+    assert env.placed() == Z_IMAGE_INT8_FILES
+    env.store.install("wan-2.2-t2v-14b", "int8")  # the switch no longer blocks installs
+
+
+def test_a_variant_switch_excludes_installs_removals_and_running_jobs(env):
+    env.store.install("z-image-turbo", "int8")
+    install = env.store.prepare_install("wan-2.2-t2v-14b", "int8")
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("bf16")
+    assert failure.value.code == "installing"
+    env.store.run_install(install)
+
+    switch = env.store.prepare_switch("bf16")
+    for refused in (lambda: env.store.prepare_install("wan-2.2-i2v-14b", "int8"), lambda: env.store.remove("z-image-turbo")):
+        with pytest.raises(ModelStoreError) as failure:
+            refused()
+        assert failure.value.code == "switching"
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("int8")
+    assert failure.value.code == "switching"
+    env.store.run_switch(switch)
+
+    for state in ("leased", "running"):
+        job_id = env.add_job("z-image-turbo", "int8", state)
+        with pytest.raises(ModelStoreError) as failure:
+            env.store.prepare_switch("int8")
+        assert failure.value.code == "in_use"
+        env.db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (job_id,))
+    env.add_job("z-image-turbo", "int8", "running", host_id="elsewhere")  # another host's job does not block this one
+    env.store.run_switch(env.store.prepare_switch("int8"))
+
+
+def test_usage_counts_each_models_files_once(env):
+    env.store.install("wan-2.2-t2v-14b", "int8")
+    env.store.install("wan-2.2-t2v-14b", "bf16")
+    usage = env.store.usage()
+    together = {f.key: f.size_bytes for q in ("int8", "bf16") for f in plan_files(env.registry, "wan-2.2-t2v-14b", q, "int8")}
+    assert usage.by_model == {"wan-2.2-t2v-14b": sum(together.values())}
+    assert usage.total_bytes == sum(together.values())
+    assert sum(usage.installed.values()) > usage.total_bytes  # each quantization counts the shared files
+
+
 # ---------------------------------------------------------------------- rules
 
 

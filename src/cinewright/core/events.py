@@ -9,7 +9,7 @@ the `seq` of the job's latest stored event, so `Last-Event-ID` always names a st
 keeps the latest preview of each running job in memory and sends it to a stream after its replay.
 Releases 0.0.1 and 0.0.2 did store previews; those rows stay in the table but replay never sends them.
 
-System events (engine provisioning) are not job events: they are live only, neither stored nor
+System events (engine provisioning, model installs) are not job events: they are live only, neither stored nor
 replayed nor kept, and only the unfiltered stream carries them. They are broadcast as they are, not
 as a counted `(published, Published)` item, so they never touch the watermark or the publish counter.
 """

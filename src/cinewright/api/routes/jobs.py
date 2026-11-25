@@ -77,7 +77,8 @@ def cancel_job(job_id: str, core: Core) -> Job:
     responses={
         200: {
             "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` "
-            "carry engine provisioning as a SystemEvent, without an id and never replayed.",
+            "(engine provisioning) and `model` (model install progress, installs and removals) carry a SystemEvent, "
+            "without an id and never replayed.",
             "content": {"text/event-stream": {}},
         }
     },

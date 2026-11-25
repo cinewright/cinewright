@@ -1,10 +1,16 @@
 """The core: the implementation of `CoreService` (see `service.py`).
 
 One `Core` per process start. It owns the database, the asset store, the scheduler, the event
-log and the engine provisioner (`provisioning.py`), and generates the enrollment token that worker
-processes need to register. The app's lifespan starts provisioning when asked to. It either attaches
-a given supervisor of the local worker (`supervisor.py`), or, in the installed app, lets the core start
-one on the provisioned engine as soon as the engine is ready (`run_local_worker_when_ready`).
+log, the engine provisioner (`provisioning.py`) and the model store (`modelstore.py`), and generates
+the enrollment token that worker processes need to register. The app's lifespan starts provisioning
+when asked to. It either attaches a given supervisor of the local worker (`supervisor.py`), or, in
+the installed app, lets the core start one on the provisioned engine as soon as the engine is ready
+(`run_local_worker_when_ready`).
+
+Model installs and text encoder switches are checked in the request and run in background threads;
+their progress goes out as `model` system events. After a change of the model store the core restarts
+the local worker, so it registers its new model list; while a job runs on it, once that job ended.
+Store calls never run inside `_tx`: the lock order is the store's lock, then the database's.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
@@ -26,6 +33,7 @@ from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
 
+import httpx
 from pydantic import ValidationError
 
 from cinewright import __version__
@@ -53,6 +61,7 @@ from cinewright.api.schemas import (
     Host,
     HostKind,
     HostList,
+    HostPatch,
     InstallState,
     Job,
     JobCompletion,
@@ -67,8 +76,10 @@ from cinewright.api.schemas import (
     LicenseNotices,
     ModelDescriptor,
     ModelDetail,
+    ModelInstall,
     ModelList,
     ModelQuantState,
+    ModelStoreUsage,
     ModelSummary,
     OutputUploaded,
     PresetList,
@@ -78,6 +89,7 @@ from cinewright.api.schemas import (
     Route,
     Settings,
     SettingsPatch,
+    SetupError,
     SystemEvent,
     SystemEventKind,
     SystemInfo,
@@ -94,9 +106,10 @@ from cinewright.core import hardware, router
 from cinewright.core.assets import BlobStore, BlobWriter, StagedBlob, asset_from_row, input_provenance, output_provenance, record_asset
 from cinewright.core.clock import Clock, from_iso, to_iso, utcnow
 from cinewright.core.engines import load_engine_pins
-from cinewright.core.errors import Conflict, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
+from cinewright.core.errors import Conflict, CoreError, Infeasible, Invalid, NotFound, NotImplementedFeature, Unauthorized
 from cinewright.core.events import EventLog, Published
 from cinewright.core.licenses import WANGP_NAME, WANGP_NOTICE, license_notices
+from cinewright.core.modelstore import GB, Install, InstallProgress, ModelStore, ModelStoreError, StoreUsage, VariantSwitch, disk_free
 from cinewright.core.provisioning import ENGINE_ID as WAN2GP
 from cinewright.core.provisioning import EngineProvisioner, ProvisioningStatus, bundled_uv
 from cinewright.core.registry import Registry
@@ -114,6 +127,12 @@ MAINTENANCE_INTERVAL_S = 5.0
 # Cores before migration 0002 recorded uploads as log events carrying this key; uploads now live in
 # `job_outputs`. Workers still may not send it, so the old records stay distinguishable from worker data.
 UPLOAD_RECORD_KEY = "output"
+MODEL_PROGRESS_INTERVAL_S = 0.5  # at most two `model` progress events per second per install
+BACKGROUND_JOIN_S = 30.0  # how long closing waits for installs and switches to stop
+# Model store refusals by HTTP answer; every other code is a conflict with the current state (409).
+_STORE_NOT_FOUND = frozenset({"unknown_model", "not_installed"})
+_STORE_INVALID = frozenset({"unknown_quant", "unknown_variant"})
+_STORE_RETRY = frozenset({"download_failed", "io_error", "install_failed"})  # installing again may help
 
 Detector = Callable[[Path, str], HardwareProfile]
 
@@ -138,6 +157,30 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _store_refusal(exc: ModelStoreError) -> CoreError:
+    """A model store refusal as the API answers it; the problem carries the store's `code`."""
+    if exc.code in _STORE_NOT_FOUND:
+        return NotFound(exc.message, code=exc.code)
+    if exc.code in _STORE_INVALID:
+        return Invalid(exc.message, code=exc.code)
+    return Conflict(exc.message, code=exc.code)
+
+
+class _Throttle:
+    """Lets a progress report through at most every `interval` seconds; the first and the last always pass."""
+
+    def __init__(self, interval: float = MODEL_PROGRESS_INTERVAL_S) -> None:
+        self.interval = interval
+        self.last: float | None = None
+
+    def due(self, done: int, total: int) -> bool:
+        now = time.monotonic()
+        if self.last is None or done >= total or now - self.last >= self.interval:
+            self.last = now
+            return True
+        return False
+
+
 class _Upload(NamedTuple):
     """An output upload as `store_output` recorded it in `job_outputs`, including the checked media type."""
 
@@ -157,11 +200,14 @@ class Core:
         lease_seconds: float = LEASE_SECONDS,
         provisioner: EngineProvisioner | None = None,
         worker_supervisor: Callable[[WorkerLaunch], WorkerSupervisor] = WorkerSupervisor,
+        download_transport: httpx.BaseTransport | None = None,
+        free_disk: Callable[[Path], int] = disk_free,
     ) -> None:
         """`provisioner` defaults to provisioning the pinned Wan2GP with the installation's bundled uv.
 
         `worker_supervisor` builds the local worker's supervisor from the launch the provisioning record gives
         (`run_local_worker_when_ready`); tests swap in the mock engine and their own interpreter.
+        `download_transport` and `free_disk` replace the network and the disk measurement of model installs (tests).
         """
         self.config = config
         self.paths = config.paths
@@ -192,6 +238,21 @@ class Core:
         )
         self.provisioner.on_change = self._engine_changed
         self._ensure_local_host()
+        self.models = ModelStore(
+            self.db,
+            self.registry,
+            self.paths,
+            host_id=LOCAL_HOST_ID,
+            quota_bytes=self._quota_bytes,
+            free_bytes=free_disk,
+            transport=download_transport,
+            engine_root=self._engine_root,
+            clock=clock,
+        )
+        self._background: set[threading.Thread] = set()  # installs and text encoder switches
+        self._background_lock = threading.Lock()
+        self._restart_pending = False  # the model store changed while a job ran on the local worker
+        self._config_restarted = False  # restarted once since this start because WanGP's config was merged
 
     def stop_leasing(self) -> None:
         """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
@@ -260,7 +321,14 @@ class Core:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
+        self._closed = True  # also cancels installs and switches, whose downloads continue at the next try
+        deadline = time.monotonic() + BACKGROUND_JOIN_S
+        with self._background_lock:
+            running = list(self._background)
+        for thread in running:
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                log.error("%s did not stop in time.", thread.name)
         self.stop_local_worker()
         self.provisioner.stop()
         self.event_log.close()
@@ -312,10 +380,14 @@ class Core:
     def _online_workers(self) -> list[router.WorkerInfo]:
         cutoff = to_iso(self.clock() - timedelta(seconds=WORKER_STALE_SECONDS))
         rows = self.db.query("SELECT * FROM workers WHERE last_seen_at >= ? ORDER BY registered_at", (cutoff,))
+        rows = [row for row in rows if WorkerHealth.model_validate_json(row["health"]).state != "failed"]
+        # A worker retired by a restart (after a model change) still routes until its replacement registered, so jobs
+        # submitted meanwhile wait for the replacement; from then on its model list from before the change routes nothing.
+        replaced = {row["host_id"]: row["registered_at"] for row in rows if row["id"] not in self._retired}
         return [
             router.WorkerInfo(id=row["id"], host_id=row["host_id"], engine=row["engine"], models=frozenset(json.loads(row["models"])))
             for row in rows
-            if WorkerHealth.model_validate_json(row["health"]).state != "failed"
+            if row["id"] not in self._retired or replaced.get(row["host_id"], "") < row["registered_at"]
         ]
 
     def _worker_record(self, conn: sqlite3.Connection, worker_id: str) -> WorkerRecord:
@@ -490,6 +562,7 @@ class Core:
 
     def _quant_states(self, model: ModelDescriptor) -> list[ModelQuantState]:
         installed = {row["quant"]: row for row in self.db.query("SELECT * FROM installed_models WHERE model_id = ?", (model.id,))}
+        failed = InstallState.FAILED.value
         calibration = [c for c in self._calibration_rows() if c.model_id == model.id]
         states = []
         for quant in model.quantizations:
@@ -504,11 +577,12 @@ class Core:
                     install_state=InstallState(row["state"]) if row is not None else InstallState.ABSENT,
                     size_bytes=size,
                     calibration=[c for c in calibration if c.quant == quant.id],
+                    error=row["error"] if row is not None and row["state"] == failed else None,
                 )
             )
         return states
 
-    def _summary(self, model: ModelDescriptor) -> ModelSummary:
+    def _summary(self, model: ModelDescriptor, usage: StoreUsage) -> ModelSummary:
         return ModelSummary(
             id=model.id,
             name=model.name,
@@ -517,15 +591,23 @@ class Core:
             capabilities=model.capabilities,
             license=model.license,
             quantizations=self._quant_states(model),
+            installed_bytes=usage.by_model.get(model.id, 0),
         )
 
     def list_models(self) -> ModelList:
-        return ModelList(items=[self._summary(model) for model in self.registry.all()])
+        """The registry's models without those whose licence excludes the configured country, and the model store's usage."""
+        country = self.get_settings().country
+        usage = self.models.usage()
+        offered = [model for model in self.registry.all() if not router.geo_excluded(model.license.geo_exclusions, country)]
+        return ModelList(
+            items=[self._summary(model, usage) for model in offered],
+            store=ModelStoreUsage(total_bytes=usage.total_bytes, quota_bytes=usage.quota_bytes, free_bytes=usage.free_bytes),
+        )
 
     def get_model(self, model_id: str) -> ModelDetail:
         model = self._require_model(model_id)
         return ModelDetail(
-            **self._summary(model).model_dump(),
+            **self._summary(model, self.models.usage()).model_dump(),
             limits=model.limits,
             prompt_dialect=model.prompt_dialect,
             defaults=model.defaults,
@@ -534,18 +616,184 @@ class Core:
         )
 
     def install_model(self, model_id: str, quant: str | None) -> None:
-        self._require_model(model_id)
-        raise NotImplementedFeature("Model installation", "phase 1")
+        """Check and prepare the install (refusals raise here), then download and register it in the background."""
+        model = self._require_model(model_id)
+        choices = ", ".join(q.id for q in model.quantizations)
+        if quant is None:
+            raise Invalid(f"Name the quantization of {model.name} to install with ?quant= (one of {choices}).")
+        if all(q.id != quant for q in model.quantizations):
+            raise Invalid(f"{model.name} has no quantization {quant}; choose one of {choices}.", code="unknown_quant")
+        country = self.get_settings().country
+        if router.geo_excluded(model.license.geo_exclusions, country):
+            raise Conflict(
+                f"The licence of {model.name} ({model.license.name}) excludes {country}, so it was not installed.", code="licence"
+            )
+        try:
+            install = self.models.prepare_install(model_id, quant)
+        except ModelStoreError as exc:
+            raise _store_refusal(exc) from None
+        for victim in install.evicted:
+            self._publish_model(*victim, InstallState.ABSENT)
+        if install.evicted:
+            self._restart_for_models()
+        self._in_background(f"install {model_id} {quant}", lambda: self._run_install(install))
 
     def remove_model(self, model_id: str, quant: str | None) -> None:
         self._require_model(model_id)
-        raise NotImplementedFeature("Model removal", "phase 1")
+        rows = self.db.query("SELECT quant FROM installed_models WHERE model_id = ? AND state = 'installed'", (model_id,))
+        installed = {row["quant"] for row in rows}
+        try:
+            removed = self.models.remove(model_id, quant)
+        except ModelStoreError as exc:
+            raise _store_refusal(exc) from None
+        for key in removed:
+            self._publish_model(*key, InstallState.ABSENT)
+        if any(key[1] in installed for key in removed):
+            self._restart_for_models()
 
     def calibration(self) -> CalibrationReport:
         return CalibrationReport(items=self._calibration_rows())
 
     def start_calibration(self) -> None:
         raise NotImplementedFeature("Calibration runs", "phase 1")
+
+    # ------------------------------------------------------------------ model store
+
+    def _quota_bytes(self) -> int | None:
+        quota = self.get_settings().model_store_quota_gb
+        return quota * GB if quota is not None else None
+
+    def _engine_root(self) -> Path | None:
+        launch = self.provisioner.worker_launch()
+        return launch.wan2gp_root if launch is not None else None
+
+    def _in_background(self, name: str, target: Callable[[], None]) -> None:
+        """Run `target` in a thread that `close` waits for; it ends early once `_closed` is set."""
+
+        def run() -> None:
+            try:
+                target()
+            except Exception:  # noqa: BLE001 - the core keeps serving; the log has the details
+                log.exception("%s failed", name)
+            finally:
+                with self._background_lock:
+                    self._background.discard(thread)
+
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        with self._background_lock:
+            self._background.add(thread)
+        thread.start()
+
+    def _publish_model(
+        self,
+        model_id: str,
+        quant: str,
+        state: InstallState,
+        *,
+        downloaded: int | None = None,
+        total: int | None = None,
+        error: SetupError | None = None,
+    ) -> None:
+        """Send a quantization's new install state as a live `model` system event (unfiltered streams only)."""
+        if self._closed:
+            return
+        progress = None
+        if state == InstallState.DOWNLOADING and total is not None and downloaded is not None:
+            progress = Progress(phase="download", percent=round(100.0 * downloaded / total, 1) if total else 100.0)
+        install = ModelInstall(
+            model_id=model_id,
+            quant=quant,
+            install_state=state,
+            progress=progress,
+            downloaded_bytes=downloaded,
+            total_bytes=total,
+            error=error,
+        )
+        self.event_log.publish_system(SystemEvent(kind=SystemEventKind.MODEL, model=install, created_at=self.clock()))
+
+    def _run_install(self, install: Install) -> None:
+        throttle = _Throttle()
+
+        def progress(update: InstallProgress) -> None:
+            if throttle.due(update.done_bytes, update.total_bytes):
+                state = InstallState.DOWNLOADING
+                self._publish_model(update.model_id, update.quant, state, downloaded=update.done_bytes, total=update.total_bytes)
+
+        try:
+            merged = self.models.run_install(install, progress=progress, cancelled=lambda: self._closed)
+        except ModelStoreError as exc:
+            if exc.code == "config_invalid":  # registered, but WanGP does not see the store until its config is fixed
+                log.error("%s", exc.message)
+                self._publish_model(*install.key, InstallState.INSTALLED)
+                if install.missing:
+                    self._restart_for_models()
+            elif exc.code == "cancelled":
+                self._publish_model(*install.key, InstallState.ABSENT)
+            else:
+                log.warning("%s", exc.message)
+                error = SetupError(code=exc.code, message=exc.message, action="retry" if exc.code in _STORE_RETRY else None)
+                self._publish_model(*install.key, InstallState.FAILED, error=error)
+            return
+        log.info("Installed %s.", install.label)
+        self._publish_model(*install.key, InstallState.INSTALLED)
+        if install.missing or merged == "updated":
+            self._restart_for_models()
+
+    def _run_switch(self, switch: VariantSwitch) -> None:
+        try:
+            merged = self.models.run_switch(switch, cancelled=lambda: self._closed)
+        except ModelStoreError as exc:
+            if exc.code == "config_invalid":  # both variants stay until WanGP's config names the new one
+                log.error("%s", exc.message)
+            elif exc.code != "cancelled":
+                log.warning("Switching the text encoder to %s failed: %s", switch.variant, exc.message)
+            return
+        log.info("Switched the text encoder to %s.", switch.variant)
+        if switch.missing or merged == "updated":
+            self._restart_for_models()
+        self.models.collect_garbage()  # the previous variant's files
+
+    def _local_job_active(self) -> bool:
+        row = self.db.query_one(
+            "SELECT 1 FROM jobs WHERE state IN (?, ?) AND json_extract(route, '$.host_id') = ? LIMIT 1", (*ACTIVE_STATES, LOCAL_HOST_ID)
+        )
+        return row is not None
+
+    def _restart_for_models(self) -> None:
+        """Restart the local worker so it registers its current model list; while it runs a job, once that job ended.
+
+        A restart stops a running job (it returns to the queue), so a model change waits for the job.
+        """
+        if self._closed or self.supervisor is None:
+            return
+        if self._local_job_active():
+            if not self._restart_pending:
+                log.info("The model store changed; the local worker restarts once its job ended.")
+            self._restart_pending = True
+            return
+        self._restart_pending = False
+        self.restart_local_worker()
+
+    def _restart_if_pending(self) -> None:
+        if self._restart_pending:
+            self._restart_for_models()
+
+    def _local_worker_registered(self) -> None:
+        """A local worker registered: register the store in WanGP's config and collect files left for deletion.
+
+        WanGP writes its config at its first start, so an install before that could not merge into it; a merge that
+        changes the config restarts the worker once per core start, since WanGP reads its config only at import.
+        """
+        try:
+            merged = self.models.register_in_wan2gp() if self.models.has_installs() else "unchanged"
+            self.models.collect_garbage()
+        except (ModelStoreError, OSError) as exc:
+            log.warning("Updating the model store after the local worker registered failed: %s", exc)
+            return
+        if merged == "updated" and not self._config_restarted and self.supervisor is not None:
+            self._config_restarted = True
+            log.info("Registered the model store in WanGP's configuration; restarting the local worker so WanGP reads it.")
+            self._restart_for_models()
 
     # ------------------------------------------------------------------ jobs
 
@@ -779,6 +1027,7 @@ class Core:
         last_seen = {
             row["host_id"]: row["seen"] for row in self.db.query("SELECT host_id, MAX(last_seen_at) AS seen FROM workers GROUP BY host_id")
         }
+        variants = {row["id"]: row["text_encoder_variant"] for row in self.db.query("SELECT id, text_encoder_variant FROM hosts")}
         items = []
         for host in self._hosts():
             items.append(
@@ -791,9 +1040,29 @@ class Core:
                     last_seen_at=from_iso(last_seen.get(host.id)),
                     hardware=self._stored_hardware(host.id),
                     worker_health=worker_health.get(host.id),
+                    text_encoder_variant=variants.get(host.id),
                 )
             )
         return HostList(items=items)
+
+    def update_host(self, host_id: str, patch: HostPatch) -> None:
+        """Check a text encoder variant switch (refusals raise here), then run it in the background.
+
+        The switch installs the variant's files, stores the variant, rewrites WanGP's `text_encoder_quantization`,
+        restarts the local worker and then removes the previous variant's files. Only the local host has a model store.
+        """
+        if self.db.query_one("SELECT 1 FROM hosts WHERE id = ? AND revoked_at IS NULL", (host_id,)) is None:
+            raise NotFound(f"Host {host_id} is not enrolled.")
+        variant = patch.text_encoder_variant
+        if variant is None:
+            return
+        if host_id != LOCAL_HOST_ID:
+            raise Conflict(f"Host {host_id} has no model store of this core yet, so its text encoder cannot be switched.")
+        try:
+            switch = self.models.prepare_switch(variant)
+        except ModelStoreError as exc:
+            raise _store_refusal(exc) from None
+        self._in_background(f"switch the text encoder to {variant}", lambda: self._run_switch(switch))
 
     def add_host(self) -> None:
         raise NotImplementedFeature("Adding hosts", "phase 3")
@@ -858,6 +1127,8 @@ class Core:
             ),
         )
         log.info("Worker %s registered for %s on %s", worker_id, registration.engine, registration.host_id)
+        if registration.host_id == LOCAL_HOST_ID:
+            self._local_worker_registered()
         return WorkerRegistered(worker_id=worker_id, token=token, poll_seconds=WORKER_POLL_SECONDS)
 
     def authenticate_worker(self, token: str) -> str:
@@ -916,6 +1187,8 @@ class Core:
             if row is None:
                 return None
             job = self._worker_job(tx.conn, row)
+        if worker.host_id == LOCAL_HOST_ID:
+            self.models.mark_used(job.model_id, job.quant)  # after the transaction: lock order
         return Lease(job=job)
 
     def _worker_job(self, conn: sqlite3.Connection, row: sqlite3.Row) -> WorkerJob:
@@ -1065,6 +1338,10 @@ class Core:
                 lease_id=None,
                 lease_expires_at=None,
             )
+        # After the transaction (lock order): the store's least recently used order, and a restart a model change left pending.
+        if route.host_id == LOCAL_HOST_ID:
+            self.models.mark_used(route.model_id, route.quant)
+        self._restart_if_pending()
 
     def fail_job(self, worker_id: str, job_id: str, failure: JobFailure) -> None:
         with self._tx() as tx:
@@ -1077,12 +1354,16 @@ class Core:
                 self.scheduler.release(tx, row, error.code, error)
             else:
                 transition(tx, job_id, JobState.FAILED, {"error": error.model_dump()}, **finished)
+        self._restart_if_pending()
 
     # ------------------------------------------------------------------ maintenance
 
     def expire_leases(self) -> int:
         with self._tx() as tx:
-            return self.scheduler.expire(tx)
+            expired = self.scheduler.expire(tx)
+        if expired:
+            self._restart_if_pending()
+        return expired
 
     async def run_maintenance(self, interval: float = MAINTENANCE_INTERVAL_S) -> None:
         """Background task of the app: re-queue jobs whose lease expired."""

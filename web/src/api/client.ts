@@ -25,8 +25,8 @@ export type Settings = Schemas['Settings'];
 export type SettingsPatch = Schemas['SettingsPatch'];
 export type WorkerHealth = Schemas['WorkerHealth'];
 
-// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind and
-// SystemEvent in api/schemas.py.
+// The SSE stream is not modelled in openapi.json; these mirror EventKind, JobEvent, SystemEventKind,
+// ModelInstall and SystemEvent in api/schemas.py.
 export type EventKind = 'state' | 'progress' | 'preview' | 'log';
 export interface JobEvent {
   job_id: string;
@@ -36,11 +36,25 @@ export interface JobEvent {
   created_at: string;
 }
 /** Non-job events: sent without an id and never replayed. */
-export type SystemEventKind = 'engine';
+export type SystemEventKind = 'engine' | 'model';
+/** A model quantization's new install state: download progress, the end of an install, or a removal. */
+export interface ModelInstall {
+  model_id: string;
+  quant: string;
+  install_state: Schemas['InstallState'];
+  /** While `downloading`: share of the bytes this install downloads. */
+  progress?: Schemas['Progress'] | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
+  /** Why the install failed (`failed`). */
+  error?: Schemas['SetupError'] | null;
+}
 export interface SystemEvent {
   kind: SystemEventKind;
   /** For `engine`: the engine as GET /system reports it. */
   engine?: EngineInfo | null;
+  /** For `model`: the quantization's new install state. */
+  model?: ModelInstall | null;
   created_at: string;
 }
 

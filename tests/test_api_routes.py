@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from conftest import API, PNG, assert_problem, register_worker
@@ -32,6 +33,17 @@ class RouteChecker:
         return response
 
 
+def wait_for_install_state(client, model_id: str, quant: str, state: str, timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        model = client.get(f"{API}/models/{model_id}").json()
+        current = next(q["install_state"] for q in model["quantizations"] if q["quant"] == quant)
+        if current == state:
+            return
+        assert time.monotonic() < deadline, f"{model_id} {quant} stayed {current}"
+        time.sleep(0.02)
+
+
 def test_every_route_returns_its_declared_model_or_a_problem(client):
     call = RouteChecker(client)
     call("GET", "/health", 200, schemas.Health)
@@ -46,11 +58,19 @@ def test_every_route_returns_its_declared_model_or_a_problem(client):
     call("GET", "/models", 200, schemas.ModelList)
     call("GET", "/models/{model_id}", 200, schemas.ModelDetail, path="/models/test-image")
     call("GET", "/models/{model_id}", 404, path="/models/unknown")
-    call("POST", "/models/{model_id}/install", 501, path="/models/test-image/install")
-    call("DELETE", "/models/{model_id}", 501, path="/models/test-image")
+    call("POST", "/models/{model_id}/install", 422, path="/models/test-image/install")  # no quantization named
+    call("POST", "/models/{model_id}/install", 404, path="/models/unknown/install?quant=bf16")
+    call("POST", "/models/{model_id}/install", 409, path="/models/test-video/install?quant=bf16")  # its licence excludes DE
+    call("POST", "/models/{model_id}/install", 202, path="/models/test-image/install?quant=Q8_0")  # fails in the background
+    call("DELETE", "/models/{model_id}", 404, path="/models/test-image?quant=bf16")  # not installed
+    wait_for_install_state(client, "test-image", "Q8_0", "failed")  # the test core has no network
+    call("DELETE", "/models/{model_id}", 204, path="/models/test-image?quant=Q8_0")
     call("GET", "/calibration", 200, schemas.CalibrationReport)
     call("POST", "/calibration/runs", 501)
     call("GET", "/hosts", 200, schemas.HostList)
+    call("PATCH", "/hosts/{host_id}", 202, path="/hosts/local", json={"text_encoder_variant": "bf16"})
+    call("PATCH", "/hosts/{host_id}", 404, path="/hosts/unknown", json={"text_encoder_variant": "bf16"})
+    call("PATCH", "/hosts/{host_id}", 422, path="/hosts/local", json={"text_encoder_variant": "fp8"})
     call("POST", "/hosts", 501)
     call("GET", "/approvals", 200, schemas.ApprovalList)
     call("POST", "/approvals/{approval_id}/approve", 501, path="/approvals/a1/approve")
@@ -141,8 +161,6 @@ def test_every_route_returns_its_declared_model_or_a_problem(client):
 
 def test_not_implemented_routes_name_feature_and_phase(client):
     for method, path, feature, phase in [
-        ("POST", "/models/test-image/install", "Model installation", "phase 1"),
-        ("DELETE", "/models/test-image", "Model removal", "phase 1"),
         ("POST", "/calibration/runs", "Calibration runs", "phase 1"),
         ("POST", "/hosts", "Adding hosts", "phase 3"),
         ("POST", "/approvals/x/approve", "Approval decisions", "phase 3"),

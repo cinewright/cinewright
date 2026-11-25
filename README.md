@@ -18,11 +18,12 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Windows installer.** `scripts/build.py` builds it.
 - **WanGP adapter.** The worker side exists. It has been checked against a WanGP checkout without any downloaded models.
 - **WanGP setup.** On the first start of the installed app, the core sets up WanGP in the background: the pinned WanGP commit, ffmpeg and WanGP's own Python environment, with every file checked against its pinned SHA-256. The Setup view shows the progress. Once WanGP is ready, the core starts its worker on it. Later starts reuse the installation. Windows only.
+- **Model installs through the API.** The core installs a model with the shared files it needs into its model store, checked by SHA-256, and removes it again (`POST /api/v1/models/{model_id}/install?quant=`, `DELETE /api/v1/models/{model_id}`). Each computer's text encoder variant can be switched (`PATCH /api/v1/hosts/local`). After every change the core restarts the local worker, so a model can run seconds after its install. The install buttons of the Models view follow in the next step; `tests/test_e2e_model_install.py` runs an install end to end with the mock engine.
 - **Worker supervision.** The installed app starts the local worker in WanGP's own Python environment once the WanGP setup is ready, restarts it after a crash and stops it when the core exits. The Hosts view shows the worker's state and the VRAM it uses. `tests/test_supervisor_e2e.py` runs this with the mock engine.
 
 ## What does not work yet
 
-- **Real generation.** Model downloads and calibration arrive with phase 1. Until then, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
+- **Real generation.** The Models view cannot install models yet, and calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
 - **Releases.** There is no release yet, so no installer can be downloaded.
@@ -137,6 +138,17 @@ cd web && npm run gen:api
 
 While Cinewright runs, point an MCP client that supports streamable HTTP at `http://127.0.0.1:8737/mcp`. The server accepts only the `Host` values `127.0.0.1` and `localhost`.
 
+### Install or remove a model through the API
+
+While Cinewright runs, with WanGP set up:
+
+1. Pick a model id and quantization from `GET http://127.0.0.1:8737/api/v1/models`, for example `z-image-turbo` and `int8`.
+2. Start the install: `curl -X POST "http://127.0.0.1:8737/api/v1/models/z-image-turbo/install?quant=int8"`. The answer is `202`, or `409` with one sentence that says why the install cannot run now (for example, how much free disk space is missing).
+3. Follow it in `GET /api/v1/events` (`model` events with the downloaded bytes) or in `GET /api/v1/models`, where the quantization goes from `downloading` to `installed`, or to `failed` with the reason in `error`.
+4. To remove it: `curl -X DELETE "http://127.0.0.1:8737/api/v1/models/z-image-turbo?quant=int8"`.
+
+To switch the text encoder variant of your computer, send `curl -X PATCH http://127.0.0.1:8737/api/v1/hosts/local -H "Content-Type: application/json" -d "{\"text_encoder_variant\": \"bf16\"}"`. `GET /api/v1/hosts` shows the new variant once the switch is done.
+
 ### Use another port or data directory
 
 Set `CINEWRIGHT_PORT` or `CINEWRIGHT_HOME` before you run `python -m cinewright` (see [Environment variables](#environment-variables)). The Start menu shortcut sets neither.
@@ -169,7 +181,7 @@ The core starts its worker with `CINEWRIGHT_CORE_URL`, `CINEWRIGHT_ENROLLMENT_TO
 | --- | --- |
 | `db/cinewright.sqlite3` | Jobs, events, assets, workers, settings (SQLite, WAL) |
 | `assets/<sha[:2]>/<sha256>` | Inputs and outputs, stored by SHA-256 |
-| `models/` | Model files (installs arrive with phase 1), where WanGP looks them up: transformer, VAE and upscaler files directly in it, each text encoder with its tokenizer and config files in its own folder (`umt5-xxl/`, `xlm-roberta-large/`, `Qwen3/`, `gemma-3-12b-it-qat-q4_0-unquantized/`). `models/.downloads/` holds downloads in progress; an interrupted one continues from its `.part` file |
+| `models/` | Installed model files, where WanGP looks them up: transformer, VAE and upscaler files directly in it, each text encoder with its tokenizer and config files in its own folder (`umt5-xxl/`, `xlm-roberta-large/`, `Qwen3/`, `gemma-3-12b-it-qat-q4_0-unquantized/`). `models/.downloads/` holds downloads in progress; an interrupted one continues from its `.part` file |
 | `engines/` | Engine data, e.g. `engines/wan2gp/wgp_config.json` |
 | `engines/wan2gp/<commit>/` | WanGP's source at the pinned commit (`wgp.py` lies directly in it), with the pinned ffmpeg in `ffmpeg_bins/` |
 | `engines/wan2gp/env/` | WanGP's Python environment (Python 3.11, PyTorch with CUDA 13.0, the locked packages) |
@@ -199,7 +211,7 @@ End users never need these. They exist for CI and development.
 
 All routes live under `/api/v1`. [`openapi.json`](openapi.json) is the contract, and [ARCHITECTURE.md](ARCHITECTURE.md) has the route table. Errors are RFC 9457 problem documents (`application/problem+json`). Operations of later phases return `501` with the problem type `urn:cinewright:problem:not-implemented`.
 
-`GET /api/v1/events` streams server-sent events. Job events have an `id` (`<job_id>:<seq>`) and are replayed after `Last-Event-ID`. Previews are the exception: they are sent live but not stored and have no `id`, so after its replay a stream sends only the latest preview of each running job it covers. Without `job_id`, the stream also carries `engine` events with the engine's state, progress and error, as `GET /api/v1/system` reports it. They have no `id` and are not replayed. `POST /api/v1/engines/wan2gp/provision` starts the WanGP setup again after a failure; it does nothing while the setup runs or once the engine is ready.
+`GET /api/v1/events` streams server-sent events. Job events have an `id` (`<job_id>:<seq>`) and are replayed after `Last-Event-ID`. Previews are the exception: they are sent live but not stored and have no `id`, so after its replay a stream sends only the latest preview of each running job it covers. Without `job_id`, the stream also carries `engine` events with the engine's state, progress and error, as `GET /api/v1/system` reports it, and `model` events with a model install's state, progress and error, also for a removal. They have no `id` and are not replayed. `POST /api/v1/engines/wan2gp/provision` starts the WanGP setup again after a failure; it does nothing while the setup runs or once the engine is ready.
 
 ### MCP tools
 
@@ -281,11 +293,13 @@ During the setup, the core and uv connect to `github.com`, `codeload.github.com`
 
 ### Model store
 
-The core keeps every model file in one model store, `models/` in the data directory, and tells WanGP to look there first. Model installs from the Models view arrive with phase 1; these are the rules they follow:
+The core keeps every model file in one model store, `models/` in the data directory, and tells WanGP to look there first. Installs follow these rules:
 
 - **Checked files.** Every file is pinned by SHA-256 and size in the registry. A download is checked before the file is used; a file that does not match is deleted, and the model is not installed. Weights are safetensors or GGUF files only. Next to them, only non-executable tokenizer and config files (`.json`, `.txt`, `.model`) are allowed.
 - **Shared files.** Text encoders, VAEs and the other engine files several models need are kept once. Removing a model removes a shared file only when no other installed model and no queued or running job needs it.
-- **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default.
+- **Text encoder variant.** Each computer uses one text encoder variant, `int8` or `bf16`, for all models. Until you choose one, Cinewright installs `int8`, WanGP's default. Switching first checks the free space, then installs the other variant's files, restarts the worker and removes the previous variant's files. It is refused while a job runs.
+- **The worker learns about new models.** WanGP reports its models only when its worker starts, so the core restarts the worker after every install, removal and switch. If a job is running, the restart waits until the job ended.
+- **Licence.** Models whose licence excludes your country (`country` in the settings) are not offered and cannot be installed.
 - **Free space and quota.** Before anything is downloaded, the core checks the free space of the drive that holds the model store; if the model does not fit, the install stops with the amount that is missing. With a storage quota set (`model_store_quota_gb`), the core first removes the models used least recently, never one that a queued or running job needs.
 - **Download hosts.** Model files come only over HTTPS from `huggingface.co` and the download host it forwards to, `us.aws.cdn.hf.co` (later also `civitai.com`).
 

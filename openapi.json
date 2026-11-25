@@ -872,6 +872,22 @@
             "title": "Online",
             "type": "boolean"
           },
+          "text_encoder_variant": {
+            "anyOf": [
+              {
+                "enum": [
+                  "bf16",
+                  "int8"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies",
+            "title": "Text Encoder Variant"
+          },
           "worker_health": {
             "anyOf": [
               {
@@ -919,6 +935,29 @@
           "items"
         ],
         "title": "HostList",
+        "type": "object"
+      },
+      "HostPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "text_encoder_variant": {
+            "anyOf": [
+              {
+                "enum": [
+                  "bf16",
+                  "int8"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, restarts the worker and removes the previous variant's files. Refused while a job runs on the host",
+            "title": "Text Encoder Variant"
+          }
+        },
+        "title": "HostPatch",
         "type": "object"
       },
       "InstallState": {
@@ -1589,6 +1628,12 @@
             "title": "Id",
             "type": "string"
           },
+          "installed_bytes": {
+            "default": 0,
+            "description": "Disk space of the model's installed quantizations together, each shared file once; 0 when none is",
+            "title": "Installed Bytes",
+            "type": "integer"
+          },
           "license": {
             "$ref": "#/components/schemas/License"
           },
@@ -1638,11 +1683,23 @@
         "additionalProperties": false,
         "properties": {
           "items": {
+            "description": "Registry models, without those whose licence excludes `settings.country`",
             "items": {
               "$ref": "#/components/schemas/ModelSummary"
             },
             "title": "Items",
             "type": "array"
+          },
+          "store": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelStoreUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Size, quota and free disk space of the model store"
           }
         },
         "required": [
@@ -1661,6 +1718,18 @@
             "title": "Calibration",
             "type": "array"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the last install failed (`failed`), in one sentence; null otherwise",
+            "title": "Error"
+          },
           "install_state": {
             "$ref": "#/components/schemas/InstallState"
           },
@@ -1677,6 +1746,7 @@
                 "type": "null"
               }
             ],
+            "description": "Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files",
             "title": "Size Bytes"
           }
         },
@@ -1721,6 +1791,41 @@
         "title": "ModelSource",
         "type": "object"
       },
+      "ModelStoreUsage": {
+        "additionalProperties": false,
+        "description": "The model store (`<data dir>/models`) as the Models view shows it.",
+        "properties": {
+          "free_bytes": {
+            "description": "Free space of the drive that holds the model store, measured for this answer",
+            "title": "Free Bytes",
+            "type": "integer"
+          },
+          "quota_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota",
+            "title": "Quota Bytes"
+          },
+          "total_bytes": {
+            "description": "Disk space of every file in the model store, each shared file once",
+            "title": "Total Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_bytes",
+          "quota_bytes",
+          "free_bytes"
+        ],
+        "title": "ModelStoreUsage",
+        "type": "object"
+      },
       "ModelSummary": {
         "additionalProperties": false,
         "properties": {
@@ -1740,6 +1845,12 @@
             "pattern": "^[a-z0-9]+(?:-[a-z0-9.]+)*$",
             "title": "Id",
             "type": "string"
+          },
+          "installed_bytes": {
+            "default": 0,
+            "description": "Disk space of the model's installed quantizations together, each shared file once; 0 when none is",
+            "title": "Installed Bytes",
+            "type": "integer"
           },
           "license": {
             "$ref": "#/components/schemas/License"
@@ -3807,7 +3918,7 @@
             "content": {
               "text/event-stream": {}
             },
-            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed."
+            "description": "Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` (engine provisioning) and `model` (model install progress, installs and removals) carry a SystemEvent, without an id and never replayed."
           },
           "404": {
             "content": {
@@ -4099,6 +4210,91 @@
           }
         },
         "summary": "Add Host",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
+    "/api/v1/hosts/{host_id}": {
+      "patch": {
+        "description": "Change a host's settings. A new `text_encoder_variant` is switched in the background.\n\nChecks first and refuses with 409 while a job runs on the host or a model is being installed, and when the\nvariant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's\nconfiguration names it.",
+        "operationId": "updateHost",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Unprocessable Entity"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Not Implemented"
+          }
+        },
+        "summary": "Update Host",
         "tags": [
           "hosts"
         ]
@@ -4560,6 +4756,7 @@
     },
     "/api/v1/models/{model_id}": {
       "delete": {
+        "description": "Remove installed quantizations; shared files stay while another installed model or a waiting job needs them.\n\nRefused with 409 while the quantization is being installed or a queued or running job needs it.",
         "operationId": "removeModel",
         "parameters": [
           {
@@ -4574,6 +4771,7 @@
             }
           },
           {
+            "description": "Quantization to remove; all when omitted",
             "in": "query",
             "name": "quant",
             "required": false,
@@ -4586,6 +4784,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Quantization to remove; all when omitted",
               "title": "Quant"
             }
           }
@@ -4604,6 +4803,17 @@
               "application/problem+json": {}
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -4701,6 +4911,7 @@
     },
     "/api/v1/models/{model_id}/install": {
       "post": {
+        "description": "Install a quantization with the shared files it needs, in the background.\n\nChecks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota\n(it may remove the least recently used models first), an install in progress, the licence's country exclusions.\nProgress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.",
         "operationId": "installModel",
         "parameters": [
           {
@@ -4715,6 +4926,7 @@
             }
           },
           {
+            "description": "Quantization to install (required)",
             "in": "query",
             "name": "quant",
             "required": false,
@@ -4727,6 +4939,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Quantization to install (required)",
               "title": "Quant"
             }
           }
@@ -4750,6 +4963,17 @@
               "application/problem+json": {}
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/problem+json": {}
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {

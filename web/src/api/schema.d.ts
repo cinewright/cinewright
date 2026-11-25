@@ -317,6 +317,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/hosts/{host_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Host
+         * @description Change a host's settings. A new `text_encoder_variant` is switched in the background.
+         *
+         *     Checks first and refuses with 409 while a job runs on the host or a model is being installed, and when the
+         *     variant's files do not fit on the drive of the model store. `GET /hosts` shows the new variant once WanGP's
+         *     configuration names it.
+         */
+        patch: operations["updateHost"];
+        trace?: never;
+    };
     "/api/v1/jobs": {
         parameters: {
             query?: never;
@@ -414,7 +438,12 @@ export interface paths {
         get: operations["getModel"];
         put?: never;
         post?: never;
-        /** Remove Model */
+        /**
+         * Remove Model
+         * @description Remove installed quantizations; shared files stay while another installed model or a waiting job needs them.
+         *
+         *     Refused with 409 while the quantization is being installed or a queued or running job needs it.
+         */
         delete: operations["removeModel"];
         options?: never;
         head?: never;
@@ -430,7 +459,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Install Model */
+        /**
+         * Install Model
+         * @description Install a quantization with the shared files it needs, in the background.
+         *
+         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota
+         *     (it may remove the least recently used models first), an install in progress, the licence's country exclusions.
+         *     Progress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.
+         */
         post: operations["installModel"];
         delete?: never;
         options?: never;
@@ -972,6 +1008,11 @@ export interface components {
             name: string;
             /** Online */
             online: boolean;
+            /**
+             * Text Encoder Variant
+             * @description Text encoder variant of the host's models (WanGP `text_encoder_quantization`); null = not chosen yet, `int8` applies
+             */
+            text_encoder_variant?: ("bf16" | "int8") | null;
             /** @description State and VRAM use of the host's worker, as last reported by a worker registered since the core started. On the local host the core's process supervision overrides it while the worker starts or is down. null = no worker */
             worker_health?: components["schemas"]["WorkerHealth"] | null;
         };
@@ -984,6 +1025,14 @@ export interface components {
         HostList: {
             /** Items */
             items: components["schemas"]["Host"][];
+        };
+        /** HostPatch */
+        HostPatch: {
+            /**
+             * Text Encoder Variant
+             * @description Switch the host's text encoder variant: the core checks free disk space, installs the variant's files, restarts the worker and removes the previous variant's files. Refused while a job runs on the host
+             */
+            text_encoder_variant?: ("bf16" | "int8") | null;
         };
         /**
          * InstallState
@@ -1196,6 +1245,12 @@ export interface components {
             family: string;
             /** Id */
             id: string;
+            /**
+             * Installed Bytes
+             * @description Disk space of the model's installed quantizations together, each shared file once; 0 when none is
+             * @default 0
+             */
+            installed_bytes: number;
             license: components["schemas"]["License"];
             limits: components["schemas"]["Limits"];
             /** Name */
@@ -1209,17 +1264,30 @@ export interface components {
         };
         /** ModelList */
         ModelList: {
-            /** Items */
+            /**
+             * Items
+             * @description Registry models, without those whose licence excludes `settings.country`
+             */
             items: components["schemas"]["ModelSummary"][];
+            /** @description Size, quota and free disk space of the model store */
+            store?: components["schemas"]["ModelStoreUsage"] | null;
         };
         /** ModelQuantState */
         ModelQuantState: {
             /** Calibration */
             calibration?: components["schemas"]["CalibrationResult"][];
+            /**
+             * Error
+             * @description Why the last install failed (`failed`), in one sentence; null otherwise
+             */
+            error?: string | null;
             install_state: components["schemas"]["InstallState"];
             /** Quant */
             quant: string;
-            /** Size Bytes */
+            /**
+             * Size Bytes
+             * @description Installed: disk space of the quantization, its shared files included. Otherwise: its transformer files
+             */
             size_bytes?: number | null;
         };
         /** ModelSource */
@@ -1234,6 +1302,27 @@ export interface components {
             /** Revision */
             revision?: string | null;
         };
+        /**
+         * ModelStoreUsage
+         * @description The model store (`<data dir>/models`) as the Models view shows it.
+         */
+        ModelStoreUsage: {
+            /**
+             * Free Bytes
+             * @description Free space of the drive that holds the model store, measured for this answer
+             */
+            free_bytes: number;
+            /**
+             * Quota Bytes
+             * @description `settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota
+             */
+            quota_bytes: number | null;
+            /**
+             * Total Bytes
+             * @description Disk space of every file in the model store, each shared file once
+             */
+            total_bytes: number;
+        };
         /** ModelSummary */
         ModelSummary: {
             /** Capabilities */
@@ -1242,6 +1331,12 @@ export interface components {
             family: string;
             /** Id */
             id: string;
+            /**
+             * Installed Bytes
+             * @description Disk space of the model's installed quantizations together, each shared file once; 0 when none is
+             * @default 0
+             */
+            installed_bytes: number;
             license: components["schemas"]["License"];
             /** Name */
             name: string;
@@ -2361,7 +2456,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` carry engine provisioning as a SystemEvent, without an id and never replayed. */
+            /** @description Server-sent events; each `data:` line is a JobEvent. Without `job_id`, events named `engine` (engine provisioning) and `model` (model install progress, installs and removals) carry a SystemEvent, without an id and never replayed. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2612,6 +2707,72 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+        };
+    };
+    updateHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                host_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3034,6 +3195,7 @@ export interface operations {
     removeModel: {
         parameters: {
             query?: {
+                /** @description Quantization to remove; all when omitted */
                 quant?: string | null;
             };
             header?: never;
@@ -3053,6 +3215,16 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3086,6 +3258,7 @@ export interface operations {
     installModel: {
         parameters: {
             query?: {
+                /** @description Quantization to install (required) */
                 quant?: string | null;
             };
             header?: never;
@@ -3107,6 +3280,16 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

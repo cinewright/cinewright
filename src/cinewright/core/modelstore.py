@@ -26,6 +26,11 @@ A failed or cancelled install registers nothing; its verified and partial downlo
 next try. After an install or a removal the caller restarts the local worker, so it re-announces its models.
 Wan2GP defines the MVP model types itself (`<wan2gp root>/defaults/<model_type>.json`); a finetune definition is
 written only for a model type it does not define. Do not call the store from inside a database transaction.
+
+A text encoder variant switch (`prepare_switch`, then `run_switch`) checks free disk space, downloads the other
+variant's files of every installed quantization the same way, re-registers each one's references and stores the
+variant in one transaction, and rewrites `text_encoder_quantization`. The caller then restarts the worker and
+collects the previous variant's files (`collect_garbage`). Installs, removals and a switch exclude each other.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
@@ -82,7 +88,7 @@ class ModelStoreError(Exception):
     """An install or removal that cannot go ahead: cause and consequence in one sentence, and a stable `code`.
 
     Codes: `unknown_model`, `unknown_quant`, `unknown_variant`, `file_type`, `unsafe_path`, `size_missing`,
-    `engine_type_unknown`, `quota_exceeded`, `not_enough_space`, `installing`, `in_use`, `not_installed`,
+    `engine_type_unknown`, `quota_exceeded`, `not_enough_space`, `installing`, `switching`, `in_use`, `not_installed`,
     `hash_mismatch`, `download_failed`, `cancelled`, `io_error`, `install_failed`, `config_invalid`.
     """
 
@@ -137,8 +143,24 @@ class Install:
 
 
 @dataclass(frozen=True)
+class VariantSwitch:
+    """A prepared text encoder variant switch: checked; `run_switch` downloads and registers it."""
+
+    variant: str
+    files: tuple[PlannedFile, ...]  # every file the installed quantizations need with `variant`
+    missing: tuple[PlannedFile, ...]  # files the store does not hold yet
+    download_bytes: int  # what remains to download, partial downloads deducted
+    plans: dict[InstallKey, tuple[PlannedFile, ...]]  # the files of each installed quantization with `variant`
+
+    @property
+    def label(self) -> str:
+        return f"the {self.variant} text encoder"
+
+
+@dataclass(frozen=True)
 class StoreUsage:
     installed: dict[InstallKey, int]  # size of each installed quantization, its shared files included
+    by_model: dict[str, int]  # size of each model's installed quantizations together, each file once
     total_bytes: int  # every file in the store, each shared file once
     quota_bytes: int | None
     free_bytes: int  # free space of the store's drive, measured now
@@ -329,8 +351,8 @@ def disk_free(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def _cancelled(install: Install) -> ModelStoreError:
-    return ModelStoreError("cancelled", f"The install of {install.label} was cancelled; a later install continues its downloads.")
+def _cancelled(label: str) -> ModelStoreError:
+    return ModelStoreError("cancelled", f"The install of {label} was cancelled; a later install continues its downloads.")
 
 
 def _sha256_of(path: Path) -> str:
@@ -381,7 +403,8 @@ class ModelStore:
         self._lock = threading.RLock()  # plans, registrations and removals
         self._download_lock = threading.Lock()  # one install downloads at a time; two may want the same file
         self._active: set[InstallKey] = set()
-        self._reserved: Counter[str] = Counter()  # path keys of the files active installs need
+        self._switching: str | None = None  # the text encoder variant a switch in progress installs
+        self._reserved: Counter[str] = Counter()  # path keys of the files active installs and a switch need
         # An install the last core start did not finish (Cinewright closed) left its row `downloading`.
         self.db.execute(
             "UPDATE installed_models SET state = 'failed', error = ? WHERE state = 'downloading'",
@@ -396,6 +419,14 @@ class ModelStore:
         value = row["text_encoder_variant"] if row is not None else None
         return value if value in TEXT_ENCODER_VARIANTS else DEFAULT_TEXT_ENCODER_VARIANT
 
+    def stored_variant(self) -> str | None:
+        """The host's text encoder variant as stored: None until one is chosen or installed."""
+        row = self.db.query_one("SELECT text_encoder_variant FROM hosts WHERE id = ?", (self.host_id,))
+        return row["text_encoder_variant"] if row is not None else None
+
+    def has_installs(self) -> bool:
+        return self.db.query_one("SELECT 1 FROM installed_models WHERE state = 'installed' LIMIT 1") is not None
+
     def plan(self, model_id: str, quant: str, variant: str | None = None) -> list[PlannedFile]:
         """`plan_files` with the host's text encoder variant unless `variant` is given."""
         return plan_files(self.registry, model_id, quant, variant or self.text_encoder_variant())
@@ -403,8 +434,13 @@ class ModelStore:
     def usage(self) -> StoreUsage:
         rows = self.db.query("SELECT model_id, quant, size_bytes FROM installed_models WHERE state = 'installed' ORDER BY model_id, quant")
         total = self.db.query_one("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM store_files")
+        by_model = self.db.query(
+            "SELECT refs.model_id, SUM(store_files.size_bytes) AS size FROM (SELECT DISTINCT model_id, path FROM installed_model_files) "
+            "AS refs JOIN store_files ON store_files.path = refs.path GROUP BY refs.model_id"
+        )
         return StoreUsage(
             installed={(row["model_id"], row["quant"]): row["size_bytes"] or 0 for row in rows},
+            by_model={row["model_id"]: row["size"] for row in by_model},
             total_bytes=total["total"] if total is not None else 0,
             quota_bytes=self._quota_bytes(),
             free_bytes=self._free_bytes(self.root),
@@ -464,6 +500,11 @@ class ModelStore:
             key = (model_id, quant)
             if key in self._active:
                 raise ModelStoreError("installing", f"{label} is being installed already.")
+            if self._switching is not None:
+                raise ModelStoreError(
+                    "switching",
+                    f"The text encoder is being switched to {self._switching}, so {label} was not installed; install it afterwards.",
+                )
             stored = self._stored()
             missing = [file for file in files if not self._present(file, stored)]
             download = sum(file.size_bytes - self._staged_bytes(file) for file in missing)
@@ -507,9 +548,15 @@ class ModelStore:
         `ModelStoreError` is raised. A config that cannot be merged raises after the registration: the files are
         installed, but Wan2GP does not see them until the config is fixed.
         """
+        report = progress or (lambda _: None)
         try:
             with self._download_lock:
-                ready = self._download(install, progress or (lambda _: None), cancelled)
+                ready = self._download(
+                    install.label,
+                    install.missing,
+                    lambda done, total, path: report(InstallProgress(install.model_id, install.quant, done, total, path)),
+                    cancelled,
+                )
             self._register(install, ready)
         except ModelStoreError as exc:
             self._fail(install, exc.code, exc.message)
@@ -529,22 +576,28 @@ class ModelStore:
         finally:
             with self._lock:
                 self._active.discard(install.key)
-                for file in install.files:
-                    self._reserved[file.key] -= 1
-                    if self._reserved[file.key] <= 0:
-                        del self._reserved[file.key]
+                self._release(install.files)
         return self.register_in_wan2gp()
 
-    def _download(self, install: Install, report: Callable[[InstallProgress], None], cancelled: Callable[[], bool]) -> dict[str, Path]:
-        """Each missing file as a verified file: staged, or already where it belongs. Keyed by path key."""
-        total = sum(file.size_bytes for file in install.missing)
+    def _download(
+        self,
+        label: str,
+        missing: tuple[PlannedFile, ...],
+        report: Callable[[int, int, str | None], None],
+        cancelled: Callable[[], bool],
+    ) -> dict[str, Path]:
+        """Each missing file as a verified file: staged, or already where it belongs. Keyed by path key.
+
+        `report(done_bytes, total_bytes, file)` follows the progress; `label` names what is installed in messages.
+        """
+        total = sum(file.size_bytes for file in missing)
         done = 0
         ready: dict[str, Path] = {}
         by_sha256: dict[str, Path] = {}
-        report(InstallProgress(install.model_id, install.quant, 0, total, None))
-        for file in install.missing:
+        report(0, total, None)
+        for file in missing:
             if cancelled():
-                raise _cancelled(install)
+                raise _cancelled(label)
             final = store_path(self.root, file.path)
             if self._present(file, self._stored()):  # another install registered it meanwhile
                 source = final
@@ -555,19 +608,17 @@ class ModelStore:
             else:
                 base = done
                 source = self._fetch(
-                    install,
+                    label,
                     file,
-                    lambda received, base=base, path=file.path: report(
-                        InstallProgress(install.model_id, install.quant, base + received, total, path)
-                    ),
+                    lambda received, base=base, path=file.path: report(base + received, total, path),
                     cancelled,
                 )
             ready[file.key] = by_sha256[file.sha256] = source
             done += file.size_bytes
-            report(InstallProgress(install.model_id, install.quant, done, total, file.path))
+            report(done, total, file.path)
         return ready
 
-    def _fetch(self, install: Install, file: PlannedFile, progress: Callable[[int], None], cancelled: Callable[[], bool]) -> Path:
+    def _fetch(self, label: str, file: PlannedFile, progress: Callable[[int], None], cancelled: Callable[[], bool]) -> Path:
         inner = self._transport if self._transport is not None else network_transport()
         downloader = Downloader(transport=AllowedHosts(inner, DOWNLOAD_HOSTS.get(file.provider, frozenset())))
         host = urlsplit(file.url).hostname
@@ -583,38 +634,41 @@ class ModelStore:
         except HashMismatch:
             raise ModelStoreError(
                 "hash_mismatch",
-                f"{file.path} of {install.label} did not match its pinned SHA-256 and size, "
-                f"so it was deleted and {install.label} is not installed.",
+                f"{file.path} of {label} did not match its pinned SHA-256 and size, so it was deleted and {label} is not installed.",
             ) from None
         except DownloadError as exc:
             raise ModelStoreError(
                 "download_failed",
-                f"Downloading {file.path} of {install.label} from {host} failed ({exc}), so {install.label} is not installed; "
+                f"Downloading {file.path} of {label} from {host} failed ({exc}), so {label} is not installed; "
                 "a later install continues the download.",
             ) from None
         except Cancelled:
-            raise _cancelled(install) from None
+            raise _cancelled(label) from None
+
+    def _place(self, conn: sqlite3.Connection, missing: tuple[PlannedFile, ...], ready: dict[str, Path], now: str) -> None:
+        """Move each verified file to its path in the store and register it (inside the caller's transaction)."""
+        uses = Counter(ready[file.key] for file in missing)
+        for file in missing:
+            source, final = ready[file.key], store_path(self.root, file.path)
+            uses[source] -= 1
+            if source != final:
+                final.parent.mkdir(parents=True, exist_ok=True)
+                if uses[source]:
+                    shutil.copyfile(source, final)
+                else:
+                    os.replace(source, final)
+            conn.execute(
+                "INSERT INTO store_files (path, sha256, size_bytes, verified_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (path) DO UPDATE SET sha256 = excluded.sha256, size_bytes = excluded.size_bytes, "
+                "verified_at = excluded.verified_at",
+                (file.path, file.sha256, file.size_bytes, now),
+            )
 
     def _register(self, install: Install, ready: dict[str, Path]) -> None:
         now = to_iso(self._clock())
         size = sum(file.size_bytes for file in install.files)
-        uses = Counter(ready[file.key] for file in install.missing)
         with self._lock, self.db.transaction() as conn:
-            for file in install.missing:
-                source, final = ready[file.key], store_path(self.root, file.path)
-                uses[source] -= 1
-                if source != final:
-                    final.parent.mkdir(parents=True, exist_ok=True)
-                    if uses[source]:
-                        shutil.copyfile(source, final)
-                    else:
-                        os.replace(source, final)
-                conn.execute(
-                    "INSERT INTO store_files (path, sha256, size_bytes, verified_at) VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT (path) DO UPDATE SET sha256 = excluded.sha256, size_bytes = excluded.size_bytes, "
-                    "verified_at = excluded.verified_at",
-                    (file.path, file.sha256, file.size_bytes, now),
-                )
+            self._place(conn, install.missing, ready, now)
             conn.execute("DELETE FROM installed_model_files WHERE model_id = ? AND quant = ?", install.key)
             conn.execute(
                 "INSERT INTO installed_models (model_id, quant, state, size_bytes, installed_at, last_used_at) "
@@ -662,6 +716,11 @@ class ModelStore:
                 rows = self.db.query("SELECT quant, state FROM installed_models WHERE model_id = ? AND quant = ?", (model_id, quant))
             if not rows:
                 raise ModelStoreError("not_installed", f"{name}{'' if quant is None else ' ' + quant} is not installed.")
+            if self._switching is not None:
+                raise ModelStoreError(
+                    "switching",
+                    f"The text encoder is being switched to {self._switching}, so {name} was not removed; remove it afterwards.",
+                )
             needed = self.needed_by_jobs()
             keys = [(model_id, row["quant"]) for row in rows]
             for key in keys:
@@ -682,7 +741,120 @@ class ModelStore:
                 self._remove_finetunes(model)
             return keys
 
+    def collect_garbage(self) -> None:
+        """Delete every registered file that no installed quantization references and nothing else needs.
+
+        After a variant switch, this removes the previous variant's files. A file that cannot be deleted (on Windows,
+        one a worker process still holds open) stays registered and goes with a later collection.
+        """
+        with self._lock:
+            self._collect_garbage()
+
+    # ------------------------------------------------------------------ text encoder variant
+
+    def prepare_switch(self, variant: str) -> VariantSwitch:
+        """Plan and check a switch of the host's text encoder variant to `variant`; refuses before any byte is downloaded.
+
+        Refuses while a job runs on the host, while an install or another switch is in progress, and when the files
+        the installed quantizations need with `variant` do not fit on the store's drive. The quota is not applied:
+        a switch removes nothing but the previous variant's files. Reserves the planned files until `run_switch` ends.
+        """
+        if variant not in TEXT_ENCODER_VARIANTS:
+            raise ModelStoreError("unknown_variant", f"{variant} is not a text encoder variant; use {' or '.join(TEXT_ENCODER_VARIANTS)}.")
+        label = f"the {variant} text encoder"
+        with self._lock:
+            if self._switching is not None:
+                raise ModelStoreError("switching", f"The text encoder is being switched to {self._switching} already.")
+            if self._active:
+                raise ModelStoreError(
+                    "installing", "A model is being installed, so the text encoder was not switched; switch it afterwards."
+                )
+            if self._running_jobs():
+                raise ModelStoreError(
+                    "in_use", "A job is running on this computer, so the text encoder was not switched; switch it once the job ended."
+                )
+            plans: dict[InstallKey, tuple[PlannedFile, ...]] = {}
+            for row in self.db.query("SELECT model_id, quant FROM installed_models WHERE state = 'installed' ORDER BY model_id, quant"):
+                key = (row["model_id"], row["quant"])
+                try:
+                    plans[key] = tuple(plan_files(self.registry, *key, variant))
+                except ModelStoreError:
+                    continue  # no longer in the registry as installed: its references stay as they are
+            files = list({file.key: file for plan in plans.values() for file in plan}.values())
+            for file in files:
+                store_path(self.root, file.path)
+            stored = self._stored()
+            missing = [file for file in files if not self._present(file, stored)]
+            download = sum(file.size_bytes - self._staged_bytes(file) for file in missing)
+            available = self._free_bytes(self.root)
+            if download > available:
+                raise ModelStoreError(
+                    "not_enough_space",
+                    f"Switching to {label} needs {format_size(download - available)} more free space on the drive of the model store: "
+                    f"it downloads {format_size(download)}, and only {format_size(available)} are free.",
+                )
+            self._switching = variant
+            self._reserved.update(file.key for file in files)
+            return VariantSwitch(variant, tuple(files), tuple(missing), download, plans)
+
+    def run_switch(
+        self,
+        switch: VariantSwitch,
+        *,
+        progress: Callable[[int, int, str | None], None] | None = None,
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> WgpConfigResult:
+        """Download and verify the files of a prepared switch, register them, then rewrite `text_encoder_quantization`.
+
+        One transaction places the files, replaces each installed quantization's references and size with those of
+        the new variant and stores the variant. On a failure nothing changes and `ModelStoreError` is raised; the
+        previous variant stays in use. The caller then restarts the worker and collects the previous variant's files.
+        Returns what the `wgp_config.json` merge did.
+        """
+        try:
+            with self._download_lock:
+                ready = self._download(switch.label, switch.missing, progress or (lambda *_: None), cancelled)
+            now = to_iso(self._clock())
+            with self._lock, self.db.transaction() as conn:
+                self._place(conn, switch.missing, ready, now)
+                for key, files in switch.plans.items():
+                    installed = "SELECT 1 FROM installed_models WHERE model_id = ? AND quant = ? AND state = 'installed'"
+                    if conn.execute(installed, key).fetchone() is None:
+                        continue
+                    conn.execute("DELETE FROM installed_model_files WHERE model_id = ? AND quant = ?", key)
+                    conn.executemany(
+                        "INSERT INTO installed_model_files (model_id, quant, path) VALUES (?, ?, ?)",
+                        [(*key, file.path) for file in files],
+                    )
+                    conn.execute(
+                        "UPDATE installed_models SET size_bytes = ? WHERE model_id = ? AND quant = ?",
+                        (sum(file.size_bytes for file in files), *key),
+                    )
+                conn.execute("UPDATE hosts SET text_encoder_variant = ? WHERE id = ?", (switch.variant, self.host_id))
+        except OSError as exc:
+            log.exception("Switching to %s failed", switch.label)
+            message = f"Writing the files of {switch.label} failed ({exc.strerror or exc}), so the text encoder was not switched."
+            raise ModelStoreError("io_error", message) from exc
+        finally:
+            with self._lock:
+                self._switching = None
+                self._release(switch.files)
+        return self.register_in_wan2gp()
+
     # ------------------------------------------------------------------ internals
+
+    def _release(self, files: Iterable[PlannedFile]) -> None:
+        for file in files:
+            self._reserved[file.key] -= 1
+            if self._reserved[file.key] <= 0:
+                del self._reserved[file.key]
+
+    def _running_jobs(self) -> bool:
+        """Whether a job is leased to or running on a worker of this host."""
+        row = self.db.query_one(
+            "SELECT 1 FROM jobs WHERE state IN ('leased', 'running') AND json_extract(route, '$.host_id') = ? LIMIT 1", (self.host_id,)
+        )
+        return row is not None
 
     def _stored(self) -> dict[str, tuple[str, int]]:
         """Registered files: path key to (SHA-256, size)."""
