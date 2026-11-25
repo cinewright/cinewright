@@ -143,7 +143,9 @@ def run_job(state: Supervised, **params) -> dict:
 def test_the_core_starts_the_worker_shows_its_health_logs_its_output_and_stops_it(supervised: Supervised):
     health = wait_ready(supervised)
     assert health["detail"] == "Mock engine for tests"
-    assert "Registered as worker" in supervised.log  # the worker's own log lines (stderr) land in the file
+    # The worker's own log lines (stderr) land in the file. The core records the health from the registration
+    # request, and the worker logs only once the response arrives, so the line can follow the ready state.
+    wait_for(lambda: "Registered as worker" in supervised.log, "the worker's registration log line", lambda: supervised.log)
     copy = supervised.home / "engines" / "worker" / "cinewright_worker"
     assert list((copy / "__pycache__").glob("loop.*.pyc")), "the worker did not import the copy"
 
