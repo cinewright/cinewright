@@ -159,7 +159,7 @@ While Cinewright runs, with at least one model installed:
 1. Open **Generate**, enter a prompt and choose a capability, for example `i2v` for a clip that starts from an image.
 2. Leave **Model** at **Router chooses**, or pin a model.
 3. For `i2v` and `i2i`, choose **Choose image** and pick a PNG, JPEG or WebP file. Cinewright uploads it right away, with the selected data class, and shows a small preview. **Replace image** and **Remove image** change it. The uploaded image also appears in the Library.
-4. Set **Resolution**, **Frames** and **Frame rate**, or leave them at the model's defaults (empty). They offer what the model can render: the pinned model, or the model the estimate names. A frame count off the model's frame grid moves to the nearest valid count when you leave the field. For example, LTX-2 2.3 Distilled renders 17, 25, 33 and so on, so 30 becomes 33. Still images (`t2i`, `i2i`) have no frames or frame rate. Changing the capability sets all three back to the model defaults.
+4. Set **Resolution**, **Frames** and **Frame rate**, or leave them at **Model default** (an empty **Frames** field). They offer what the model can render: the pinned model, or the model the estimate names, and stay disabled until one of them is known. A frame count off the model's frame grid moves to the nearest valid count when you leave the field. For example, LTX-2 2.3 Distilled renders 17, 25, 33 and so on, so 30 becomes 33. Still images (`t2i`, `i2i`) have no frames or frame rate. Changing the capability sets all three back to the model defaults.
 5. Choose **Generate**. While something is missing, the button says what, for example **Add a start image**.
 6. The Job panel shows the progress and the latest preview frame. When the job is done, choose **Open in Library**. The Library opens with the result selected and shows its provenance: model, seed, parameters (resolution, frames, fps, steps) and the model settings passed on to WanGP.
 
@@ -265,12 +265,12 @@ The core records jobs submitted over MCP as `ui` jobs until issue #7 adds MCP cl
 
 ### Models in the registry
 
-| Registry id | WanGP model types | Capabilities | Licence |
-| --- | --- | --- | --- |
-| `z-image-turbo` | `z_image` | t2i | Apache-2.0 |
-| `ltx-2.3-distilled-22b` | `ltx2_22B_distilled`, `ltx2_22B_distilled_gguf_*` | t2v, i2v, t2i, i2i, audio | LTX-2 Community License Agreement |
-| `wan-2.2-i2v-14b` | `i2v_2_2` | i2v | Apache-2.0 |
-| `wan-2.2-t2v-14b` | `t2v_2_2` | t2v, t2i | Apache-2.0 |
+| Registry id | WanGP model types | Capabilities | Clip frames and fps | Licence |
+| --- | --- | --- | --- | --- |
+| `z-image-turbo` | `z_image` | t2i | none (images only) | Apache-2.0 |
+| `ltx-2.3-distilled-22b` | `ltx2_22B_distilled`, `ltx2_22B_distilled_gguf_*` | t2v, i2v, t2i, i2i, audio | 17 + a multiple of 8, up to 737; 24 fps | LTX-2 Community License Agreement |
+| `wan-2.2-i2v-14b` | `i2v_2_2` | i2v | 5 + a multiple of 4, up to 737; 16 fps | Apache-2.0 |
+| `wan-2.2-t2v-14b` | `t2v_2_2` | t2v, t2i | 5 + a multiple of 4, up to 737; 16 fps | Apache-2.0 |
 
 [`src/cinewright/registry/README.md`](src/cinewright/registry/README.md) explains the descriptor fields and where the hashes come from.
 
