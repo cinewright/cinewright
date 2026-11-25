@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.3](https://github.com/cinewright/cinewright/compare/v0.0.2...v0.0.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* send the SSE keepalive and keep only the latest preview per job ([#72](https://github.com/cinewright/cinewright/issues/72)) ([c37d75c](https://github.com/cinewright/cinewright/commit/c37d75c6fef213a106c548c4455591983006503c))
+
 ## [0.0.2](https://github.com/cinewright/cinewright/compare/v0.0.1...v0.0.2) (2026-11-24)
 
 

@@ -156,8 +156,11 @@ def test_t2i_job_runs_end_to_end_with_the_mock_worker(live_core: LiveCore, mock_
         events = read_sse(stream)
     assert events, f"no events arrived:\n{worker_log(mock_worker)}"
     assert all(event["data"]["job_id"] == job_id for event in events)
-    assert [event["data"]["seq"] for event in events] == list(range(1, len(events) + 1))
-    assert [event["id"] for event in events] == [f"{job_id}:{event['data']['seq']}" for event in events]
+    # Previews are live only: no SSE id, and the seq of the job's latest stored event.
+    assert all("id" not in event for event in events if event["event"] == "preview")
+    stored = [event for event in events if event["event"] != "preview"]
+    assert [event["data"]["seq"] for event in stored] == list(range(1, len(stored) + 1))
+    assert [event["id"] for event in stored] == [f"{job_id}:{event['data']['seq']}" for event in stored]
     states = [event["data"]["data"]["state"] for event in events if event["event"] == "state"]
     assert states[0] == "queued"
     assert "running" in states
