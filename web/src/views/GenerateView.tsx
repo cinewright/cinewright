@@ -193,6 +193,17 @@ export function GenerateView() {
     // Only a change of the model (or of its limits) snaps; edits snap when the user leaves the field.
   }, [limitsKey, limits]);
 
+  // Another capability has other models, and its fields stay disabled until an estimate names one: a value kept from
+  // the previous capability could make every model refuse the request while the user cannot clear it.
+  const changeCapability = (value: Capability) => {
+    snapArmed.current = true;
+    setCapability(value);
+    setResolution('');
+    setFramesText('');
+    setFramesUnreadable(false);
+    setFps('');
+  };
+
   const commitFrames = () => {
     const value = parseFrames(framesText);
     if (typeof value === 'number' && grid && !onGrid(value, grid)) setFramesText(String(snapFrames(value, grid)));
@@ -291,7 +302,7 @@ export function GenerateView() {
               <select
                 className="cw-select cw-input--mono"
                 value={selectedCapability}
-                onChange={(e) => edit(setCapability)(e.target.value as Capability)}
+                onChange={(e) => changeCapability(e.target.value as Capability)}
               >
                 {capabilityOptions.map((cap) => (
                   <option key={cap} value={cap}>

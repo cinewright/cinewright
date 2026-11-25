@@ -176,8 +176,11 @@ function enterPrompt(): void {
   fireEvent.change(screen.getByRole('textbox', { name: /^Prompt/ }), { target: { value: 'Harbour at night' } });
 }
 
+// Tests that wait for the estimates to settle run on real timers, through several 300 ms debounces.
+const SLOW_TEST_MS = 15_000;
+
 /** Wait until no new estimate has been requested for `quietMs` (the debounce is 300 ms); returns the count. */
-async function settled(calls: ApiCall[], quietMs = 900): Promise<number> {
+async function settled(calls: ApiCall[], quietMs = 600): Promise<number> {
   let count = -1;
   while (count !== estimates(calls).length) {
     count = estimates(calls).length;
@@ -332,7 +335,7 @@ describe('GenerateView', () => {
     expect(estimates(calls).at(-1)).toMatchObject({ data_class: 'public' });
     expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, frames: 33 });
     expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
-  });
+  }, SLOW_TEST_MS);
 
   it('snaps at most once per edit when every snap moves the route to a model with another grid', async () => {
     // Two models whose grids share no count, and a router that answers with the other one on every call:
@@ -359,6 +362,37 @@ describe('GenerateView', () => {
     expect(framesInput().value).toBe('20');
     expect(framesInput().getAttribute('aria-invalid')).toBe('true');
     expect(screen.getByRole('button', { name: 'Frames must be 8 + a multiple of 8, up to 400' })).toBeTruthy();
+  }, SLOW_TEST_MS);
+
+  it('clears resolution, frames and frame rate when the capability changes, so no kept value blocks the new route', async () => {
+    const Z_LIMITS: Limits = { resolutions: ['1440x1440', '1024x1024'], max_frames: null, min_frames: null, frames_step: null, fps: [] };
+    // LTX refuses a resolution it does not list, as the router does.
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2i', 'z-image-turbo', 'Z-Image Turbo 6B', Z_LIMITS), entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model('z-image-turbo', 'Z-Image Turbo 6B', ['t2i']), model(LTX, LTX_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': (body) => {
+        const request = body as JobRequest;
+        if (request.capability === 't2i') return feasible('z-image-turbo');
+        const resolution = request.params?.resolution;
+        if (resolution && !(LTX_LIMITS.resolutions ?? []).includes(resolution))
+          return new ProblemAnswer(409, 'No worker can run this request', `ltx-2.3-distilled-22b does not support ${resolution}`);
+        return feasible(LTX);
+      },
+    });
+    await screen.findByRole('option', { name: 'Z-Image Turbo 6B' });
+    expect(select('Capability').value).toBe('t2i');
+    enterPrompt();
+    await screen.findByText('Choices of Z-Image Turbo 6B, the model the router picked.');
+    fireEvent.change(select('Resolution'), { target: { value: '1440x1440' } });
+    await waitFor(() => expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, resolution: '1440x1440' }));
+
+    fireEvent.change(select('Capability'), { target: { value: 't2v' } });
+    expect(select('Resolution').value).toBe('');
+    await screen.findByText(`Choices of ${LTX_NAME}, the model the router picked.`);
+    expect(select('Resolution').disabled).toBe(false);
+    expect(estimates(calls).at(-1)).toMatchObject({ capability: 't2v', params: { seed: null } });
+    expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null });
+    expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
   });
 
   it('hides frames and frame rate for still images and sends neither', async () => {
