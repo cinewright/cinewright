@@ -114,8 +114,10 @@ def test_default_and_max_frames_lie_on_the_frame_grid(path):
     if limits.min_frames is None:
         assert "frames" not in model.defaults
         return
-    on_grid = [limits.max_frames] + ([model.defaults["frames"]] if "frames" in model.defaults else [])
-    for frames in on_grid:
+    # A default frame count means every clip job has one the router checked: the Wan2GP adapter lets the job's frames
+    # win over `params.extra` (`video_length`) and over `duration_s`, which would let Wan2GP pick the count.
+    assert "frames" in model.defaults
+    for frames in (limits.max_frames, model.defaults["frames"]):
         assert frames is not None and frames >= limits.min_frames
         assert (frames - limits.min_frames) % limits.frames_step == 0, frames
 
