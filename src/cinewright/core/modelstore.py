@@ -441,7 +441,7 @@ class ModelStore:
         progress: Callable[[InstallProgress], None] | None = None,
         cancelled: Callable[[], bool] = lambda: False,
     ) -> Install:
-        """`prepare_install`, then `run_install`."""
+        """`prepare_install`, then `run_install`; returns the prepared install. `run_install` also returns the config merge result."""
         install = self.prepare_install(model_id, quant)
         self.run_install(install, progress=progress, cancelled=cancelled)
         return install
@@ -498,12 +498,14 @@ class ModelStore:
         *,
         progress: Callable[[InstallProgress], None] | None = None,
         cancelled: Callable[[], bool] = lambda: False,
-    ) -> None:
+    ) -> WgpConfigResult:
         """Download, verify, place and register a prepared install, then register the store in Wan2GP.
 
-        On any failure nothing of it is registered, the quantization is `failed` with the message (or absent again
-        when cancelled), and `ModelStoreError` is raised. A config that cannot be merged raises after the
-        registration: the files are installed, but Wan2GP does not see them until the config is fixed.
+        Returns what the `wgp_config.json` merge did; `missing` means Wan2GP has not written its config yet, so it
+        does not see the store until a merge after its first start. On any failure nothing of the install is
+        registered, the quantization is `failed` with the message (or absent again when cancelled), and
+        `ModelStoreError` is raised. A config that cannot be merged raises after the registration: the files are
+        installed, but Wan2GP does not see them until the config is fixed.
         """
         try:
             with self._download_lock:
@@ -531,7 +533,7 @@ class ModelStore:
                     self._reserved[file.key] -= 1
                     if self._reserved[file.key] <= 0:
                         del self._reserved[file.key]
-        self.register_in_wan2gp()
+        return self.register_in_wan2gp()
 
     def _download(self, install: Install, report: Callable[[InstallProgress], None], cancelled: Callable[[], bool]) -> dict[str, Path]:
         """Each missing file as a verified file: staged, or already where it belongs. Keyed by path key."""

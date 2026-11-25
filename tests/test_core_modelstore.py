@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -33,7 +34,7 @@ from cinewright.core.modelstore import (
     wan2gp_defines,
 )
 from cinewright.core.registry import Registry
-from cinewright.db.database import Database
+from cinewright.db.database import Database, bundled_migrations
 from cinewright.paths import DataPaths
 
 CDN = "us.aws.cdn.hf.co"
@@ -294,7 +295,7 @@ def test_a_redirect_to_a_host_outside_the_registry_is_refused(env):
     with pytest.raises(ModelStoreError) as failure:
         env.store.install("z-image-turbo", "int8")
 
-    assert failure.value.code == "download_failed" and "cdn.example.com" in failure.value.message
+    assert failure.value.code == "download_failed" and f"refused https://{env.hub.redirect_to}," in failure.value.message
     assert not any(httpx.URL(url).host == "cdn.example.com" for url, _ in env.hub.requests)
     assert env.placed() == set() and env.rows("SELECT * FROM installed_model_files") == []
 
@@ -600,6 +601,39 @@ def test_merging_wgp_config_keeps_every_other_key(tmp_path):
     with pytest.raises(ModelStoreError) as failure:
         merge_wgp_config(config, store, "int8")
     assert failure.value.code == "config_invalid"
+
+
+def test_an_install_reports_whether_wan2gp_sees_the_store(env):
+    # Without a wgp_config.json Wan2GP has not started yet: the install stands, the merge waits for Wan2GP's file.
+    assert env.store.run_install(env.store.prepare_install("z-image-turbo", "int8")) == "missing"
+    assert not env.store.config_path.exists()
+    env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."]})
+    assert env.store.register_in_wan2gp() == "updated"
+    assert env.store.run_install(env.store.prepare_install("z-image-turbo", "int8")) == "unchanged"  # complete: nothing to download
+    assert env.hub.served(env.url("z-image-turbo", "ZImageTurbo_quanto_bf16_int8.safetensors")) == 1
+
+
+def test_migration_0003_keeps_existing_hosts_without_a_variant(tmp_path):
+    only_0002 = tmp_path / "migrations-0002"
+    only_0002.mkdir()
+    for name in ("0001_initial.sql", "0002_job_outputs.sql"):
+        (only_0002 / name).write_bytes((bundled_migrations() / name).read_bytes())
+    db = Database(tmp_path / "db" / "old.sqlite3")
+    try:
+        assert db.migrate(only_0002) == ["0001_initial", "0002_job_outputs"]
+        db.execute(
+            "INSERT INTO hosts (id, name, kind, allowed_data_classes, created_at) VALUES ('local', 'Local', 'local', '[]', ?)",
+            ("2026-11-20T00:00:00.000000+00:00",),
+        )
+        assert db.migrate() == ["0003_model_store"]
+        assert db.query_one("SELECT text_encoder_variant FROM hosts WHERE id = 'local'")["text_encoder_variant"] is None
+        db.execute("UPDATE hosts SET text_encoder_variant = 'bf16'")
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE hosts SET text_encoder_variant = 'fp8'")
+        tables = {row["name"] for row in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"store_files", "installed_model_files"} <= tables and "model_files" not in tables
+    finally:
+        db.close()
 
 
 def test_the_mvp_model_types_need_no_finetune_definition(env, tmp_path):
