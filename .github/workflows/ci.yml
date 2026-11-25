@@ -1,6 +1,9 @@
 # CI for pull requests to main and pushes to main. The job's check "ci" is the required check.
-# workflow_dispatch lets release.yml start CI on the release-please PR: pull requests that
-# GITHUB_TOKEN creates or updates trigger no workflows.
+# workflow_dispatch: release.yml starts this workflow on the release-please PR branch as an early signal
+# (GitHub does not count that run for the PR's required check; the owner closes and reopens the release
+# PR to get one that counts). It can also be started by hand.
+# Every green run uploads the Windows installer as the artifact "installer", so a build can be tested
+# before it is released (Actions -> the run -> Artifacts).
 name: ci
 on:
   pull_request:
@@ -50,3 +53,10 @@ jobs:
           echo "$actual"
       - name: Semgrep (blocking on ERROR severity)
         run: pipx run semgrep scan --config p/default --severity ERROR --error --metrics off
+      - name: Upload the installer for testing
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: installer
+          path: dist/CinewrightSetup-*.exe
+          if-no-files-found: error
+          retention-days: 14
