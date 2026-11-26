@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -253,3 +255,29 @@ def core(config: Config, registry_dir: Path, clock: FakeClock) -> Core:
 def client(core: Core) -> TestClient:
     with TestClient(create_app(core), base_url=BASE_URL) as test_client:
         yield test_client
+
+
+# ---------------------------------------------------------------------- tests on real hardware
+
+GPU_TESTS_ENV = "CINEWRIGHT_GPU_TESTS"
+GPU_ENGINE_ENV = ("CINEWRIGHT_WAN2GP_ROOT", "CINEWRIGHT_WAN2GP_PYTHON")
+
+
+def gpu_skip_reason(environ: Mapping[str, str]) -> str | None:
+    """Why `gpu` tests do not run here, or None when they do: they need CINEWRIGHT_GPU_TESTS=1 and a provisioned
+    engine, which today means a Wan2GP checkout and its Python named by CINEWRIGHT_WAN2GP_ROOT and CINEWRIGHT_WAN2GP_PYTHON."""
+    missing = [name for name in GPU_ENGINE_ENV if not environ.get(name)]
+    if environ.get(GPU_TESTS_ENV) != "1":
+        return f"a gpu test: set {GPU_TESTS_ENV}=1 on a computer with a GPU and a provisioned engine"
+    if missing:
+        return f"a gpu test without a provisioned engine: set {' and '.join(missing)}"
+    return None
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    # Skipped from the environment, not with -m: CI runs plain `pytest -q`.
+    reason = gpu_skip_reason(os.environ)
+    if reason is not None:
+        for item in items:
+            if item.get_closest_marker("gpu") is not None:
+                item.add_marker(pytest.mark.skip(reason=reason))

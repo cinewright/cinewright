@@ -64,6 +64,9 @@ ignore = ["S101", "B008"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "gpu: needs a GPU and a provisioned engine; skipped unless CINEWRIGHT_GPU_TESTS=1 and CINEWRIGHT_WAN2GP_ROOT and CINEWRIGHT_WAN2GP_PYTHON are set",
+]
 
 [tool.vulture]
 # Protocol parameter called positionally by the approvals routes (vulture would report it as unused).

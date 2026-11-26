@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -44,6 +45,7 @@ MAX_MESSAGE_CHARS = 1000
 CLOSE_TIMEOUT = 120.0  # matches the core's LEASE_SECONDS
 MAX_CLOSE_BACKOFF = 15.0
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_MIB = 1024 * 1024
 
 CANCELLED = ("cancelled", "The job was cancelled on request.", False)
 WORKER_STOPPED = ("worker_stopped", "The worker stopped before the job finished; the job can run again.", True)
@@ -97,6 +99,7 @@ class WorkerLoop:
         self._lock = threading.Lock()
         self._busy = False
         self._finished = threading.Event()
+        self._peak_vram_valid = False  # whether a peak VRAM reading now measures the current job alone
 
     # ------------------------------------------------------------------ main loop
 
@@ -193,6 +196,7 @@ class WorkerLoop:
         job_id = job["job_id"]
         log.info("Leased job %s (%s).", job_id, job["engine_model"])
         self._busy = True
+        self._peak_vram_valid = reset_peak_vram()
         work = tempfile.mkdtemp(prefix="cinewright-job-", dir=self.work_dir)
         try:
             self._execute(job, work)
@@ -360,6 +364,7 @@ class WorkerLoop:
 
     def _close(self, job: dict[str, Any], outcome: str, call: Callable[[], None]) -> None:
         """Report the outcome, retrying connection errors and 5xx answers with backoff until `close_timeout`."""
+        self._report_peak_vram(job)  # while the job is still active: the core refuses events for a closed job
         deadline = time.monotonic() + self.close_timeout
         delay = self.retry_interval
         while True:
@@ -386,6 +391,18 @@ class WorkerLoop:
             # Not stop.wait(): a shutdown reaches here with the stop event already set.
             time.sleep(min(delay, remaining))
             delay = min(delay * 2, MAX_CLOSE_BACKOFF)
+
+    def _report_peak_vram(self, job: dict[str, Any]) -> None:
+        """Post the job's peak VRAM as a `log` event with `peak_vram_mb`, when it was measured; never raises."""
+        peak = peak_vram_mb() if self._peak_vram_valid else None
+        self._peak_vram_valid = False  # one event per job
+        if peak is None:
+            return
+        event = {"kind": "log", "data": {"message": f"Peak VRAM of the job in the worker process: {peak} MB.", "peak_vram_mb": peak}}
+        try:
+            self.client.post_events(job["job_id"], job["lease_id"], [event])
+        except Exception as exc:  # noqa: BLE001 - a measurement must never keep the job from being closed
+            log.warning("Posting the peak VRAM of job %s failed: %s", job["job_id"], exc)
 
 
 def output_name(raw: str, used: set[str]) -> str:
@@ -425,3 +442,40 @@ def _preview_event(path: str) -> dict[str, Any] | None:
 def _short(text: str) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= MAX_MESSAGE_CHARS else text[: MAX_MESSAGE_CHARS - 1] + "…"
+
+
+def reset_peak_vram() -> bool:
+    """Start measuring a job's peak VRAM; False when a reading after the job would not be that job's alone.
+
+    The measurement uses the torch the engine imported, taken from `sys.modules` (the worker never imports it), and
+    only once CUDA is initialised, so CUDA is never touched before the engine has set it up. While CUDA is not
+    initialised there is nothing to reset: its peak statistics start when the engine initialises it during the job.
+    """
+    cuda = _initialised_cuda()
+    if cuda is None:
+        return True
+    try:
+        cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 - VRAM figures are optional
+        return False
+    return True
+
+
+def peak_vram_mb() -> int | None:
+    """The most memory torch allocated on the GPU in this process since `reset_peak_vram`, in MB (MiB); None without CUDA."""
+    cuda = _initialised_cuda()
+    if cuda is None:
+        return None
+    try:
+        return int(cuda.max_memory_allocated()) // _MIB
+    except Exception:  # noqa: BLE001 - VRAM figures are optional
+        return None
+
+
+def _initialised_cuda() -> Any:
+    """`torch.cuda` of the torch module the engine imported, once CUDA is initialised; otherwise None."""
+    cuda = getattr(sys.modules.get("torch"), "cuda", None)
+    try:
+        return cuda if cuda is not None and cuda.is_initialized() else None
+    except Exception:  # noqa: BLE001
+        return None
