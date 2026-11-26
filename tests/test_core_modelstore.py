@@ -23,6 +23,8 @@ from cinewright.core.clock import to_iso
 from cinewright.core.modelstore import (
     STAGING_DIR,
     AllowedHosts,
+    Eviction,
+    EvictionNeeded,
     InstallProgress,
     ModelStore,
     ModelStoreError,
@@ -645,6 +647,291 @@ def test_an_install_the_quota_cannot_hold_is_refused_and_evicts_nothing(env):
     assert len(env.rows("SELECT * FROM installed_models")) == 3
 
 
+# The quota after `install_three` holds LTX-2 int8 only without Wan T2V int8, the least recently used; free disk is
+# ample unless a test says otherwise, so the drive holds the download with Wan T2V still there (#90).
+LTX = ("ltx-2.3-distilled-22b", "int8")
+LTX_TRANSFORMER = "ltx-2.3-22b-distilled_diffusion_model_quanto_int8.safetensors"
+Z_IMAGE = ("z-image-turbo", "int8")
+T2V = ("wan-2.2-t2v-14b", "int8")
+I2V = ("wan-2.2-i2v-14b", "int8")
+
+
+def quota_without_t2v(env: Env) -> None:
+    env.quota = store_total(env) + env.size(*LTX) - transformer_bytes(env, "wan-2.2-t2v-14b", WAN_T2V_INT8)
+
+
+def t2v_eviction(env: Env) -> Eviction:
+    return Eviction("wan-2.2-t2v-14b", "int8", "Wan2.2 Text2video 14B", env.size(*T2V))
+
+
+def growth(env: Env, key: tuple[str, str]) -> int:
+    """What installing `key` adds to the store now: its files not in it yet."""
+    placed = env.placed()
+    return sum(f.size_bytes for f in plan_files(env.registry, *key, "int8") if f.path not in placed)
+
+
+def test_with_room_on_the_drive_the_quota_step_removes_the_least_recently_used_model_once_the_install_registered(env, caplog):
+    install_three(env)
+    quota_without_t2v(env)
+    caplog.set_level("INFO", logger="cinewright.core.modelstore")
+    during: list[tuple[bool, bool]] = []
+
+    install = env.store.prepare_install(*LTX, evict={T2V})  # a confirmation changes nothing when the drive has room
+    assert install.evicted == () and T2V in env.store.installed()  # nothing removed before the download
+    env.store.run_install(install, progress=lambda _: during.append((T2V in env.store.installed(), set(WAN_T2V_INT8) <= env.placed())))
+    assert during and set(during) == {(True, True)}  # installed, routable and on disk while LTX-2 downloads
+    assert env.store.installed() == {Z_IMAGE, T2V, I2V, LTX} and store_total(env) > env.quota
+
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+
+    assert env.store.installed() == {Z_IMAGE, I2V, LTX} and store_total(env) <= env.quota
+    placed = env.placed()
+    assert not set(WAN_T2V_INT8) & placed and UMT5_INT8 in placed  # the shared encoder stays for Wan I2V
+    assert "Removing wan-2.2-t2v-14b int8, the least recently used model" in caplog.text
+    assert env.store.evict_for_quota(install) == []  # within the quota now
+
+
+@pytest.mark.parametrize("failure", ["download_failed", "hash_mismatch", "cancelled"])
+def test_a_failed_or_cancelled_download_removes_nothing_for_the_quota(env, failure):
+    install_three(env)
+    quota_without_t2v(env)
+    url = env.url("ltx-2.3-distilled-22b", LTX_TRANSFORMER)
+    cancelled = lambda: False  # noqa: E731
+    if failure == "download_failed":
+        env.hub.cut[url] = 5
+    elif failure == "hash_mismatch":
+        env.hub.files[url] = env.hub.files[url][:-1] + b"!"
+    else:
+        calls = iter([False, False, True])
+        cancelled = lambda: next(calls, True)  # noqa: E731
+    before = env.placed()
+
+    with pytest.raises(ModelStoreError) as raised:
+        env.store.install(*LTX, cancelled=cancelled)
+
+    assert raised.value.code == failure
+    assert env.store.installed() == {Z_IMAGE, T2V, I2V} and env.placed() == before
+    assert set(WAN_T2V_INT8) <= before
+    assert {(r["model_id"], r["state"]) for r in env.rows("SELECT model_id, state FROM installed_models")} == {
+        ("z-image-turbo", "installed"),
+        ("wan-2.2-t2v-14b", "installed"),
+        ("wan-2.2-i2v-14b", "installed"),
+        ("ltx-2.3-distilled-22b", "failed"),
+    }
+
+
+def test_install_returns_what_the_quota_step_removed(env):
+    install_three(env)
+    quota_without_t2v(env)
+
+    install = env.store.install(*LTX)
+
+    assert install.evicted == (T2V,) and install.evictions == (t2v_eviction(env),)
+
+
+def test_a_planned_victim_a_job_comes_to_need_during_the_download_stays_and_the_next_one_goes(env):
+    install_three(env)
+    quota_without_t2v(env)
+    install = env.store.prepare_install(*LTX)
+    env.add_job(*T2V)  # queued while LTX-2 downloads
+    env.store.run_install(install)
+
+    assert [eviction.key for eviction in env.store.evict_for_quota(install)] == [I2V]
+
+    assert env.store.installed() == {Z_IMAGE, T2V, LTX} and store_total(env) <= env.quota
+    assert set(WAN_T2V_INT8) <= env.placed()
+
+
+def test_with_every_other_model_needed_the_store_stays_above_the_quota_and_the_install_stays_installed(env):
+    install_three(env)
+    quota_without_t2v(env)
+    install = env.store.prepare_install(*LTX)
+    for key in (Z_IMAGE, T2V, I2V):
+        env.add_job(*key)
+    env.store.run_install(install)
+
+    assert env.store.evict_for_quota(install) == []
+
+    assert env.store.installed() == {Z_IMAGE, T2V, I2V, LTX} and store_total(env) > env.quota
+
+
+def test_installs_at_the_same_time_each_run_the_quota_step_and_the_store_ends_within_the_quota(env):
+    env.store.install(*Z_IMAGE)  # least recently used
+    env.clock.advance(60)
+    env.store.install(*T2V)
+    growth_a, growth_b = growth(env, LTX), growth(env, I2V)
+    # B fits as it is; A, counting B's growth, needs Z-Image's room, but its own growth alone stays within the quota.
+    env.quota = store_total(env) + growth_a + growth_b - growth_b // 2
+
+    b = env.store.prepare_install(*I2V)
+    a = env.store.prepare_install(*LTX)
+    assert a.evicted == () and b.evicted == () and Z_IMAGE in env.store.installed()
+
+    env.store.run_install(a)
+    assert env.store.evict_for_quota(a) == []  # B's growth is not counted: B has not registered
+    env.store.run_install(b)
+    assert [eviction.key for eviction in env.store.evict_for_quota(b)] == [Z_IMAGE]
+
+    assert env.store.installed() == {T2V, I2V, LTX} and store_total(env) <= env.quota
+
+
+def test_an_install_that_fits_on_the_drive_only_after_removing_models_is_refused_until_each_is_confirmed(env):
+    install_three(env)
+    quota_without_t2v(env)
+    env.free = env.size(*LTX) - 1  # the download fits only once Wan T2V's transformer files are gone
+    before, requests = env.placed(), len(env.hub.requests)
+    rows = env.rows("SELECT * FROM installed_models ORDER BY model_id, quant")
+    size = format_size(env.size(*T2V))
+
+    for evict in ((), {Z_IMAGE}, {("wan-2.2-t2v-14b", "bf16")}):
+        with pytest.raises(EvictionNeeded) as refused:
+            env.store.prepare_install(*LTX, evict=evict)
+        assert refused.value.code == "eviction_needed"
+        assert refused.value.evictions == (t2v_eviction(env),)
+        assert refused.value.frees_bytes == transformer_bytes(env, "wan-2.2-t2v-14b", WAN_T2V_INT8)  # less than its size
+        assert refused.value.message == (
+            f"LTX-2 2.3 Distilled 1.0 22B int8 fits on the drive of the model store only after removing Wan2.2 Text2video 14B int8 "
+            f"({size}), so nothing was installed or removed; name it in `evict` to remove it first."
+        )
+    # No byte downloaded or removed, and LTX-2 is not marked downloading.
+    assert env.placed() == before and len(env.hub.requests) == requests
+    assert env.rows("SELECT * FROM installed_models ORDER BY model_id, quant") == rows
+
+    install = env.store.prepare_install(*LTX, evict={T2V, Z_IMAGE})  # a name the plan does not need is ignored
+    assert install.evicted == (T2V,) and install.evictions == (t2v_eviction(env),)
+    assert len(env.hub.requests) == requests  # removed before the first request for LTX-2
+    assert env.store.installed() == {Z_IMAGE, I2V} and not set(WAN_T2V_INT8) & env.placed()
+
+    env.store.run_install(install)
+    assert env.store.evict_for_quota(install) == []
+    assert env.store.installed() == {Z_IMAGE, I2V, LTX} and store_total(env) <= env.quota
+
+
+def test_an_eviction_needed_refusal_names_every_planned_model_in_removal_order(env):
+    install_three(env)
+    # Room only after removing Wan T2V and Wan I2V: together they free their transformers and the shared encoders.
+    env.quota = store_total(env) + env.size(*LTX) - transformer_bytes(env, "wan-2.2-t2v-14b", WAN_T2V_INT8) - 1
+    env.free = env.size(*LTX) - 1
+
+    with pytest.raises(EvictionNeeded) as refused:
+        env.store.prepare_install(*LTX)
+
+    assert [eviction.key for eviction in refused.value.evictions] == [T2V, I2V]
+    assert refused.value.frees_bytes == env.size(*T2V) + transformer_bytes(env, "wan-2.2-i2v-14b", WAN_I2V_INT8)
+    assert f"Wan2.2 Text2video 14B int8 ({format_size(env.size(*T2V))}) and Wan2.2 Image2video 14B int8" in refused.value.message
+    assert refused.value.message.endswith("name them in `evict` to remove them first.")
+
+
+def test_confirmed_removals_stay_removed_when_the_download_then_fails(env):
+    install_three(env)
+    quota_without_t2v(env)
+    env.free = env.size(*LTX) - 1
+    env.hub.cut[env.url("ltx-2.3-distilled-22b", LTX_TRANSFORMER)] = 5
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.install(*LTX, evict={T2V})
+
+    assert failure.value.code == "download_failed"
+    assert env.store.installed() == {Z_IMAGE, I2V} and not set(WAN_T2V_INT8) & env.placed()
+
+
+def test_unreferenced_files_the_plan_counts_go_before_the_download_and_need_no_confirmation(env):
+    install_three(env)
+    leftover = b"left by an earlier start\n" * 20
+    (env.root / "leftover.safetensors").write_bytes(leftover)
+    env.db.execute(
+        "INSERT INTO store_files (path, sha256, size_bytes, verified_at) VALUES (?, ?, ?, ?)",
+        ("leftover.safetensors", sha256(leftover), len(leftover), to_iso(env.clock())),
+    )
+    # The quota needs the leftover's room and Wan T2V's; the drive holds the download once the leftover is gone.
+    env.quota = store_total(env) + env.size(*LTX) - len(leftover) - transformer_bytes(env, "wan-2.2-t2v-14b", WAN_T2V_INT8)
+    env.free = env.size(*LTX) - len(leftover)
+    during: list[tuple[bool, bool]] = []
+    leftover_path = env.root / "leftover.safetensors"
+
+    install = env.store.install(*LTX, progress=lambda _: during.append((leftover_path.exists(), T2V in env.store.installed())))
+
+    assert during and set(during) == {(False, True)}
+    assert install.evicted == (T2V,) and store_total(env) <= env.quota
+
+
+def test_a_text_encoder_switch_waits_for_the_quota_step_of_an_install_that_registered(env):
+    install_three(env)
+    quota_without_t2v(env)
+    install = env.store.prepare_install(*LTX)
+    env.store.run_install(install)
+
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("bf16")  # between the registration and the quota step
+    assert failure.value.code == "installing"
+
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    assert store_total(env) <= env.quota
+    env.store.run_switch(env.store.prepare_switch("bf16"))
+    assert env.store.text_encoder_variant() == "bf16"
+
+
+def test_a_switch_waits_for_the_quota_step_also_when_the_config_merge_fails(env, monkeypatch):
+    install_three(env)
+    quota_without_t2v(env)
+    env.write_config({"attention_mode": "sdpa", "checkpoints_paths": ["ckpts", "."]})
+    install = env.store.prepare_install(*LTX)
+
+    def unwritable(path: object, data: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("cinewright.core.modelstore._write_json", unwritable)
+    with pytest.raises(PermissionError):
+        env.store.run_install(install)  # registered: only the merge failed
+    with pytest.raises(ModelStoreError) as failure:
+        env.store.prepare_switch("bf16")
+    assert failure.value.code == "installing"
+
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    monkeypatch.undo()
+    env.store.run_switch(env.store.prepare_switch("bf16"))
+
+
+def test_a_failed_download_leaves_switches_open_without_a_quota_step(env):
+    env.hub.files[env.url("z-image-turbo", "ZImageTurbo_quanto_bf16_int8.safetensors")] = b"broken"
+    install = env.store.prepare_install("z-image-turbo", "int8")
+    with pytest.raises(ModelStoreError):
+        env.store.run_install(install)
+
+    env.store.run_switch(env.store.prepare_switch("bf16"))  # nothing registered, so nothing waits for a quota step
+
+
+def test_the_quota_step_removes_nothing_while_a_switch_runs_that_started_without_waiting_for_it(env):
+    install_three(env)
+    quota_without_t2v(env)
+    install = env.store.prepare_install(*LTX)
+    env.store.run_install(install)
+    assert env.store.evict_for_quota(install) == [t2v_eviction(env)]
+    env.quota = store_total(env) - 1  # lowered after the quota step
+    switch = env.store.prepare_switch("bf16")
+
+    assert env.store.evict_for_quota(install) == []  # called again, without `run_install`, while the switch runs
+
+    assert env.store.installed() == {Z_IMAGE, I2V, LTX}
+    env.store.run_switch(switch)
+
+
+def test_an_error_in_the_quota_step_goes_to_the_log_and_the_install_stays_installed(env, monkeypatch, caplog):
+    install_three(env)
+    quota_without_t2v(env)
+
+    def broken(*args: object) -> bool:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(env.store, "_collect_garbage", broken)
+
+    install = env.store.install(*LTX)
+
+    assert install.evicted == (T2V,)  # unregistered before the error, so the caller still announces it
+    assert env.store.installed() == {Z_IMAGE, I2V, LTX}
+    assert "Removing models for the quota after installing LTX-2 2.3 Distilled 1.0 22B int8 failed" in caplog.text
+
+
 # ---------------------------------------------------------------------- text encoder variant
 
 QWEN3_INT8 = "Qwen3/qwen3_quanto_bf16_int8.safetensors"
@@ -728,6 +1015,7 @@ def test_a_variant_switch_excludes_installs_removals_and_running_jobs(env):
         env.store.prepare_switch("bf16")
     assert failure.value.code == "installing"
     env.store.run_install(install)
+    env.store.evict_for_quota(install)  # the install ends for a switch with its quota step
 
     switch = env.store.prepare_switch("bf16")
     for refused in (lambda: env.store.prepare_install("wan-2.2-i2v-14b", "int8"), lambda: env.store.remove("z-image-turbo")):
@@ -855,10 +1143,11 @@ def test_merging_wgp_config_keeps_every_other_key(tmp_path):
         "text_encoder_quantization": "bf16",
     }
 
-    config.write_bytes(b"[1, 2]")
-    with pytest.raises(ModelStoreError) as failure:
-        merge_wgp_config(config, store, "int8")
-    assert failure.value.code == "config_invalid"
+    for invalid in (b"[1, 2]", b'{"profile": "\xff"}'):  # not an object; not UTF-8
+        config.write_bytes(invalid)
+        with pytest.raises(ModelStoreError) as failure:
+            merge_wgp_config(config, store, "int8")
+        assert failure.value.code == "config_invalid"
 
 
 def test_an_install_reports_whether_wan2gp_sees_the_store(env):

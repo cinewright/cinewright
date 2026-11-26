@@ -6,8 +6,8 @@ import { vi } from 'vitest';
 export interface ApiCall {
   method: string;
   path: string;
-  /** Query parameters of the request, e.g. `{ quant: 'int8' }`. */
-  query: Record<string, string>;
+  /** Query parameters of the request, e.g. `{ quant: 'int8' }`; a repeated one as a list, e.g. `{ evict: ['a:int8', 'b:bf16'] }`. */
+  query: Record<string, string | string[]>;
   /** Request headers as sent, e.g. `{ Accept: 'application/json', 'Content-Type': 'image/png' }`. */
   headers: Record<string, string>;
   /** The parsed JSON body, or undefined when the body is not a string. */
@@ -21,12 +21,13 @@ export function callSummary({ method, path, query, body }: ApiCall): Pick<ApiCal
   return { method, path, query, body };
 }
 
-/** Return this from a route to answer with an RFC 9457 problem instead of 200. */
+/** Return this from a route to answer with an RFC 9457 problem instead of 200; `extensions` join the problem body. */
 export class ProblemAnswer {
   constructor(
     readonly status: number,
     readonly title: string,
     readonly detail: string,
+    readonly extensions: Record<string, unknown> = {},
   ) {}
 }
 
@@ -48,6 +49,16 @@ function headersOf(init: HeadersInit | undefined): Record<string, string> {
   return { ...init };
 }
 
+/** Query parameters by name: one value as a string, a repeated one as a list in the order sent. */
+function queryOf(search: string): Record<string, string | string[]> {
+  const query: Record<string, string | string[]> = {};
+  for (const [key, value] of new URLSearchParams(search)) {
+    const seen = query[key];
+    query[key] = seen === undefined ? value : [...(Array.isArray(seen) ? seen : [seen]), value];
+  }
+  return query;
+}
+
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
@@ -59,7 +70,7 @@ export function stubApi(routes: Routes): ApiCall[] {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const method = init.method ?? 'GET';
     const [path = url, search = ''] = url.split('?');
-    const query = Object.fromEntries(new URLSearchParams(search));
+    const query = queryOf(search);
     const headers = headersOf(init.headers);
     const body: unknown = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, query, headers, body, rawBody: init.body });
@@ -67,7 +78,7 @@ export function stubApi(routes: Routes): ApiCall[] {
     if (!route) return json(404, { type: 'about:blank', title: 'Not Found', status: 404 });
     const answer: unknown = await route(body);
     if (answer instanceof ProblemAnswer) {
-      return json(answer.status, { type: 'about:blank', title: answer.title, status: answer.status, detail: answer.detail });
+      return json(answer.status, { type: 'about:blank', title: answer.title, status: answer.status, detail: answer.detail, ...answer.extensions });
     }
     if (answer instanceof StatusAnswer) return new Response(null, { status: answer.status });
     return json(200, answer);

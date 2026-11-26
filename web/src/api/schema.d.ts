@@ -463,8 +463,11 @@ export interface paths {
          * Install Model
          * @description Install a quantization with the shared files it needs, in the background.
          *
-         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota
-         *     (it may remove the least recently used models first), an install in progress, the licence's country exclusions.
+         *     Checks first and refuses with 409 when the model cannot be installed now: free disk space, the storage quota, an
+         *     install in progress, the licence's country exclusions. With a quota, the least recently used quantizations no job
+         *     needs are removed once the install is registered, so a failed download removes nothing. When the drive holds the
+         *     download only after removing them, the install is refused with `eviction_needed`, which lists them with their sizes;
+         *     sent again with each of them in `evict`, it removes them first, and they stay removed if the download fails.
          *     Progress and the result follow as `model` events on `GET /events`; `GET /models` holds the state.
          */
         post: operations["installModel"];
@@ -1043,6 +1046,42 @@ export interface components {
             text_encoder_variant?: ("bf16" | "int8") | null;
         };
         /**
+         * InstallRefusal
+         * @description An install refused before any byte was downloaded or removed (409); `detail` gives cause and consequence.
+         */
+        InstallRefusal: {
+            /**
+             * Code
+             * @description Stable reason, for example `eviction_needed`, `quota_exceeded`, `not_enough_space`, `installing`, `switching` or `licence`
+             */
+            code?: string | null;
+            /** Detail */
+            detail?: string | null;
+            /**
+             * Evictions
+             * @description Only with `eviction_needed`: the installed quantizations the quota removes first, in removal order; send each as `evict` to confirm
+             */
+            evictions?: components["schemas"]["QuotaEviction"][] | null;
+            /**
+             * Frees Bytes
+             * @description Only with `eviction_needed`: disk space removing all of them frees, less than the sum of their sizes when they share files with quantizations that stay
+             */
+            frees_bytes?: number | null;
+            /** Instance */
+            instance?: string | null;
+            /** Status */
+            status: number;
+            /** Title */
+            title: string;
+            /**
+             * Type
+             * @default about:blank
+             */
+            type: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * InstallState
          * @enum {string}
          */
@@ -1383,6 +1422,33 @@ export interface components {
             revision?: string | null;
         };
         /**
+         * ModelStoreEviction
+         * @description What the storage quota removed for one install.
+         */
+        ModelStoreEviction: {
+            /**
+             * At
+             * Format: date-time
+             * @description When the last of them was removed
+             */
+            at: string;
+            /**
+             * Evicted
+             * @description Removed quantizations in removal order: those removed before the download, then those removed once the install registered
+             */
+            evicted: components["schemas"]["QuotaEviction"][];
+            /**
+             * Model Id
+             * @description Model of the install that needed the room
+             */
+            model_id: string;
+            /**
+             * Quant
+             * @description Quantization of that install
+             */
+            quant: string;
+        };
+        /**
          * ModelStoreUsage
          * @description The model store (`<data dir>/models`) as the Models view shows it.
          */
@@ -1392,6 +1458,8 @@ export interface components {
              * @description Free space of the drive that holds the model store, measured for this answer
              */
             free_bytes: number;
+            /** @description What the quota removed for the most recent install that removed any, also when that install failed afterwards; kept since the core started, null while there was none */
+            last_eviction?: components["schemas"]["ModelStoreEviction"] | null;
             /**
              * Quota Bytes
              * @description `settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota
@@ -1617,6 +1685,26 @@ export interface components {
             resolution?: string | null;
             /** Steps */
             steps?: number | null;
+        };
+        /**
+         * QuotaEviction
+         * @description An installed quantization the storage quota removes, or removed, to make room for an install.
+         */
+        QuotaEviction: {
+            /** Model Id */
+            model_id: string;
+            /**
+             * Name
+             * @description The registry model name; the model id when the registry no longer has the model
+             */
+            name: string;
+            /** Quant */
+            quant: string;
+            /**
+             * Size Bytes
+             * @description Installed disk space of the quantization, its shared files included, as `GET /models` showed it
+             */
+            size_bytes: number;
         };
         /** RecipeList */
         RecipeList: {
@@ -3413,6 +3501,8 @@ export interface operations {
             query?: {
                 /** @description Quantization to install (required) */
                 quant?: string | null;
+                /** @description An installed quantization you agree to remove before the download, written `<model_id>:<quant>`; repeat it for each one that an `eviction_needed` refusal listed */
+                evict?: string[];
             };
             header?: never;
             path: {
@@ -3447,7 +3537,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Problem"];
+                    "application/json": components["schemas"]["InstallRefusal"];
                     "application/problem+json": unknown;
                 };
             };

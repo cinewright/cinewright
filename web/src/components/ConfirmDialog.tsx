@@ -1,6 +1,7 @@
 // Confirmation for a permanent deletion (design/components/Button: danger actions that delete need one).
 // Mount it to ask; Cancel, Escape and the confirm button each end it through the callbacks. Every way out closes the
-// dialog first, so the browser returns focus to the control that opened it.
+// dialog first, so the browser returns focus to the control that opened it. The body describes the dialog, so a screen
+// reader reads what is deleted and what follows when the dialog opens, not only the title.
 
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   const ref = useRef<HTMLDialogElement>(null);
   const confirmed = useRef(false);
   const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     const dialog = ref.current;
@@ -32,14 +34,22 @@ export function ConfirmDialog({
   };
 
   return (
-    <dialog ref={ref} className="dialog" aria-labelledby={titleId} onClose={() => (confirmed.current ? onConfirm() : onCancel())}>
+    <dialog
+      ref={ref}
+      className="dialog"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      onClose={() => (confirmed.current ? onConfirm() : onCancel())}
+    >
       <div className="dialog__head">
         <h2 id={titleId} className="dialog__title">
           {title}
         </h2>
       </div>
       <div className="dialog__body stack">
-        {children}
+        <div id={descriptionId} className="stack">
+          {children}
+        </div>
         <div className="dialog__actions">
           <button type="button" className="cw-btn cw-btn--ghost" onClick={() => close(false)}>
             Cancel

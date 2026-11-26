@@ -443,17 +443,63 @@ class ModelDetail(ModelSummary):
     engines: list[EngineBinding]
 
 
+class QuotaEviction(Contract):
+    """An installed quantization the storage quota removes, or removed, to make room for an install."""
+
+    model_id: str
+    quant: str
+    name: str = Field(description="The registry model name; the model id when the registry no longer has the model")
+    size_bytes: int = Field(description="Installed disk space of the quantization, its shared files included, as `GET /models` showed it")
+
+
+class ModelStoreEviction(Contract):
+    """What the storage quota removed for one install."""
+
+    model_id: str = Field(description="Model of the install that needed the room")
+    quant: str = Field(description="Quantization of that install")
+    evicted: list[QuotaEviction] = Field(
+        description="Removed quantizations in removal order: those removed before the download, then those removed once the install "
+        "registered"
+    )
+    at: datetime = Field(description="When the last of them was removed")
+
+
 class ModelStoreUsage(Contract):
     """The model store (`<data dir>/models`) as the Models view shows it."""
 
     total_bytes: int = Field(description="Disk space of every file in the model store, each shared file once")
     quota_bytes: int | None = Field(description="`settings.model_store_quota_gb` in bytes (1 GB = 1024³ bytes); null = no quota")
     free_bytes: int = Field(description="Free space of the drive that holds the model store, measured for this answer")
+    last_eviction: ModelStoreEviction | None = Field(
+        default=None,
+        description="What the quota removed for the most recent install that removed any, also when that install failed afterwards; "
+        "kept since the core started, null while there was none",
+    )
 
 
 class ModelList(Contract):
     items: list[ModelSummary] = Field(description="Registry models, without those whose licence excludes `settings.country`")
     store: ModelStoreUsage | None = Field(default=None, description="Size, quota and free disk space of the model store")
+
+
+class InstallRefusal(Problem):
+    """An install refused before any byte was downloaded or removed (409); `detail` gives cause and consequence."""
+
+    code: str | None = Field(
+        default=None,
+        description="Stable reason, for example `eviction_needed`, `quota_exceeded`, `not_enough_space`, `installing`, `switching` "
+        "or `licence`",
+    )
+    evictions: list[QuotaEviction] | None = Field(
+        default=None,
+        description="Only with `eviction_needed`: the installed quantizations the quota removes first, in removal order; send each "
+        "as `evict` to confirm",
+    )
+    frees_bytes: int | None = Field(
+        default=None,
+        description="Only with `eviction_needed`: disk space removing all of them frees, less than the sum of their sizes when they "
+        "share files with quantizations that stay",
+    )
 
 
 class CapabilityEntry(Contract):

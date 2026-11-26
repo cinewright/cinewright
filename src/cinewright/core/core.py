@@ -26,7 +26,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -79,12 +79,14 @@ from cinewright.api.schemas import (
     ModelInstall,
     ModelList,
     ModelQuantState,
+    ModelStoreEviction,
     ModelStoreUsage,
     ModelSummary,
     OutputUploaded,
     PresetList,
     Progress,
     ProvenanceAsset,
+    QuotaEviction,
     RecipeList,
     Route,
     Settings,
@@ -121,6 +123,8 @@ from cinewright.core.events import EventLog, Published
 from cinewright.core.licenses import WANGP_NAME, WANGP_NOTICE, license_notices
 from cinewright.core.modelstore import (
     GB,
+    Eviction,
+    EvictionNeeded,
     Install,
     InstallProgress,
     ModelStore,
@@ -177,12 +181,22 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _quota_eviction(eviction: Eviction) -> QuotaEviction:
+    return QuotaEviction(model_id=eviction.model_id, quant=eviction.quant, name=eviction.name, size_bytes=eviction.size_bytes)
+
+
 def _store_refusal(exc: ModelStoreError) -> CoreError:
-    """A model store refusal as the API answers it; the problem carries the store's `code`."""
+    """A model store refusal as the API answers it; the problem carries the store's `code`.
+
+    `eviction_needed` also carries `evictions` (the planned removals, in removal order) and `frees_bytes`.
+    """
     if exc.code in _STORE_NOT_FOUND:
         return NotFound(exc.message, code=exc.code)
     if exc.code in _STORE_INVALID:
         return Invalid(exc.message, code=exc.code)
+    if isinstance(exc, EvictionNeeded):
+        evictions = [_quota_eviction(eviction).model_dump(mode="json") for eviction in exc.evictions]
+        return Conflict(exc.message, code=exc.code, evictions=evictions, frees_bytes=exc.frees_bytes)
     return Conflict(exc.message, code=exc.code)
 
 
@@ -275,6 +289,7 @@ class Core:
         self._restart_lock = threading.Lock()  # sets, checks and clears `_restart_pending` with the job check
         self._config_restarted = False  # restarted once since this start because WanGP's config was merged
         self._switch: TextEncoderSwitch | None = None  # the local host's text encoder switch: running, or failed
+        self._last_eviction: ModelStoreEviction | None = None  # what the quota removed for the latest install that removed any
 
     def stop_leasing(self) -> None:
         """Grant no more leases, the first step of a shutdown; waiting long-polls return without a job."""
@@ -623,7 +638,12 @@ class Core:
         offered = [model for model in self.registry.all() if not router.geo_excluded(model.license.geo_exclusions, country)]
         return ModelList(
             items=[self._summary(model, usage) for model in offered],
-            store=ModelStoreUsage(total_bytes=usage.total_bytes, quota_bytes=usage.quota_bytes, free_bytes=usage.free_bytes),
+            store=ModelStoreUsage(
+                total_bytes=usage.total_bytes,
+                quota_bytes=usage.quota_bytes,
+                free_bytes=usage.free_bytes,
+                last_eviction=self._last_eviction,
+            ),
         )
 
     def get_model(self, model_id: str) -> ModelDetail:
@@ -637,8 +657,13 @@ class Core:
             engines=model.engines,
         )
 
-    def install_model(self, model_id: str, quant: str | None) -> None:
-        """Check and prepare the install (refusals raise here), then download and register it in the background."""
+    def install_model(self, model_id: str, quant: str | None, evict: Collection[tuple[str, str]] = ()) -> None:
+        """Check and prepare the install (refusals raise here), then download and register it in the background.
+
+        `evict` names the installed quantizations (model id, quantization) the client agrees to remove before the
+        download. Only an install that fits on the store's drive only after the quota's removals reads it; when it
+        does not name each of them, the install is refused with `eviction_needed`, which lists them.
+        """
         model = self._require_model(model_id)
         choices = ", ".join(q.id for q in model.quantizations)
         if quant is None:
@@ -651,9 +676,11 @@ class Core:
                 f"The licence of {model.name} ({model.license.name}) excludes {country}, so it was not installed.", code="licence"
             )
         try:
-            install = self.models.prepare_install(model_id, quant)
+            install = self.models.prepare_install(model_id, quant, evict=evict)
         except ModelStoreError as exc:
             raise _store_refusal(exc) from None
+        if install.evictions:  # confirmed removals before the download; they stay removed if it fails
+            self._record_eviction(install, ())
         for victim in install.evicted:
             self._publish_model(*victim, InstallState.ABSENT)
         if install.evicted:
@@ -706,6 +733,15 @@ class Core:
             self._background.add(thread)
         thread.start()
 
+    def _record_eviction(self, install: Install, removed: Sequence[Eviction]) -> None:
+        """Keep what the quota removed for `install` for `GET /models` (`store.last_eviction`), replacing an earlier record.
+
+        Holds the removals before its download and `removed`, those of its quota step. Set before the `absent` and
+        `installed` events go out, so the reload they trigger sees it.
+        """
+        evicted = [_quota_eviction(eviction) for eviction in (*install.evictions, *removed)]
+        self._last_eviction = ModelStoreEviction(model_id=install.model_id, quant=install.quant, evicted=evicted, at=self.clock())
+
     def _publish_model(
         self,
         model_id: str,
@@ -748,16 +784,21 @@ class Core:
                 log.warning("%s", exc.message)
                 error = SetupError(code=exc.code, message=exc.message, action="retry" if exc.code in _STORE_RETRY else None)
                 self._publish_model(*install.key, InstallState.FAILED, error=error)
-                return
+                return  # a failed or cancelled download removes nothing for the quota
             log.error("%s", exc.message)  # registered, but WanGP does not see the store until its config is fixed
             merged = "unchanged"
-        except OSError as exc:  # only the config merge raises it, after the files were registered
+        except Exception as exc:  # noqa: BLE001 - only the config merge raises anything else, after the files were registered
             log.error("Installed %s, but writing WanGP's configuration failed (%s), so WanGP does not see it yet.", install.label, exc)
             merged = "unchanged"
         else:
             log.info("Installed %s.", install.label)
+        removed = self.models.evict_for_quota(install)  # registered: now the quota may remove the least recently used
+        if removed:
+            self._record_eviction(install, removed)
         self._publish_model(*install.key, InstallState.INSTALLED)
-        if install.missing or merged == "updated":
+        for victim in removed:
+            self._publish_model(*victim.key, InstallState.ABSENT)
+        if install.missing or merged == "updated" or removed:
             self._restart_for_models()
 
     def _run_switch(self, switch: VariantSwitch) -> None:

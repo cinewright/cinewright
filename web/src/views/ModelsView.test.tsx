@@ -1,9 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { Host, ModelInstall, ModelStoreUsage, ModelSummary, Schemas } from '../api/client';
+import type { Host, ModelInstall, ModelStoreUsage, ModelSummary, QuotaEviction, Schemas } from '../api/client';
 import { EventsProvider } from '../api/events';
-import { ProblemAnswer, callSummary, stubApi } from '../test/api';
+import { type ApiCall, ProblemAnswer, callSummary, stubApi } from '../test/api';
 import { stubEventSource } from '../test/events';
 import { ModelsView } from './ModelsView';
 
@@ -91,6 +91,27 @@ function installedRows(): string[][] {
 function card(name: string): HTMLElement {
   return screen.getByRole('article', { name });
 }
+
+/** The installed int8 quantization of a Wan 2.2 model, as the quota lists it. */
+function evicted(model: ModelSummary): QuotaEviction {
+  return { model_id: model.id, quant: 'int8', name: model.name, size_bytes: model.installed_bytes };
+}
+
+/** A 409 `eviction_needed` refusal listing `evictions`, as the core answers an install the drive holds only after them. */
+function evictionNeeded(evictions: QuotaEviction[], freesBytes: number): ProblemAnswer {
+  const named = evictions.map((item) => `${item.name} ${item.quant}`).join(' and ');
+  const detail = `Z-Image Turbo 6B int8 fits on the drive of the model store only after removing ${named}, so nothing was installed or removed.`;
+  return new ProblemAnswer(409, 'Conflict', detail, { code: 'eviction_needed', evictions, frees_bytes: freesBytes });
+}
+
+const installPosts = (calls: ApiCall[]) =>
+  calls.filter((call) => call.method === 'POST' && call.path === '/api/v1/models/z-image-turbo/install').map((call) => call.query);
+
+const removedT2V = (): ModelSummary => ({
+  ...T2V,
+  installed_bytes: 0,
+  quantizations: T2V.quantizations.map((quant) => ({ ...quant, install_state: 'absent' as const })),
+});
 
 beforeAll(() => {
   // jsdom has no modal dialogs.
@@ -234,6 +255,172 @@ describe('ModelsView', () => {
     expect(alert.textContent).toContain('Could not install Z-Image Turbo 6B int8');
     expect(alert.textContent).toContain(shortfall);
     expect(screen.getByRole('button', { name: 'Install Z-Image Turbo 6B int8' })).toBeTruthy();
+  });
+
+  it('asks before an install removes the models the drive needs the room of, and confirms exactly those', async () => {
+    const server: Server = { models: [I2V, T2V, zImage('absent')], store: STORE, variant: 'int8' };
+    let calls: ApiCall[] = [];
+    // The shared text encoder and VAE stay until both go, so removing both frees less than the sum of their sizes.
+    const refusal = evictionNeeded([evicted(I2V), evicted(T2V)], 40 * GiB);
+    ({ calls } = renderView(server, {
+      'POST /api/v1/models/z-image-turbo/install': () => {
+        if (!calls[calls.length - 1]?.query.evict) return refusal;
+        server.models = [zImage('downloading')];
+        return null;
+      },
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Remove models to install Z-Image Turbo 6B int8?' });
+    const listed = within(within(dialog).getByRole('list', { name: 'Models to remove' })).getAllByRole('listitem');
+    expect(listed.map((item) => item.textContent)).toStrictEqual([
+      'Wan 2.2 Image-to-Video 14B int8 · 30.5 GB',
+      'Wan 2.2 Text-to-Video 14B int8 · 28.0 GB',
+    ]);
+    expect(dialog.textContent).toContain('used least recently');
+    expect(dialog.textContent).toContain(
+      'This frees 40.0 GB. They are removed before the download starts and stay removed if the download fails or is cancelled; ' +
+        'using them again means downloading them again.',
+    );
+    // A screen reader reads the list and the consequence as the dialog opens, not only the title and the focused Cancel.
+    expect(screen.getByRole('dialog', { description: /Wan 2\.2 Text-to-Video 14B int8 · 28\.0 GB.*stay removed if the download fails/ })).toBe(
+      dialog,
+    );
+    expect(screen.queryByRole('alert')).toBeNull(); // a question, not an error
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(installPosts(calls)).toStrictEqual([{ quant: 'int8' }]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+    dialog = await screen.findByRole('dialog', { name: 'Remove models to install Z-Image Turbo 6B int8?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove and install' }));
+
+    await screen.findByRole('progressbar', { name: 'Downloading Z-Image Turbo 6B int8' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(installPosts(calls)).toStrictEqual([
+      { quant: 'int8' },
+      { quant: 'int8' },
+      { quant: 'int8', evict: ['wan-2.2-i2v-14b:int8', 'wan-2.2-t2v-14b:int8'] },
+    ]);
+  });
+
+  it('asks again with the new list when the core plans other removals by the time the user confirms', async () => {
+    const server: Server = { models: [I2V, T2V, zImage('absent')], store: STORE, variant: 'int8' };
+    let calls: ApiCall[] = [];
+    ({ calls } = renderView(server, {
+      'POST /api/v1/models/z-image-turbo/install': () => {
+        const evict = calls[calls.length - 1]?.query.evict;
+        if (!evict) return evictionNeeded([evicted(T2V)], 28 * GiB);
+        // A job queued meanwhile needs Wan 2.2 Text-to-Video, so the plan now names the next least recently used model.
+        if (evict === 'wan-2.2-t2v-14b:int8') return evictionNeeded([evicted(I2V)], 30.5 * GiB);
+        server.models = [T2V, zImage('downloading')];
+        return null;
+      },
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Remove a model to install Z-Image Turbo 6B int8?' });
+    expect(dialog.textContent).toContain('Wan 2.2 Text-to-Video 14B int8 · 28.0 GB');
+    expect(dialog.textContent).toContain('It is removed before the download starts and stays removed if the download fails or is cancelled');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove and install' }));
+
+    await waitFor(() => expect(installPosts(calls)).toHaveLength(2));
+    dialog = await screen.findByRole('dialog', { name: 'Remove a model to install Z-Image Turbo 6B int8?' });
+    expect(dialog.textContent).toContain('Wan 2.2 Image-to-Video 14B int8 · 30.5 GB');
+    expect(dialog.textContent).not.toContain('Text-to-Video');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove and install' }));
+
+    await screen.findByRole('progressbar', { name: 'Downloading Z-Image Turbo 6B int8' });
+    expect(installPosts(calls)).toStrictEqual([
+      { quant: 'int8' },
+      { quant: 'int8', evict: 'wan-2.2-t2v-14b:int8' },
+      { quant: 'int8', evict: 'wan-2.2-i2v-14b:int8' },
+    ]);
+  });
+
+  it('asks about a second install refused meanwhile only once the first question is answered', async () => {
+    const server: Server = { models: [I2V, T2V, zImage('absent')], store: STORE, variant: 'int8' };
+    const answers: Record<string, (answer: unknown) => void> = {};
+    const held = (name: string) => () => new Promise((resolve) => (answers[name] = resolve));
+    const { calls } = renderView(server, {
+      'POST /api/v1/models/z-image-turbo/install': held('z-image'),
+      'POST /api/v1/models/wan-2.2-t2v-14b/install': held('t2v'),
+    });
+
+    // Both installs are sent before either answer arrives.
+    fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Install Wan 2.2 Text-to-Video 14B bf16' }));
+    await waitFor(() => expect(Object.keys(answers)).toHaveLength(2));
+    answers['z-image']?.(evictionNeeded([evicted(T2V)], 28 * GiB));
+    const first = await screen.findByRole('dialog', { name: 'Remove a model to install Z-Image Turbo 6B int8?' });
+    answers['t2v']?.(evictionNeeded([evicted(I2V)], 30.5 * GiB));
+    await waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2));
+    await act(async () => {}); // the second refusal is handled
+
+    expect(screen.getByRole('dialog')).toBe(first); // still the question the user is answering, with its own list
+    expect(first.textContent).toContain('Wan 2.2 Text-to-Video 14B int8 · 28.0 GB');
+    fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
+
+    const second = await screen.findByRole('dialog', { name: 'Remove a model to install Wan 2.2 Text-to-Video 14B bf16?' });
+    expect(second.textContent).toContain('Wan 2.2 Image-to-Video 14B int8 · 30.5 GB');
+    fireEvent.click(within(second).getByRole('button', { name: 'Remove and install' }));
+
+    await waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(3));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(calls.filter((call) => call.method === 'POST').map(callSummary)).toStrictEqual([
+      { method: 'POST', path: '/api/v1/models/z-image-turbo/install', query: { quant: 'int8' }, body: undefined },
+      { method: 'POST', path: '/api/v1/models/wan-2.2-t2v-14b/install', query: { quant: 'bf16' }, body: undefined },
+      { method: 'POST', path: '/api/v1/models/wan-2.2-t2v-14b/install', query: { quant: 'bf16', evict: 'wan-2.2-i2v-14b:int8' }, body: undefined },
+    ]);
+  });
+
+  it('shows an eviction refusal without a list of models in the error banner', async () => {
+    const detail = 'Z-Image Turbo 6B int8 fits on the drive of the model store only after removing models, so nothing was installed.';
+    renderView({ models: [zImage('absent')], store: STORE, variant: 'int8' }, {
+      'POST /api/v1/models/z-image-turbo/install': () => new ProblemAnswer(409, 'Conflict', detail, { code: 'eviction_needed' }),
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install Z-Image Turbo 6B int8' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain(detail);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('says which models the quota removed last, also once the events that removed them have passed', async () => {
+    const server: Server = { models: [I2V, T2V, zImage('downloading')], store: STORE, variant: 'int8' };
+    const { source } = renderView(server);
+    const panel = await screen.findByRole('region', { name: 'Model store' });
+    expect(within(panel).queryByText(/Removed to make room/)).toBeNull();
+
+    // The install ends; the quota removes the least recently used model, and the core keeps that for GET /models.
+    server.models = [I2V, removedT2V(), zImage('installed')];
+    const last_eviction = { model_id: 'z-image-turbo', quant: 'int8', evicted: [evicted(T2V)], at: '2026-11-25T12:00:00Z' };
+    server.store = { ...STORE, last_eviction };
+    act(() => source().emit('model', modelEvent({ model_id: 'z-image-turbo', quant: 'int8', install_state: 'installed' })));
+    act(() => source().emit('model', modelEvent({ model_id: 'wan-2.2-t2v-14b', quant: 'int8', install_state: 'absent' })));
+
+    const line = await within(panel).findByText(/Removed to make room/);
+    const reason = 'Removed to make room for Z-Image Turbo 6B int8 within the quota: Wan 2.2 Text-to-Video 14B int8 · 28.0 GB.';
+    expect(line.textContent).toBe(reason);
+    // The removal's event follows the install's at once; one announcement keeps both, then the reason from the reload.
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        `Z-Image Turbo 6B int8 is installed. Wan 2.2 Text-to-Video 14B int8 was removed. ${reason}`,
+      ),
+    );
+  });
+
+  it('names the install by its id when the model list no longer has it', async () => {
+    const last_eviction = { model_id: 'ltx-2.3-22b-distilled', quant: 'Q4_K_M', evicted: [evicted(I2V), evicted(T2V)], at: '2026-11-25T12:00:00Z' };
+    renderView({ models: [zImage('absent')], store: { ...STORE, last_eviction }, variant: 'int8' });
+
+    const panel = await screen.findByRole('region', { name: 'Model store' });
+    expect((await within(panel).findByText(/Removed to make room/)).textContent).toBe(
+      'Removed to make room for ltx-2.3-22b-distilled Q4_K_M within the quota: Wan 2.2 Image-to-Video 14B int8 · 30.5 GB, ' +
+        'Wan 2.2 Text-to-Video 14B int8 · 28.0 GB.',
+    );
+    expect(screen.getByRole('status').textContent).toBe(''); // an earlier removal is shown, not announced as news
   });
 
   it('shows why an install failed and offers to try again or remove its downloads', async () => {

@@ -1,11 +1,21 @@
-// Models: the model store (installed size per model, total, quota, free disk), the text encoder variant of the local
-// host, and one card per model and quantization with install, live download progress and remove.
+// Models: the model store (installed size per model, total, quota, free disk, what the quota removed last), the text
+// encoder variant of the local host, and one card per model and quantization with install, live download progress and
+// remove. An install the drive holds only after the quota removes models asks first, naming them.
 // Install states load from /models and follow `model` events, which are never replayed: the list loads again when an
 // install ends or a model is removed, and whenever the event stream (re)opens.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { api, type Host, type ModelInstall, type ModelStoreUsage, type ModelSummary, type Schemas } from '../api/client';
+import {
+  api,
+  evictionNeeded,
+  type Host,
+  type ModelInstall,
+  type ModelStoreUsage,
+  type ModelSummary,
+  type QuotaEviction,
+  type Schemas,
+} from '../api/client';
 import { useEventsConnected, useSystemEvents } from '../api/events';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ErrorBanner, RetryButton } from '../components/Feedback';
@@ -27,8 +37,20 @@ const SWITCH_POLL_MS = 5000;
 /** A download fills the store's drive, so free disk loads again at this rate while a card downloads. */
 const STORE_POLL_MS = 30000;
 const ENDED: ReadonlySet<Schemas['InstallState']> = new Set(['installed', 'failed', 'absent']);
+/** Announcements this close together join: an install's end, the removals for its quota and their reason arrive at once. */
+const JOIN_MS = 3000;
 
 const keyOf = (modelId: string, quant: string) => `${modelId}/${quant}`;
+/** "Z-Image Turbo 6B int8 · 10.7 GB" */
+const evictedLabel = (eviction: QuotaEviction) => `${eviction.name} ${eviction.quant} · ${formatBytes(eviction.size_bytes)}`;
+
+type LastEviction = NonNullable<ModelStoreUsage['last_eviction']>;
+
+/** What the quota removed last and for which install; true also when that install failed afterwards. */
+function evictionSentence(last: LastEviction, models: ModelSummary[]): string {
+  const madeRoomFor = `${models.find((model) => model.id === last.model_id)?.name ?? last.model_id} ${last.quant}`;
+  return `Removed to make room for ${madeRoomFor} within the quota: ${last.evicted.map(evictedLabel).join(', ')}.`;
+}
 
 interface LiveEntry {
   install: ModelInstall;
@@ -83,6 +105,7 @@ function useModelStates() {
 
 function StorePanel({ store, models }: { store: ModelStoreUsage | null | undefined; models: ModelSummary[] }) {
   const installed = models.filter((model) => model.installed_bytes > 0);
+  const lastEviction = store?.last_eviction ?? null;
   return (
     <section className="panel stack" aria-labelledby="store-title">
       <h2 id="store-title" className="panel__title">
@@ -96,6 +119,7 @@ function StorePanel({ store, models }: { store: ModelStoreUsage | null | undefin
         <dt>Free disk</dt>
         <dd>{store ? formatBytes(store.free_bytes) : DASH}</dd>
       </dl>
+      {lastEviction && lastEviction.evicted.length > 0 ? <p>{evictionSentence(lastEviction, models)}</p> : null}
       {installed.length === 0 ? (
         <p className="cw-muted">No model installed yet.</p>
       ) : (
@@ -129,9 +153,43 @@ function StorePanel({ store, models }: { store: ModelStoreUsage | null | undefin
       )}
       <p className="text-caption cw-muted">
         A text encoder or VAE that several models share is stored once: the total counts it once, each model&apos;s size counts it
-        again. The quota is set in Settings; to stay within it, an install first removes the models used least recently.
+        again. The quota is set in Settings; to stay within it, the models used least recently are removed once an install is done. If
+        the drive has room for the install only after removing them, the install asks before removing them.
       </p>
     </section>
+  );
+}
+
+/** An install the drive holds only after the quota removes `evictions`, waiting for the user to confirm them. */
+interface EvictionAsk {
+  model: ModelSummary;
+  quant: Quant;
+  evictions: QuotaEviction[];
+  freesBytes: number;
+}
+
+/** Names the models an install removes before its download; they stay removed if the download fails. */
+function EvictionDialog({ ask, onConfirm, onCancel }: { ask: EvictionAsk; onConfirm: () => void; onCancel: () => void }) {
+  const one = ask.evictions.length === 1;
+  return (
+    <ConfirmDialog
+      title={`Remove ${one ? 'a model' : 'models'} to install ${ask.model.name} ${ask.quant.quant}?`}
+      confirmLabel="Remove and install"
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    >
+      <p>The drive of the model store has room for it only after removing the {one ? 'model' : 'models'} used least recently:</p>
+      <ul className="notes" aria-label="Models to remove">
+        {ask.evictions.map((item) => (
+          <li key={keyOf(item.model_id, item.quant)}>{evictedLabel(item)}</li>
+        ))}
+      </ul>
+      <p>
+        This frees {formatBytes(ask.freesBytes)}. {one ? 'It is' : 'They are'} removed before the download starts and{' '}
+        {one ? 'stays' : 'stay'} removed if the download fails or is cancelled; using {one ? 'it' : 'them'} again means downloading{' '}
+        {one ? 'it' : 'them'} again.
+      </p>
+    </ConfirmDialog>
   );
 }
 
@@ -220,9 +278,20 @@ export function ModelsView() {
   const [pending, setPending] = useState<ReadonlyMap<string, Pending>>(new Map());
   const [actionError, setActionError] = useState<{ title: string; error: unknown } | null>(null);
   const [confirm, setConfirm] = useState<{ model: ModelSummary; quant: Quant } | null>(null);
+  /** Installs waiting for the user to confirm their removals, in the order refused; the dialog asks about the first. */
+  const [asks, setAsks] = useState<readonly EvictionAsk[]>([]);
+  const eviction = asks[0] ?? null;
   const [switchStarting, setSwitchStarting] = useState(false);
   /** Ended installs and switches, for screen readers: the cards and the panel change without focus moving. */
   const [announcement, setAnnouncement] = useState('');
+  const announcedAt = useRef(0);
+  /** `join` adds `text` to an announcement made just before instead of replacing it, so neither goes unread. */
+  const announce = useCallback((text: string, join = false) => {
+    const now = Date.now();
+    const joined = join && now - announcedAt.current < JOIN_MS;
+    announcedAt.current = now;
+    setAnnouncement((current) => (joined && current ? `${current} ${text}` : text));
+  }, []);
 
   const items = models.data?.items ?? [];
   const local = hosts.data?.items.find((host) => host.kind === 'local');
@@ -236,10 +305,23 @@ export function ModelsView() {
     const install = event.kind === 'model' ? event.model : null;
     if (!install || !ENDED.has(install.install_state)) return;
     const label = `${items.find((model) => model.id === install.model_id)?.name ?? install.model_id} ${install.quant}`;
-    if (install.install_state === 'installed') setAnnouncement(`${label} is installed.`);
-    else if (install.install_state === 'failed') setAnnouncement(`The install of ${label} failed. ${install.error?.message ?? ''}`.trim());
-    else setAnnouncement(`${label} was removed.`);
+    if (install.install_state === 'installed') announce(`${label} is installed.`);
+    else if (install.install_state === 'failed') announce(`The install of ${label} failed. ${install.error?.message ?? ''}`.trim());
+    else announce(`${label} was removed.`, true); // the quota's removals follow the end of the install that needed them
   });
+
+  // The reason for the quota's removals reaches the panel with the reload after their events; announce it once it
+  // changes, not when the view opens or the list loads again.
+  const lastEviction = models.data?.store?.last_eviction ?? null;
+  const seenEviction = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!models.data) return;
+    const at = lastEviction?.at ?? null;
+    const first = seenEviction.current === undefined;
+    if (at === seenEviction.current) return;
+    seenEviction.current = at;
+    if (!first && lastEviction && lastEviction.evicted.length > 0) announce(evictionSentence(lastEviction, items), true);
+  }, [models.data, lastEviction, items, announce]);
 
   // While a switch runs, GET /hosts shows it; it ends with the new variant, or with the reason it failed.
   const { reload: reloadHosts } = hosts;
@@ -254,12 +336,12 @@ export function ModelsView() {
   useEffect(() => {
     const was = lastSwitch.current;
     lastSwitch.current = switchingTo;
-    if (switchingTo && !was) setAnnouncement(`Switching the text encoder to ${switchingTo}.`);
+    if (switchingTo && !was) announce(`Switching the text encoder to ${switchingTo}.`);
     if (was && !switchingTo) {
       void refresh(); // installed sizes changed with the variant
-      setAnnouncement(failedMessage ? `The switch to ${was} failed. ${failedMessage}` : `The text encoder is switched to ${was}.`);
+      announce(failedMessage ? `The switch to ${was} failed. ${failedMessage}` : `The text encoder is switched to ${was}.`);
     }
-  }, [switchingTo, failedMessage, refresh]);
+  }, [switchingTo, failedMessage, refresh, announce]);
 
   // Free disk drops while a download fills the store's drive.
   useEffect(() => {
@@ -276,15 +358,22 @@ export function ModelsView() {
       return next;
     });
 
-  const install = (model: ModelSummary, quant: Quant) => {
+  /** `evict` confirms the removals an earlier `eviction_needed` refusal listed. */
+  const install = (model: ModelSummary, quant: Quant, evict: readonly QuotaEviction[] = []) => {
     const key = keyOf(model.id, quant.quant);
     startPending(key, 'install');
     setActionError(null);
     api
-      .installModel(model.id, quant.quant)
+      .installModel(model.id, quant.quant, evict)
       // The install is checked and marked `downloading` before the answer, so the list shows it at once.
       .then(() => refresh())
-      .catch((error: unknown) => setActionError({ title: `Could not install ${model.name} ${quant.quant}`, error }))
+      .catch((error: unknown) => {
+        // Nothing was removed or downloaded: ask before removing, with the list as it is now. A refusal that arrives
+        // while another question is open waits for its answer instead of replacing it.
+        const needed = evictionNeeded(error);
+        if (needed) setAsks((queue) => [...queue, { model, quant, ...needed }]);
+        else setActionError({ title: `Could not install ${model.name} ${quant.quant}`, error });
+      })
       .finally(() => endPending(key));
   };
 
@@ -366,6 +455,19 @@ export function ModelsView() {
           }),
         )}
       </div>
+
+      {eviction ? (
+        <EvictionDialog
+          // Another install's question mounts a dialog of its own, which opens and takes focus again.
+          key={keyOf(eviction.model.id, eviction.quant.quant)}
+          ask={eviction}
+          onConfirm={() => {
+            setAsks((queue) => queue.slice(1));
+            install(eviction.model, eviction.quant, eviction.evictions);
+          }}
+          onCancel={() => setAsks((queue) => queue.slice(1))}
+        />
+      ) : null}
 
       {confirm ? (
         <ConfirmDialog
