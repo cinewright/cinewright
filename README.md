@@ -5,7 +5,7 @@
 
 Cinewright is a platform for generating images, video and audio on your own computer with open-weight models. A local core decides which model, quantization and computer runs a job. Workers run the generation engines; the first engine is WanGP (Wan2GP). You use Cinewright in your browser, and AI agents can use it through its MCP server. Cinewright is free software under the MIT licence.
 
-> **Status: phase 1 in progress.** Models can be installed and jobs run on WanGP, but generation has not been checked on real hardware yet. The walking skeleton still runs jobs on a mock engine for tests and the tutorial below.
+> **Status: phase 1 in progress.** Models can be installed and jobs run on WanGP. Generation was checked on the reference PC (RTX 5080) with LTX-2 2.3 Distilled int8 and Z-Image Turbo bf16. The walking skeleton still runs jobs on a mock engine for tests and the tutorial below.
 
 ## What works now
 
@@ -24,7 +24,7 @@ Cinewright is a platform for generating images, video and audio on your own comp
 
 ## What does not work yet
 
-- **Real generation.** Models can be installed, and each job runs the installed quantization it is routed to. But apart from a first image-to-image test on LTX-2, which led to its removal (see [Images from video models](#images-from-video-models)), generation on WanGP has not been checked on real hardware yet. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
+- **Real generation.** Models can be installed, and each job runs the installed quantization it is routed to. On the reference PC (RTX 5080), image-to-video, text-to-video and text-to-image on LTX-2 2.3 Distilled int8 and text-to-image on Z-Image Turbo bf16 were checked with the GPU smoke tool and in the Generate view; an image-to-image test on LTX-2 led to its removal (see [Images from video models](#images-from-video-models)). Wan 2.2 has not been run on real hardware yet. Calibration arrives with phase 1. Until a model is installed, the worker on WanGP has no model files to serve, so the Generate view reports that no model can run the request.
 - **Image-to-image.** No model in the registry offers it for now, so the Generate view does not list `i2i` (see [Images from video models](#images-from-video-models)). A model made for editing images will add it.
 - **Later phases.** Recipes, cast and presets arrive in phase 2, remote hosts and approvals in phase 3. Their API routes return empty lists or `501 Not Implemented`.
 - **Stopping Cinewright.** There is no quit command yet. The core runs until you sign out, or until you end the `pythonw.exe` process in Task Manager. A worker the core started ends with it.
