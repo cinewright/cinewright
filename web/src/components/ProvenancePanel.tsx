@@ -1,12 +1,14 @@
 // An asset's provenance record with sidecar JSON export (design/components/ProvenancePanel).
 // The design's fields come first in the specification's order; the rows after Parents are additions of this app.
-// Missing values stay "–" so records remain comparable.
+// Missing values stay "–" so records remain comparable. A parent asset that was deleted keeps its hash, marked as deleted.
 
 import { Download } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 
 import { assetProvenanceUrl, type Provenance } from '../api/client';
 import { DASH, formatTimestamp, fullHash, shortHash, truncateMiddle } from '../lib/format';
+
+const NONE: ReadonlySet<string> = new Set();
 
 interface Row {
   label: string;
@@ -28,12 +30,13 @@ function parameters(params: Provenance['params']): string {
   return parts.filter(Boolean).join(' · ') || DASH;
 }
 
-function rows(p: Provenance): Row[] {
+function rows(p: Provenance, deletedParents: ReadonlySet<string>): Row[] {
   const model = p.model;
   const modelHashes = model?.file_sha256 ?? [];
   const parents = p.parents ?? [];
   const loras = p.loras ?? [];
   const first = modelHashes[0];
+  const parent = (hash: string, format: (hex: string) => string) => format(hash) + (deletedParents.has(hash) ? ' (deleted)' : '');
   return [
     {
       label: 'Model',
@@ -52,8 +55,8 @@ function rows(p: Provenance): Row[] {
     { label: 'Timestamp', value: formatTimestamp(p.created_at) },
     {
       label: 'Parents',
-      value: parents.map(shortHash).join(' · ') || DASH,
-      title: parents.map(fullHash).join('\n') || undefined,
+      value: parents.map((hash) => parent(hash, shortHash)).join(' · ') || DASH,
+      title: parents.map((hash) => parent(hash, fullHash)).join('\n') || undefined,
       hash: parents.length > 0,
     },
     { label: 'Parameters', value: parameters(p.params) },
@@ -63,7 +66,16 @@ function rows(p: Provenance): Row[] {
   ];
 }
 
-export function ProvenancePanel({ provenance, children }: { provenance: Provenance; children?: ReactNode }) {
+export function ProvenancePanel({
+  provenance,
+  deletedParents = NONE,
+  children,
+}: {
+  provenance: Provenance;
+  /** Parent assets known to be deleted; their hashes stay in the Parents row, marked as deleted. */
+  deletedParents?: ReadonlySet<string>;
+  children?: ReactNode;
+}) {
   return (
     <section className="cw-prov" aria-label="Provenance">
       <div className="cw-prov__head">
@@ -75,7 +87,7 @@ export function ProvenancePanel({ provenance, children }: { provenance: Provenan
       </div>
       {children}
       <dl className="cw-prov__body">
-        {rows(provenance).map((row) => (
+        {rows(provenance, deletedParents).map((row) => (
           <Fragment key={row.label}>
             <dt>{row.label}</dt>
             <dd className={row.hash ? 'is-hash' : undefined} title={row.title ?? row.value}>

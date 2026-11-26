@@ -157,6 +157,13 @@ BACKGROUND_JOIN_S = 30.0  # how long closing waits for installs and switches to 
 _STORE_NOT_FOUND = frozenset({"unknown_model", "not_installed"})
 _STORE_INVALID = frozenset({"unknown_quant", "unknown_variant"})
 _STORE_RETRY = frozenset({"download_failed", "io_error", "install_failed"})  # installing again may help
+# Jobs that have not ended, as the model store counts the jobs that need a model: their inputs cannot be deleted.
+_UNFINISHED_STATES = (JobState.AWAITING_APPROVAL.value, JobState.QUEUED.value, *ACTIVE_STATES)
+_STATE_WORDS = {"awaiting_approval": "waiting for approval", "queued": "queued", "leased": "starting", "running": "running"}
+# Windows refuses to delete a file that is open, for example one a response still streams to a player. The Library stops
+# its own playback when it deletes, so a deletion tries again for about a second before it gives up.
+ASSET_DELETE_ATTEMPTS = 10
+ASSET_DELETE_RETRY_S = 0.1
 
 Detector = Callable[[Path, str], HardwareProfile]
 
@@ -175,6 +182,10 @@ def _decode_cursor(cursor: str) -> tuple[str, str]:
     except ValueError as exc:
         raise Invalid("The cursor is not one this API issued.") from exc
     return created_at, key
+
+
+class _FileInUse(Exception):
+    """The OS refused to delete an asset's file; raised inside the deletion's transaction to roll its records back."""
 
 
 def _token_hash(token: str) -> str:
@@ -947,6 +958,9 @@ class Core:
         job_id = uuid4().hex
         state = JobState.AWAITING_APPROVAL if plan.requires_approval else JobState.QUEUED
         with self._tx() as tx:
+            for sha256 in dict.fromkeys(request.inputs):  # an input deleted since the plan checked it (`delete_asset`)
+                if tx.conn.execute("SELECT 1 FROM assets WHERE sha256 = ?", (sha256,)).fetchone() is None:
+                    raise Invalid(f"Input asset {sha256} does not exist; upload it first.")
             agent_id = self._agent_id(tx, agent) if agent else None
             tx.conn.execute(
                 "INSERT INTO jobs (id, state, priority, capability, data_class, request, route, seed, client, agent_id, eta_seconds, "
@@ -1069,9 +1083,10 @@ class Core:
         return self.blobs.writer()
 
     def add_asset(self, upload: StagedBlob, media_type: str, data_class: DataClass) -> Asset:
-        sha256 = self.blobs.place(upload)
         now = self.clock()
         with self.db.transaction() as conn:
+            # Placed under the database's lock, so a deletion of the same bytes cannot remove the file before it is recorded.
+            sha256 = self.blobs.place(upload)
             row = record_asset(conn, input_provenance(sha256, media_type, upload.size_bytes, now), data_class, None, now)
         return asset_from_row(row)
 
@@ -1098,6 +1113,54 @@ class Core:
         if not self.blobs.exists(sha256):
             raise NotFound(f"The file of asset {sha256} is missing from the asset store.")
         return self.blobs.path(sha256)
+
+    def delete_asset(self, sha256: str) -> None:
+        """Delete an asset's record, its file and the job output records of it; see `CoreService.delete_asset`.
+
+        A file the OS refuses to delete rolls the records back, so record and file go together. The deletion then tries
+        again, outside the transaction, for about a second before it gives up with a conflict.
+        """
+        for attempt in range(1, ASSET_DELETE_ATTEMPTS + 1):
+            try:
+                self._delete_asset(sha256)
+                return
+            except _FileInUse as exc:
+                if attempt == ASSET_DELETE_ATTEMPTS:
+                    log.warning("Did not delete asset %s: its file stayed open (%s)", sha256, exc.__cause__)
+                    raise Conflict(
+                        "The file of this asset is still open, for example in a player in another tab, so it was not deleted. "
+                        "Close it and try again."
+                    ) from exc
+            time.sleep(ASSET_DELETE_RETRY_S)
+
+    def _delete_asset(self, sha256: str) -> None:
+        with self.db.transaction() as conn:
+            if conn.execute("SELECT 1 FROM assets WHERE sha256 = ?", (sha256,)).fetchone() is None:
+                raise NotFound(f"Asset {sha256} does not exist.")
+            job = conn.execute(
+                "SELECT id, state FROM jobs WHERE state IN (?, ?, ?, ?) "
+                "AND EXISTS (SELECT 1 FROM json_each(jobs.request, '$.inputs') WHERE json_each.value = ?) "
+                "ORDER BY created_at LIMIT 1",
+                (*_UNFINISHED_STATES, sha256),
+            ).fetchone()
+            if job is not None:
+                raise Conflict(
+                    f"This asset is an input of job {job['id']}, which is still {_STATE_WORDS[job['state']]}, so it was not deleted. "
+                    "Delete it once that job has ended."
+                )
+            # Jobs keep their state and events. An upload of a job that still runs stays: that job records it at completion.
+            conn.execute(
+                "DELETE FROM job_outputs WHERE sha256 = ? AND job_id NOT IN (SELECT id FROM jobs WHERE state IN (?, ?))",
+                (sha256, *ACTIVE_STATES),
+            )
+            # Assets made from it keep their provenance; only the link rows naming it as a parent go (its own ones cascade).
+            conn.execute("DELETE FROM asset_parents WHERE parent_sha256 = ?", (sha256,))
+            conn.execute("DELETE FROM assets WHERE sha256 = ?", (sha256,))
+            if conn.execute("SELECT 1 FROM job_outputs WHERE sha256 = ?", (sha256,)).fetchone() is None:
+                try:
+                    self.blobs.remove(sha256)  # last, under the database's lock: no upload of these bytes interleaves
+                except PermissionError as exc:
+                    raise _FileInUse from exc
 
     # ------------------------------------------------------------------ hosts, approvals, libraries
 
@@ -1372,9 +1435,9 @@ class Core:
 
     def store_output(self, worker_id: str, job_id: str, name: str, media_type: str, upload: StagedBlob) -> OutputUploaded:
         self.check_output(worker_id, job_id)  # the job may have ended while the upload ran; then the blob is not placed
-        sha256 = self.blobs.place(upload)
         with self._tx() as tx:
             row = self._active_job(tx.conn, worker_id, job_id)
+            sha256 = self.blobs.place(upload)  # under the database's lock, like `add_asset`: a deletion cannot interleave
             self._mark_running(tx, row)
             tx.conn.execute(
                 "INSERT INTO job_outputs (job_id, name, sha256, media_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?) "

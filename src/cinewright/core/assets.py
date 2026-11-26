@@ -2,7 +2,8 @@
 
 Identical bytes are one asset. When a second upload or job produces them again, the first
 provenance record stays and the data class becomes the stricter of the two. Each job's own output
-provenance is kept in `job_outputs` (see `Core.complete_job`).
+provenance is kept in `job_outputs` (see `Core.complete_job`). Deleting an asset removes its record and
+blob together (`Core.delete_asset`).
 """
 
 from __future__ import annotations
@@ -119,6 +120,11 @@ class BlobStore:
         finally:
             source.unlink(missing_ok=True)
         return staged.sha256
+
+    def remove(self, sha256: str) -> None:
+        """Delete the blob of `sha256`; a missing one is fine. Raises OSError when the OS refuses, as Windows does
+        for a file another handle holds open (a response still streaming it)."""
+        self.path(sha256).unlink(missing_ok=True)
 
 
 def asset_from_row(row: sqlite3.Row) -> Asset:

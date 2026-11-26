@@ -632,6 +632,12 @@ a.cw-btn {
   top: var(--space-4);
 }
 
+.library__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 @media (max-width: 1080px) {
   .library {
     grid-template-columns: minmax(0, 1fr);

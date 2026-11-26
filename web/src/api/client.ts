@@ -236,6 +236,8 @@ export const api = {
     request<Schemas['AssetList']>('GET', '/api/v1/assets', { query: { cursor, limit: PAGE }, signal }),
   /** One asset; `sha256` must already be checked as 64 lowercase hex characters. */
   asset: (sha256: string, signal?: AbortSignal) => request<Asset>('GET', '/api/v1/assets/{sha256}', { params: { sha256 }, signal }),
+  /** Deletes an asset with its file, for good (204); 409 while a job that has not ended uses it, or its file is still open. */
+  deleteAsset: (sha256: string) => request<void>('DELETE', '/api/v1/assets/{sha256}', { params: { sha256 } }),
   /** Uploads an input image as the raw body with its media type; a type outside UPLOAD_IMAGE_TYPES is refused before sending. */
   uploadImage: async (file: File, dataClass: DataClass): Promise<Asset> => {
     const problem = imageTypeProblem(file);

@@ -1,8 +1,8 @@
-"""Asset store: input uploads, listing, content and provenance sidecars."""
+"""Asset store: input uploads, listing, deletion, content and provenance sidecars."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Path, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -41,6 +41,18 @@ def list_assets(core: Core, cursor: str | None = Query(default=None), limit: int
 @router.get("/assets/{sha256}", response_model=Asset, operation_id="getAsset")
 def get_asset(core: Core, sha256: str = ShaPath) -> Asset:
     return core.get_asset(sha256)
+
+
+@router.delete("/assets/{sha256}", status_code=204, operation_id="deleteAsset", responses={409: PROBLEM_RESPONSE})
+def delete_asset(core: Core, sha256: str = ShaPath) -> Response:
+    """Delete an asset for good: its record, its file and the job output records of it. There is no recycle bin.
+
+    Jobs that made or used it keep their state and events but no longer list it as an output; assets made from it keep
+    their provenance, whose `parents` still name it. Refused with 409 while a job that has not ended (awaiting approval,
+    queued or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
+    """
+    core.delete_asset(sha256)
+    return Response(status_code=204)
 
 
 @router.get(
