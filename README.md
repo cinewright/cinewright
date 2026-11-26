@@ -73,11 +73,13 @@ This tutorial takes about ten minutes. You run a job through Cinewright on the m
 
 1. Download `CinewrightSetup-<version>.exe` from the [GitHub releases](https://github.com/cinewright/cinewright/releases). No release exists yet.
 2. Run it. Setup installs Cinewright for your user account, into `%LOCALAPPDATA%\Programs\Cinewright`, and needs no administrator rights. It downloads Python 3.12 and Cinewright's Python packages during installation, so it needs an internet connection.
-3. Start Cinewright from the Start menu. The web UI opens in your browser. If Cinewright already runs, starting it again only opens the browser.
+3. Start Cinewright from the Start menu. The web UI opens in your browser. If Cinewright already runs, starting it again only opens the browser. If another version from the same installation folder still runs, starting this one closes it first.
 4. On the first start, Cinewright sets up its engine WanGP in the background. It downloads several gigabytes, so this takes a while; open **Setup** to watch the progress. Once the Engine panel shows **Ready**, Cinewright starts its worker on WanGP, and the **Hosts** view shows the local worker as ready. Later starts skip the setup.
 5. Install a model in the **Models** view (see [Install or remove a model](#install-or-remove-a-model)).
 
 For a silent installation, run `CinewrightSetup-<version>.exe /S /D=<folder>`. `/D=` must come last and must not be quoted.
+
+To update, run the setup of the new version. You can do this while Cinewright runs: setup closes the running Cinewright first, also in a silent installation. Running jobs and model installs stop then. A model install that was cut off shows as failed in the **Models** view, and **Try again** continues it. If Cinewright still runs after setup tried to close it, setup stops before changing anything and asks you to restart the computer, then run setup again. If setup cannot check whether Cinewright runs, it continues, and the first start of the new version closes the old one.
 
 ### Retry the WanGP setup
 
@@ -92,7 +94,7 @@ Quitting Cinewright during the setup is safe too: the next start continues it. W
 
 ### Uninstall Cinewright
 
-Open Settings > Apps > Installed apps, select Cinewright and choose Uninstall. The uninstaller removes the program, the shortcuts and the Add/Remove Programs entry. It then asks whether to delete your data in `%LOCALAPPDATA%\Cinewright`. The default is No, and a silent uninstall (`uninstall.exe /S`) always keeps the data. If Cinewright is running, the uninstaller stops with a message; end the `pythonw.exe` process first.
+Open Settings > Apps > Installed apps, select Cinewright and choose Uninstall. The uninstaller removes the program, the shortcuts and the Add/Remove Programs entry. It then asks whether to delete your data in `%LOCALAPPDATA%\Cinewright`. The default is No, and a silent uninstall (`uninstall.exe /S`) always keeps the data. If Cinewright is running, the uninstaller closes it first.
 
 ### Set up a development environment
 
