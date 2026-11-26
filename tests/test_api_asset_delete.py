@@ -131,6 +131,10 @@ def test_delete_is_refused_while_a_job_that_has_not_ended_uses_the_asset_as_inpu
         assert core.blobs.exists(input_sha)
 
     refused("queued")
+    # No test route needs an approval, so the job is set to wait for one.
+    core.db.execute("UPDATE jobs SET state = ? WHERE id = ?", (JobState.AWAITING_APPROVAL.value, job.id))
+    refused("waiting for approval")
+    core.db.execute("UPDATE jobs SET state = ? WHERE id = ?", (JobState.QUEUED.value, job.id))
     granted = lease(client, auth)
     refused("starting")  # leased: the worker downloads its input next
     events = {"lease_id": granted.job.lease_id, "events": [{"kind": "log", "data": {"message": "loading"}}]}
@@ -182,6 +186,104 @@ def test_a_running_job_keeps_its_upload_of_the_same_bytes(client):
     assert asset.job_id == second.id and asset.provenance.job_id == second.id
     assert Job.model_validate(client.get(f"{API}/jobs/{second.id}").json()).outputs == [sha256]
     assert Job.model_validate(client.get(f"{API}/jobs/{first_job}").json()).outputs == []
+
+
+def fail(client, auth, granted: Lease, code: str = "engine_failed", *, retryable: bool = False) -> None:
+    failure = {"lease_id": granted.job.lease_id, "error": {"code": code, "message": "The engine stopped at step 2", "retryable": retryable}}
+    failed = client.post(f"{API}/worker/jobs/{granted.job.job_id}/fail", json=failure, headers=auth)
+    assert failed.status_code == 204, failed.text
+
+
+def deleted_while_a_second_job_holds_it(client, auth) -> tuple[str, Lease]:
+    """Run a job, let a second one upload the same bytes, then delete the asset: (hash, the second job's lease)."""
+    _, sha256 = run_job(client, auth)
+    submit(client)
+    granted = lease(client, auth)
+    assert put_output(client, auth, granted.job.job_id) == sha256
+    assert delete(client, sha256).status_code == 204
+    assert output_rows(client, sha256) == [granted.job.job_id] and client.app.state.core.blobs.exists(sha256)
+    return sha256, granted
+
+
+def assert_gone(client, sha256: str) -> None:
+    assert output_rows(client, sha256) == []
+    assert not client.app.state.core.blobs.exists(sha256)
+    assert_problem(client.get(f"{API}/assets/{sha256}"), 404, NOT_FOUND)
+    assert_problem(delete(client, sha256), 404, NOT_FOUND)
+
+
+def test_a_job_that_fails_after_a_delete_drops_its_upload_of_the_same_bytes(client):
+    auth = register_worker(client)
+    sha256, granted = deleted_while_a_second_job_holds_it(client, auth)
+
+    fail(client, auth, granted)
+    assert client.get(f"{API}/jobs/{granted.job.job_id}").json()["state"] == "failed"
+    assert_gone(client, sha256)
+
+
+def test_a_job_cancelled_after_a_delete_drops_its_upload_of_the_same_bytes(client):
+    auth = register_worker(client)
+    sha256, granted = deleted_while_a_second_job_holds_it(client, auth)
+
+    assert client.post(f"{API}/jobs/{granted.job.job_id}/cancel").json()["state"] == "running"  # the upload started it
+    fail(client, auth, granted, "cancelled")
+    assert client.get(f"{API}/jobs/{granted.job.job_id}").json()["state"] == "cancelled"
+    assert_gone(client, sha256)
+
+
+def test_a_job_whose_lease_expires_for_the_last_time_drops_its_upload(client, clock, monkeypatch):
+    core = client.app.state.core
+    monkeypatch.setattr(core.scheduler, "max_attempts", 1)
+    auth = register_worker(client)
+    sha256, granted = deleted_while_a_second_job_holds_it(client, auth)
+
+    clock.advance(core.scheduler.lease_seconds + 1)
+    assert core.expire_leases() == 1
+    assert client.get(f"{API}/jobs/{granted.job.job_id}").json()["state"] == "failed"
+    assert_gone(client, sha256)
+
+
+def test_a_job_that_is_queued_again_keeps_its_upload(client):
+    auth = register_worker(client)
+    sha256, granted = deleted_while_a_second_job_holds_it(client, auth)
+
+    fail(client, auth, granted, "oom", retryable=True)
+    assert client.get(f"{API}/jobs/{granted.job.job_id}").json()["state"] == "queued"
+    assert output_rows(client, sha256) == [granted.job.job_id]
+    assert client.app.state.core.blobs.exists(sha256)
+
+
+def test_a_failed_job_leaves_the_file_of_an_asset_with_the_same_bytes(client):
+    core = client.app.state.core
+    auth = register_worker(client)
+    first_job, sha256 = run_job(client, auth)
+    submit(client)
+    granted = lease(client, auth)
+    assert put_output(client, auth, granted.job.job_id) == sha256
+
+    fail(client, auth, granted)
+    assert client.get(f"{API}/assets/{sha256}").status_code == 200
+    assert client.get(f"{API}/assets/{sha256}/content").content == OUTPUT
+    assert output_rows(client, sha256) == sorted([first_job, granted.job.job_id])
+
+    # The failed job's record no longer keeps the file once the asset is deleted.
+    assert delete(client, sha256).status_code == 204
+    assert output_rows(client, sha256) == [] and not core.blobs.exists(sha256)
+
+
+def test_a_job_fails_even_when_the_os_refuses_to_delete_its_upload(client, monkeypatch, caplog):
+    core = client.app.state.core
+    auth = register_worker(client)
+    sha256, granted = deleted_while_a_second_job_holds_it(client, auth)
+
+    def refuse(self, digest: str) -> None:
+        raise PermissionError(32, "in use")
+
+    monkeypatch.setattr(BlobStore, "remove", refuse)
+    fail(client, auth, granted)
+    assert client.get(f"{API}/jobs/{granted.job.job_id}").json()["state"] == "failed"
+    assert core.blobs.exists(sha256)
+    assert f"Did not delete the file {sha256}" in caplog.text
 
 
 def test_a_file_the_os_refuses_to_delete_keeps_the_asset_and_its_records(client, monkeypatch):

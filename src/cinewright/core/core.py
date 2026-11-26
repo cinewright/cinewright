@@ -389,7 +389,8 @@ class Core:
     def _tx(self) -> Iterator[Tx]:
         """Write transaction; its events are published and waiting workers woken after commit.
 
-        The event log's lock spans the commit and the publish, so subscribers see events in commit order.
+        The event log's lock spans the commit and the publish, so subscribers see events in commit order. Jobs that failed
+        or were cancelled in it drop their unrecorded uploads before commit.
         """
         published: list[Published] = []
         now = self.clock()
@@ -402,6 +403,8 @@ class Core:
                     broadcast=lambda job_id, kind, data: published.append(EventLog.live(conn, job_id, kind, data, now)),
                 )
                 yield tx
+                for job_id in tx.unsuccessful:
+                    self._drop_unrecorded_outputs(conn, job_id)
             self.event_log.publish(published)
         if tx.wake_workers:
             self.scheduler.wakeup.notify()
@@ -1161,6 +1164,26 @@ class Core:
                     self.blobs.remove(sha256)  # last, under the database's lock: no upload of these bytes interleaves
                 except PermissionError as exc:
                     raise _FileInUse from exc
+
+    def _drop_unrecorded_outputs(self, conn: sqlite3.Connection, job_id: str) -> None:
+        """Drop the uploads of a job that failed or was cancelled that no asset records, and each file no other job's upload
+        names, so a file a deletion left to that job does not stay without a record (#109).
+
+        Uploads of bytes an asset records stay, and so does that file. A file the OS refuses to delete is logged and stays,
+        as the job's end must not be rolled back for it.
+        """
+        rows = conn.execute(
+            "SELECT DISTINCT sha256 FROM job_outputs WHERE job_id = ? AND sha256 NOT IN (SELECT sha256 FROM assets)", (job_id,)
+        ).fetchall()
+        for row in rows:
+            sha256 = row["sha256"]
+            conn.execute("DELETE FROM job_outputs WHERE job_id = ? AND sha256 = ?", (job_id, sha256))
+            if conn.execute("SELECT 1 FROM job_outputs WHERE sha256 = ?", (sha256,)).fetchone() is not None:
+                continue  # another job's upload of the same bytes; that job records or drops it
+            try:
+                self.blobs.remove(sha256)  # under the database's lock, like `_delete_asset`
+            except OSError as exc:
+                log.warning("Did not delete the file %s that job %s uploaded and did not record: %s", sha256, job_id, exc)
 
     # ------------------------------------------------------------------ hosts, approvals, libraries
 

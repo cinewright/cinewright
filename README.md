@@ -226,14 +226,14 @@ While Cinewright runs:
 2. Choose **Delete**. A dialog says how large the file is and what stays.
 3. Confirm with **Delete image** (or **Delete clip**). The asset leaves the Library, nothing is selected any more, and its file is deleted from the disk. **Cancel** keeps it.
 
-Deleting cannot be undone; there is no recycle bin. Jobs that made or used the asset keep their history in the Queue but no longer link to it. An asset made from it keeps its provenance, and its **Parents** row marks the deleted asset as `(deleted)`.
+Deleting cannot be undone; there is no recycle bin. Jobs that made or used the asset keep their history but no longer list it as an output. An asset made from it keeps its provenance, and its **Parents** row marks the deleted asset as `(deleted)`.
 
 Deleting is refused with a message, and nothing is deleted, in two cases:
 
-- A job that has not ended yet (waiting for approval, queued or running) uses the asset as its input image. Delete it once that job has ended or after you cancel it.
+- A job that has not ended yet (waiting for approval, queued, starting or running) uses the asset as its input image. Delete it once that job has ended or after you cancel it.
 - Its file is still open, for example as a clip playing in another browser tab. Close it and try again.
 
-Through the API, `curl -X DELETE http://127.0.0.1:8737/api/v1/assets/<sha256>` deletes an asset. The answer is `204`, `404` for an unknown asset, or `409` with one sentence that says why it was not deleted. AI agents cannot delete assets: the MCP server has no tool for it.
+Through the API, `curl -X DELETE http://127.0.0.1:8737/api/v1/assets/<sha256>` deletes an asset. The answer is `204`, `404` for an unknown asset, or `409` with a message that says why it was not deleted and what to do. AI agents cannot delete assets: the MCP server has no tool for it.
 
 ### Switch the text encoder variant
 

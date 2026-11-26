@@ -49,7 +49,7 @@ def delete_asset(core: Core, sha256: str = ShaPath) -> Response:
 
     Jobs that made or used it keep their state and events but no longer list it as an output; assets made from it keep
     their provenance, whose `parents` still name it. Refused with 409 while a job that has not ended (awaiting approval,
-    queued or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
+    queued, leased or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
     """
     core.delete_asset(sha256)
     return Response(status_code=204)

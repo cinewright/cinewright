@@ -90,7 +90,7 @@ export interface paths {
          *
          *     Jobs that made or used it keep their state and events but no longer list it as an output; assets made from it keep
          *     their provenance, whose `parents` still name it. Refused with 409 while a job that has not ended (awaiting approval,
-         *     queued or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
+         *     queued, leased or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
          */
         delete: operations["deleteAsset"];
         options?: never;
