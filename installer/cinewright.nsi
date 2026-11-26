@@ -85,6 +85,29 @@ BrandingText "Cinewright ${VERSION}"
   RMDir /r "\\?\${DIR}"
   RMDir /r "${DIR}"
 !macroend
+; Closes a running Cinewright before setup or the uninstaller touches a file: stops every process whose program
+; lies under $INSTDIR (the runtime's launcher shim and the core's interpreter under python\), except setup itself,
+; then checks every half second, at most 80 times, until none is left. The worker runs from the data folder and
+; ends with the core.
+; The folder reaches PowerShell in an environment variable set from a register, so no path is quoted or parsed.
+; PowerShell exits with 3 when a process is still running; MESSAGE then explains why setup stops. Any other failure,
+; such as a process list that cannot be read (exit 4) or a check that hangs past 2 minutes ("timeout"), is logged
+; and setup continues; after an update, the new
+; launcher then replaces a core of another version from this folder on its first start. Uses $0 and $1.
+!macro STOP_RUNNING_CINEWRIGHT MESSAGE
+  DetailPrint "Closing Cinewright if it is running"
+  StrCpy $1 "$INSTDIR"
+  System::Call 'kernel32::SetEnvironmentVariable(t "CINEWRIGHT_STOP_DIR", t r1)'
+  nsExec::ExecToLog /TIMEOUT=120000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$$ErrorActionPreference='Stop'; try{$$d=([string]$$env:CINEWRIGHT_STOP_DIR).TrimEnd('\'); if($$d.Length -lt 3){exit 2}; $$d+='\'; $$me=(Get-CimInstance Win32_Process -Filter ('ProcessId='+$$PID)).ParentProcessId; function Find-Mine{Get-CimInstance Win32_Process | Where-Object {$$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d,[StringComparison]::OrdinalIgnoreCase) -and $$_.ProcessId -ne $$me}}; foreach($$p in Find-Mine){'Stopping '+$$p.ExecutablePath+' (process '+$$p.ProcessId+')'; Stop-Process -Id $$p.ProcessId -Force -ErrorAction SilentlyContinue}; for($$i=0;$$i -lt 80;$$i++){if(-not (Find-Mine)){exit 0}; Start-Sleep -Milliseconds 500}; 'Still running: '+((Find-Mine).ExecutablePath -join ', '); exit 3}catch{'Could not list processes: '+$$_; exit 4}"`
+  Pop $0
+  !insertmacro CLEAR_ENV "CINEWRIGHT_STOP_DIR"
+  ${If} $0 == 3
+    MessageBox MB_OK|MB_ICONSTOP "${MESSAGE}" /SD IDOK
+    Abort "Cinewright is still running."
+  ${ElseIf} $0 != 0
+    DetailPrint "Could not check whether Cinewright is running (result: $0); continuing"
+  ${EndIf}
+!macroend
 
 Function .onInit
   ${IfNot} ${RunningX64}
@@ -162,16 +185,19 @@ Section "Cinewright" SecMain
     Abort "$R0"
   ${EndIf}
 
+  ; A Cinewright that keeps running through an update would serve the new web UI with its old code.
+  !insertmacro STOP_RUNNING_CINEWRIGHT "Cinewright is still running and setup could not close it. Restart the computer, then run setup again."
+
   SetOutPath "$INSTDIR"
 
-  ; An upgrade sets the previous runtime aside first: the rename fails while Cinewright is running,
-  ; and a failed upgrade can put the old runtime back.
+  ; An upgrade sets the previous runtime aside first, so a failed upgrade can put it back. The rename does not
+  ; reliably fail while Cinewright runs (#106); closing it is the step above.
   !insertmacro RMDIR_TREE "$INSTDIR\runtime.old"
   ${If} ${FileExists} "$INSTDIR\runtime\*.*"
     ClearErrors
     Rename "$INSTDIR\runtime" "$INSTDIR\runtime.old"
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so setup cannot replace it. Quit Cinewright and run setup again." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so setup cannot replace it. Restart the computer, then run setup again." /SD IDOK
       Abort "Cinewright is running."
     ${EndIf}
   ${EndIf}
@@ -247,12 +273,14 @@ Section "Uninstall"
     Abort "Uninstall cancelled: not the registered installation folder."
   ${EndIf}
 
+  !insertmacro STOP_RUNNING_CINEWRIGHT "Cinewright is still running and could not be closed, so nothing was removed. Restart the computer, then run the uninstaller again."
+
   !insertmacro RMDIR_TREE "$INSTDIR\runtime.old"
   ${If} ${FileExists} "$INSTDIR\runtime\*.*"
     ClearErrors
     Rename "$INSTDIR\runtime" "$INSTDIR\runtime.old"
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so it cannot be removed. Quit Cinewright and run the uninstaller again." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so it cannot be removed. Restart the computer, then run the uninstaller again." /SD IDOK
       Abort "Cinewright is running."
     ${EndIf}
   ${EndIf}

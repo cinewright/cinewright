@@ -2,11 +2,11 @@
 // The hash is the selection: `#/library/<sha256>` opens it with that asset selected, loaded by itself when it is not on
 // the first page, and selecting a card replaces the hash, so links and clicks take one path.
 
-import { AudioLines, File } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
-import { api, assetContentUrl, isSha256, type Asset } from '../api/client';
+import { api, isSha256, type Asset } from '../api/client';
 import { useJobEvents } from '../api/events';
+import { AssetMedia } from '../components/AssetMedia';
 import { DataClassTag } from '../components/DataClassTag';
 import { EmptyState, ErrorBanner, RetryButton } from '../components/Feedback';
 import { Hash } from '../components/Hash';
@@ -21,17 +21,6 @@ function merge(current: Asset[], incoming: Asset[]): Asset[] {
   const map = new Map(current.map((a) => [a.sha256, a]));
   for (const asset of incoming) map.set(asset.sha256, asset);
   return [...map.values()].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-}
-
-function Media({ asset, controls }: { asset: Asset; controls: boolean }) {
-  const url = assetContentUrl(asset.sha256);
-  const label = `${asset.media_type} ${asset.sha256.slice(0, 8)}`;
-  if (asset.media_type.startsWith('image/')) return <img src={url} alt={label} loading="lazy" />;
-  if (asset.media_type.startsWith('video/'))
-    return <video src={url} controls={controls} muted playsInline preload="metadata" aria-label={label} />;
-  if (asset.media_type.startsWith('audio/'))
-    return controls ? <audio src={url} controls preload="metadata" aria-label={label} /> : <AudioLines strokeWidth={1.5} aria-hidden="true" />;
-  return <File strokeWidth={1.5} aria-hidden="true" />;
 }
 
 /** The asset a `#/library/<sha256>` link names: its id, `invalid` for anything but 64 lowercase hex characters, or null. */
@@ -143,7 +132,7 @@ export function LibraryView() {
                   onClick={() => select(item.sha256 === selected ? null : item.sha256)}
                 >
                   <span className="asset__frame">
-                    <Media asset={item} controls={false} />
+                    <AssetMedia asset={item} controls={false} />
                   </span>
                   <span className="asset__meta">
                     <span className="text-value">
@@ -168,7 +157,7 @@ export function LibraryView() {
             {asset ? (
               <div className="stack">
                 <div className="asset__frame asset__frame--large">
-                  <Media asset={asset} controls />
+                  <AssetMedia asset={asset} controls />
                 </div>
                 <ProvenancePanel provenance={asset.provenance}>
                   <div className="prov__asset">
