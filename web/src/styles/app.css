@@ -729,15 +729,21 @@ a.cw-btn {
   color: var(--accent-ink);
 }
 
-/* A shortened value with its copy button (CopyValue). */
+/* A shortened value with its copy button (CopyValue): the value-and-button row, a failure message under it. */
 .copy-value {
   display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0 var(--space-1);
+  flex-direction: column;
   min-width: 0;
   max-width: 100%;
-  vertical-align: middle;
+  vertical-align: top;
+}
+
+/* Never wraps: in a narrow cell the value shortens further with an ellipsis and the button stays beside it. */
+.copy-value__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 .copy-value__text {
@@ -756,8 +762,10 @@ a.cw-btn {
   padding: 0;
 }
 
+/* contain: inline-size keeps the message's own width out of the wrapper's, so it wraps within the row's width
+   instead of widening the wrapper and moving what sits beside the value. */
 .copy-value__error {
-  flex-basis: 100%;
+  contain: inline-size;
   margin-top: var(--space-1);
   color: var(--status-fail);
   font: var(--text-caption);
@@ -772,7 +780,7 @@ a.cw-btn {
 }
 
 /* The button reaches past the text row, and its focus ring past the button: nothing may clip them.
-   min-width: 0 lets the cell still shrink below its content, so the value's ellipsis applies in a narrow panel. */
+   min-width: 0 lets the cell shrink below its content; the value's ellipsis then takes up the difference. */
 .cw-prov__body dd.has-copy,
 .kv dd.has-copy {
   min-width: 0;

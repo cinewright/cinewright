@@ -27,7 +27,7 @@ function EngineStatus({ engine, onRetry, retrying }: { engine: EngineInfo; onRet
         </dd>
         <dt>Version</dt>
         <dd className={engine.version ? 'cw-mono has-copy' : 'cw-mono'}>
-          {engine.version ? <CopyValue text={truncateMiddle(engine.version)} value={engine.version} label="Copy engine version" /> : DASH}
+          {engine.version ? <CopyValue text={truncateMiddle(engine.version)} value={engine.version} label={`Copy ${engine.name} version`} /> : DASH}
         </dd>
       </dl>
     );

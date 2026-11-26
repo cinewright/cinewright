@@ -58,6 +58,40 @@ describe('CopyValue', () => {
     expect(status()).toBe('Copied');
   });
 
+  it('copies again and confirms again when clicked while the check icon still shows', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const writes = stubClipboard();
+    render(<CopyValue text="0193f2a4…7b8c9d0e" value={JOB_ID} label="Copy job id" />);
+    const button = screen.getByRole('button', { name: 'Copy job id' });
+
+    await click(button);
+    act(() => {
+      vi.advanceTimersByTime(COPIED_MS / 2);
+    });
+    expect(button.querySelector('.lucide-check')).not.toBeNull();
+    const first = screen.getByRole('status').firstElementChild;
+
+    await click(button);
+    expect(writes).toEqual([JOB_ID, JOB_ID]);
+    expect(status()).toBe('Copied');
+    expect(button.querySelector('.lucide-check')).not.toBeNull();
+    // "Copied" is mounted anew, so it is announced again although the text stays the same.
+    expect(screen.getByRole('status').firstElementChild).not.toBe(first);
+
+    // The second copy shows the check for the full time again.
+    act(() => {
+      vi.advanceTimersByTime(COPIED_MS / 2);
+    });
+    expect(button.querySelector('.lucide-check')).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(COPIED_MS / 2);
+    });
+    expect(button.querySelector('.lucide-copy')).not.toBeNull();
+  });
+
   it('uses the tooltip when it says more than the name', () => {
     stubClipboard();
     render(<CopyValue text="a +1" value={'a\nb'} label="Copy all 2 model hashes" tooltip="Copy all 2 model hashes, one per line" />);
@@ -83,11 +117,16 @@ describe('CopyValue', () => {
     expect(screen.getByRole('alert')).not.toBe(first);
   });
 
-  it('says so when there is no clipboard at all', async () => {
-    stubClipboard('missing');
+  it.each([
+    ['there is no clipboard at all', 'missing'],
+    ['the clipboard cannot write text', 'no-write'],
+    ['writing throws instead of rejecting', 'throw'],
+  ] as const)('says so when %s', async (_case, mode) => {
+    const writes = stubClipboard(mode);
     render(<CopyValue text="0193f2a4…7b8c9d0e" value={JOB_ID} label="Copy job id" />);
 
     await click(screen.getByRole('button', { name: 'Copy job id' }));
+    expect(writes).toEqual([]);
     expect(screen.getByRole('alert').textContent).toBe(COPY_FAILED);
     expect(status()).toBe('');
   });

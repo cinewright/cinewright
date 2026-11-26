@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EngineInfo } from '../api/client';
 import { EventsProvider } from '../api/events';
 import { stubApi } from '../test/api';
+import { stubClipboard } from '../test/clipboard';
 import { EnginePanel } from './SetupView';
 
 const COMMIT = '38758d3c73366422efcf609abb63cab8385f3552';
@@ -83,8 +84,13 @@ describe('EnginePanel', () => {
     act(() => source.emit('engine', engineEvent({ ...ENGINE, state: 'ready', version: COMMIT })));
     expect(screen.getByText('Ready')).toBeTruthy();
     expect(screen.getByTitle(COMMIT).textContent).toBe(`${COMMIT.slice(0, 8)}…${COMMIT.slice(-8)}`);
-    expect(screen.getByRole('button', { name: 'Copy engine version' })).toBeTruthy();
     expect(screen.queryByRole('progressbar')).toBeNull();
+
+    const writes = stubClipboard();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy WanGP (Wan2GP) version' }));
+    });
+    expect(writes).toEqual([COMMIT]);
   });
 
   it('loads the engine state again when the event stream reopens, because a missed engine event is never replayed', async () => {
