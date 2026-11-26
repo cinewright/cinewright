@@ -172,7 +172,7 @@ export function LibraryView() {
                 </div>
                 <ProvenancePanel provenance={asset.provenance}>
                   <div className="prov__asset">
-                    <Hash value={asset.sha256} copy />
+                    <Hash value={asset.sha256} label="Copy asset hash" />
                     <DataClassTag value={asset.data_class} />
                   </div>
                 </ProvenancePanel>

@@ -1,29 +1,7 @@
-import { Copy } from 'lucide-react';
-import { useState } from 'react';
-
 import { fullHash, shortHash } from '../lib/format';
+import { CopyValue } from './CopyValue';
 
-/** Hash truncated in the middle, full value in the tooltip and through the copy button. */
-export function Hash({ value, copy = false }: { value: string; copy?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  const full = fullHash(value);
-  const onCopy = () => {
-    navigator.clipboard
-      .writeText(full)
-      .then(() => setCopied(true))
-      .catch(() => setCopied(false));
-  };
-  return (
-    <span className="hash">
-      <span className="text-hash hash__value" title={full}>
-        {shortHash(value)}
-      </span>
-      {copy ? (
-        <button type="button" className="cw-btn cw-btn--ghost cw-btn--sm" onClick={onCopy}>
-          <Copy strokeWidth={1.5} aria-hidden="true" />
-          {copied ? 'Copied' : 'Copy hash'}
-        </button>
-      ) : null}
-    </span>
-  );
+/** SHA-256 truncated in the middle, `sha256:<hex>` in the tooltip and through the copy button. */
+export function Hash({ value, label }: { value: string; label: string }) {
+  return <CopyValue text={shortHash(value)} value={fullHash(value)} label={label} className="text-hash hash__value" />;
 }

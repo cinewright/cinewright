@@ -218,6 +218,8 @@ While Cinewright runs, with at least one model installed:
 
 If a change makes the router pick another model, for example a different data class, the fields switch to that model's choices. A resolution or frame rate it does not offer goes back to the model default, and the frame count moves to its grid. Any link of the form `http://127.0.0.1:8737/#/library/<sha256>` opens the Library with that asset selected. Selecting another asset changes the address to that asset's link, so you can copy it.
 
+Hashes and ids are shown shortened, with the full value in the tooltip. The copy icon next to each one copies the full value: in the Library and its provenance (asset, model files, parents, job), in the Job panel, and the engine version in Setup and About. Where the model hash row shows `+2`, its icon copies all the model's file hashes, one per line.
+
 ### Switch the text encoder variant
 
 Every model on your computer uses the same text encoder variant: `int8` (WanGP's default, about half the size) or `bf16`.

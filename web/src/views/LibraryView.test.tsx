@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Asset } from '../api/client';
 import { EventsProvider } from '../api/events';
 import { StatusAnswer, stubApi, type ApiCall, type Routes } from '../test/api';
+import { stubClipboard } from '../test/clipboard';
 import { stubEventSource } from '../test/events';
 import { LibraryView } from './LibraryView';
 
@@ -91,6 +92,19 @@ describe('LibraryView', () => {
     const pressed = screen.getAllByRole('button', { pressed: true });
     expect(pressed).toHaveLength(1);
     expect(within(pressed[0] as HTMLElement).getByText('2026-11-01T08:00:00Z')).toBeTruthy();
+  });
+
+  it("copies the selected asset's full hash with the icon beside it", async () => {
+    const writes = stubClipboard();
+    renderAt(`#/library/${LINKED_SHA}`);
+
+    const detail = await screen.findByRole('complementary', { name: 'Selected asset' });
+    const button = await within(detail).findByRole('button', { name: 'Copy asset hash' });
+    expect(button.textContent).toBe(''); // the icon replaced the "Copy hash" text
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(writes).toEqual([`sha256:${LINKED_SHA}`]);
   });
 
   it('selects a linked asset from the first page without loading it again', async () => {

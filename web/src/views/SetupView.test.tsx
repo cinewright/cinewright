@@ -83,6 +83,7 @@ describe('EnginePanel', () => {
     act(() => source.emit('engine', engineEvent({ ...ENGINE, state: 'ready', version: COMMIT })));
     expect(screen.getByText('Ready')).toBeTruthy();
     expect(screen.getByTitle(COMMIT).textContent).toBe(`${COMMIT.slice(0, 8)}…${COMMIT.slice(-8)}`);
+    expect(screen.getByRole('button', { name: 'Copy engine version' })).toBeTruthy();
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
