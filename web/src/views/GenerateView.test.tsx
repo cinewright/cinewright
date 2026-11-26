@@ -41,6 +41,13 @@ function announcedElements(): HTMLElement[] {
   return [...within(root).getAllByRole('status'), ...live];
 }
 
+/** The Job panel's note about the result; the panel also holds the copy buttons' own status regions. */
+function note(panel: HTMLElement): HTMLElement {
+  const element = panel.querySelector<HTMLElement>('p.job__note[role="status"]');
+  if (!element) throw new Error('The Job panel has no result note');
+  return element;
+}
+
 describe('EstimatePanel', () => {
   it('announces only "can run"; cost and ETA stay out of every status element', () => {
     render(<EstimatePanel state={{ status: 'done', estimate: FEASIBLE }} hasRequest />);
@@ -498,11 +505,11 @@ describe('GenerateView', () => {
       [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => new ProblemAnswer(500, 'Internal Server Error', 'The asset store could not be read.'),
     });
     // The note's live region is there before the note, so the note is read when it appears.
-    expect(within(panel).getByRole('status').textContent).toBe('');
+    expect(note(panel).textContent).toBe('');
 
     act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
     expect(await within(panel).findByText(RESULT_NOTE)).toBeTruthy();
-    expect(within(panel).getByRole('status').textContent).toBe(RESULT_NOTE);
+    expect(note(panel).textContent).toBe(RESULT_NOTE);
     expect(lookups(calls)).toStrictEqual([`/api/v1/assets/${OUTPUT_SHA}`]);
     expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
     expect(panel.querySelector('video')).toBeNull();
@@ -522,7 +529,7 @@ describe('GenerateView', () => {
     fireEvent.error(media);
     expect(panel.querySelector(`[src="${OUTPUT_URL}"]`)).toBeNull();
     expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
-    expect(within(panel).getByRole('status').textContent).toBe(RESULT_NOTE);
+    expect(note(panel).textContent).toBe(RESULT_NOTE);
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
     expect(within(panel).queryByRole('alert')).toBeNull();
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
@@ -545,7 +552,7 @@ describe('GenerateView', () => {
     fireEvent.load(await findResult(panel));
     expect(within(panel).getByRole('img', { name: outputLabel('image/png') }).getAttribute('src')).toBe(OUTPUT_URL);
     expect(preview()).toBeNull();
-    expect(within(panel).getByRole('status').textContent).toBe('');
+    expect(note(panel).textContent).toBe('');
     expect(lookups(calls)).toHaveLength(2);
 
     // A result that is shown is not looked up again when the stream reopens.

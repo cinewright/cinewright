@@ -1,8 +1,10 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
+import { EventsProvider } from '../api/events';
 import { stubApi } from '../test/api';
 import { stubClipboard } from '../test/clipboard';
+import { stubEventSource } from '../test/events';
 import { AboutDialog } from './AboutDialog';
 import { COPIED_MS, COPY_FAILED, CopyValue } from './CopyValue';
 import { Hash } from './Hash';
@@ -157,7 +159,13 @@ describe('copy buttons beside shortened values', () => {
       lastStateSeq: 0,
       lastProgressSeq: 0,
     };
-    render(<JobPanel job={job} />);
+    stubEventSource();
+    stubApi({});
+    render(
+      <EventsProvider>
+        <JobPanel job={job} />
+      </EventsProvider>,
+    );
 
     const panel = screen.getByRole('region', { name: 'Job' });
     expect(within(panel).getByTitle(JOB_ID).textContent).toBe('0193f2a4…7b8c9d0e');
