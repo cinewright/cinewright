@@ -297,6 +297,25 @@ describe('LibraryView', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('shows and announces a refusal that arrives after another asset was selected', async () => {
+    const detail = `This asset is an input of job ${'a'.repeat(32)}, which is still queued, so it was not deleted. Delete it once that job has ended.`;
+    let answer: ((value: unknown) => void) | undefined;
+    renderAt(`#/library/${NEW_SHA}`, { [`DELETE /api/v1/assets/${NEW_SHA}`]: () => new Promise((resolve) => (answer = resolve)) });
+    await waitFor(() => expect(pressedTimestamps()).toStrictEqual(['2026-11-25T12:00:00Z']));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete this clip?' })).getByRole('button', { name: 'Delete clip' }));
+    fireEvent.click(card('2026-11-24T12:00:00Z'));
+    await waitFor(() => expect(pressedTimestamps()).toStrictEqual(['2026-11-24T12:00:00Z']));
+    act(() => answer?.(new ProblemAnswer(409, 'Conflict', detail)));
+
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText(`Could not delete the clip sha256:${NEW_SHA.slice(0, 8)}…${NEW_SHA.slice(-8)}`)).toBeTruthy();
+    expect(within(alert).getByText(detail)).toBeTruthy();
+    expect(screen.getByText('The clip was not deleted.')).toBeTruthy();
+    expect(pressedTimestamps()).toStrictEqual(['2026-11-24T12:00:00Z']);
+  });
+
   it('takes a delete that finds the asset already gone as done', async () => {
     const calls = renderAt(`#/library/${OLD_SHA}`, {
       [`DELETE /api/v1/assets/${OLD_SHA}`]: () => new ProblemAnswer(404, 'Not Found', `Asset ${OLD_SHA} does not exist.`),

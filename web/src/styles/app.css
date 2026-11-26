@@ -541,6 +541,15 @@ a.cw-btn {
   gap: var(--space-2) var(--space-4);
 }
 
+/* The result loads in the same cell as the last preview frame, out of sight, until it can take the frame's place. */
+.job__frame > * {
+  grid-area: 1 / 1;
+}
+
+.job__note:not(:empty) {
+  margin-top: var(--space-2);
+}
+
 @media (max-width: 1080px) {
   .generate {
     grid-template-columns: minmax(0, 1fr);
@@ -677,8 +686,11 @@ a.cw-btn {
   background: var(--accent-deep);
 }
 
+/* One cell exactly the size of the frame. Without the template the row grows to the media's own height, so a square or
+   portrait image, or a clip's player controls, would be cut off at the bottom. */
 .asset__frame {
   display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   place-items: center;
   aspect-ratio: 16 / 9;
   overflow: hidden;
@@ -692,6 +704,7 @@ a.cw-btn {
   height: 40px;
 }
 
+/* Fills the cell and letterboxes: every image and clip shows whole, and small preview frames scale up to the frame. */
 .asset__frame > img,
 .asset__frame > video {
   width: 100%;

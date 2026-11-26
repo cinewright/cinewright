@@ -4,17 +4,18 @@
 // Delete asks first, as the design requires for deletions; a deleted asset leaves the list and the selection, and keyboard
 // focus moves to the card next to it.
 
-import { AudioLines, File, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, ApiError, assetContentUrl, isSha256, type Asset } from '../api/client';
+import { api, ApiError, isSha256, type Asset } from '../api/client';
 import { useJobEvents } from '../api/events';
+import { AssetMedia } from '../components/AssetMedia';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { DataClassTag } from '../components/DataClassTag';
 import { EmptyState, ErrorBanner, RetryButton } from '../components/Feedback';
 import { Hash } from '../components/Hash';
 import { ProvenancePanel } from '../components/ProvenancePanel';
-import { formatBytes, formatTimestamp } from '../lib/format';
+import { formatBytes, formatTimestamp, shortHash } from '../lib/format';
 import { replaceHash, useHashSegments } from '../lib/route';
 import { useApi } from '../lib/useApi';
 
@@ -32,36 +33,6 @@ function kind(asset: Asset): string {
   if (asset.media_type.startsWith('video/')) return 'clip';
   if (asset.media_type.startsWith('audio/')) return 'audio file';
   return 'asset';
-}
-
-function Media({ asset, controls }: { asset: Asset; controls: boolean }) {
-  const url = assetContentUrl(asset.sha256);
-  const label = `${asset.media_type} ${asset.sha256.slice(0, 8)}`;
-  const player = useRef<HTMLMediaElement | null>(null);
-  const keep = useCallback((element: HTMLMediaElement | null) => {
-    if (element) player.current = element;
-  }, []);
-  // A removed player may keep downloading, and the core cannot delete a file on Windows while it still streams it.
-  // Dropping the source stops the download. Mount one Media per asset (a key), so the source dropped is this asset's;
-  // a player still in the page (StrictMode's trial unmount) keeps it.
-  useEffect(() => {
-    const element = player.current;
-    return () => {
-      if (!element || element.isConnected) return;
-      element.removeAttribute('src');
-      element.load();
-    };
-  }, []);
-  if (asset.media_type.startsWith('image/')) return <img src={url} alt={label} loading="lazy" />;
-  if (asset.media_type.startsWith('video/'))
-    return <video ref={keep} src={url} controls={controls} muted playsInline preload="metadata" aria-label={label} />;
-  if (asset.media_type.startsWith('audio/'))
-    return controls ? (
-      <audio ref={keep} src={url} controls preload="metadata" aria-label={label} />
-    ) : (
-      <AudioLines strokeWidth={1.5} aria-hidden="true" />
-    );
-  return <File strokeWidth={1.5} aria-hidden="true" />;
 }
 
 /** The asset a `#/library/<sha256>` link names: its id, `invalid` for anything but 64 lowercase hex characters, or null. */
@@ -216,7 +187,9 @@ export function LibraryView() {
       .catch((error: unknown) => {
         // Already deleted, for example in another tab: what was asked for is done.
         if (error instanceof ApiError && error.status === 404) return gone(target, index);
+        // Shown in the detail pane even when another asset was selected meanwhile, then named by its hash.
         setDeleteError({ sha256: target.sha256, title: `Could not delete the ${kind(target)}`, error });
+        setAnnouncement(`The ${kind(target)} was not deleted.`);
         refocus.current = 'delete';
       })
       .finally(() => setDeleting(null));
@@ -275,7 +248,9 @@ export function LibraryView() {
                   aria-pressed={item.sha256 === selected}
                   onClick={() => select(item.sha256 === selected ? null : item.sha256)}
                 >
-                  <span className="asset__frame">{item.sha256 === deleting ? null : <Media asset={item} controls={false} />}</span>
+                  <span className="asset__frame">
+                    {item.sha256 === deleting ? null : <AssetMedia key={item.sha256} asset={item} controls={false} />}
+                  </span>
                   <span className="asset__meta">
                     <span className="text-value">
                       {item.media_type} · {formatBytes(item.size_bytes)}
@@ -299,9 +274,14 @@ export function LibraryView() {
             {asset ? (
               <div className="stack">
                 <div className="asset__frame asset__frame--large">
-                  {asset.sha256 === deleting ? null : <Media key={asset.sha256} asset={asset} controls />}
+                  {asset.sha256 === deleting ? null : <AssetMedia key={asset.sha256} asset={asset} controls />}
                 </div>
-                {deleteError?.sha256 === asset.sha256 ? <ErrorBanner title={deleteError.title} error={deleteError.error} /> : null}
+                {deleteError ? (
+                  <ErrorBanner
+                    title={deleteError.sha256 === asset.sha256 ? deleteError.title : `${deleteError.title} ${shortHash(deleteError.sha256)}`}
+                    error={deleteError.error}
+                  />
+                ) : null}
                 <div className="library__actions">
                   <button
                     ref={deleteButton}
