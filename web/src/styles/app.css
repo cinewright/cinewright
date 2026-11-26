@@ -541,6 +541,15 @@ a.cw-btn {
   gap: var(--space-2) var(--space-4);
 }
 
+/* The result loads in the same cell as the last preview frame, out of sight, until it can take the frame's place. */
+.job__frame > * {
+  grid-area: 1 / 1;
+}
+
+.job__note:not(:empty) {
+  margin-top: var(--space-2);
+}
+
 @media (max-width: 1080px) {
   .generate {
     grid-template-columns: minmax(0, 1fr);

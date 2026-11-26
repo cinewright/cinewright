@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, isInaccessible, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { ApiError, type Asset, type CapabilityEntry, type Estimate, type Job, type JobRequest, type Limits, type ModelSummary } from '../api/client';
@@ -146,6 +146,21 @@ function output(mediaType: string): Asset {
 const OUTPUT_URL = `/api/v1/assets/${OUTPUT_SHA}/content`;
 /** The accessible name the Library and the Job panel give an asset's media. */
 const outputLabel = (mediaType: string) => `${mediaType} ${OUTPUT_SHA.slice(0, 8)}`;
+const RESULT_NOTE = 'The result could not be shown here; it is in the Library.';
+
+/** The result's image or clip in the Job panel, also while it loads out of sight. */
+function findResult(panel: HTMLElement): Promise<HTMLElement> {
+  return waitFor(() => {
+    const media = panel.querySelector<HTMLElement>(`[src="${OUTPUT_URL}"]`);
+    if (!media) throw new Error('The Job panel shows no result');
+    return media;
+  });
+}
+
+/** The asset records the view looked up. */
+function lookups(calls: ApiCall[]): string[] {
+  return calls.filter((call) => call.method === 'GET' && call.path.startsWith('/api/v1/assets/')).map((call) => call.path);
+}
 
 function job(request: JobRequest): Job {
   return { id: JOB_ID, state: 'queued', request, client: 'ui', created_at: CREATED, outputs: [] };
@@ -303,14 +318,18 @@ describe('GenerateView', () => {
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
     expect(statusTexts()).toContain('Job done');
 
-    // The finished image, as the Library shows it, takes the place of the last low-resolution preview frame.
-    const result = await within(panel).findByRole('img', { name: outputLabel('image/jpeg') });
-    expect(result.getAttribute('src')).toBe(OUTPUT_URL);
+    // The finished image, as the Library shows it, loads at once and out of sight under the last low-resolution preview
+    // frame, then takes its place.
+    const result = await findResult(panel);
+    expect(result.tagName).toBe('IMG');
+    expect(result.getAttribute('loading')).toBe('eager');
+    expect(isInaccessible(result)).toBe(true);
+    expect(frame()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    fireEvent.load(result);
+    expect(within(panel).getByRole('img', { name: outputLabel('image/jpeg') })).toBe(result);
     expect(within(panel).queryByRole('img', { name: 'Latest preview frame' })).toBeNull();
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
-    expect(calls.filter((call) => call.method === 'GET' && call.path.startsWith('/api/v1/assets/')).map((call) => call.path)).toStrictEqual([
-      `/api/v1/assets/${OUTPUT_SHA}`,
-    ]);
+    expect(lookups(calls)).toStrictEqual([`/api/v1/assets/${OUTPUT_SHA}`]);
   });
 
   it('uploads the input image again when a stricter data class is chosen, also while its first upload runs', async () => {
@@ -462,6 +481,14 @@ describe('GenerateView', () => {
     expect(clip.controls).toBe(true);
     expect(clip.muted).toBe(true);
     expect(clip.autoplay).toBe(false);
+    expect(clip.preload).toBe('auto');
+    // No poster: the player shows the clip's own first frame, not the low-resolution preview.
+    expect(clip.poster).toBe('');
+    // The clip loads out of sight; the preview stays until its first frame is there.
+    expect(isInaccessible(clip)).toBe(true);
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    fireEvent.loadedData(clip);
+    expect(isInaccessible(clip)).toBe(false);
     expect(preview()).toBeNull();
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
   });
@@ -470,16 +497,111 @@ describe('GenerateView', () => {
     const { calls, source, panel, preview } = await submitWithPreview({
       [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => new ProblemAnswer(500, 'Internal Server Error', 'The asset store could not be read.'),
     });
+    // The note's live region is there before the note, so the note is read when it appears.
+    expect(within(panel).getByRole('status').textContent).toBe('');
 
     act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
-    expect(await within(panel).findByText('The result could not be shown here; it is in the Library.')).toBeTruthy();
-    expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/assets/${OUTPUT_SHA}`)).toHaveLength(1);
+    expect(await within(panel).findByText(RESULT_NOTE)).toBeTruthy();
+    expect(within(panel).getByRole('status').textContent).toBe(RESULT_NOTE);
+    expect(lookups(calls)).toStrictEqual([`/api/v1/assets/${OUTPUT_SHA}`]);
     expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
     expect(panel.querySelector('video')).toBeNull();
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
     // The job itself succeeded, so nothing reads as a failure.
     expect(within(panel).queryByRole('alert')).toBeNull();
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
+  });
+
+  it.each(['image/png', 'video/mp4'])('keeps the last preview frame and points to the Library when the %s itself does not load', async (mediaType) => {
+    const { source, panel, preview } = await submitWithPreview({ [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output(mediaType) });
+
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    const media = await findResult(panel);
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    // The asset store has the record but cannot send the file, or the browser cannot decode it.
+    fireEvent.error(media);
+    expect(panel.querySelector(`[src="${OUTPUT_URL}"]`)).toBeNull();
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(within(panel).getByRole('status').textContent).toBe(RESULT_NOTE);
+    expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    expect(within(panel).queryByRole('alert')).toBeNull();
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
+  });
+
+  it('tries the result again when the stream reopens after it did not load', async () => {
+    let reachable = false;
+    const { calls, source, panel, preview } = await submitWithPreview({
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => (reachable ? output('image/png') : new StatusAnswer(502)),
+    });
+
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    expect(await within(panel).findByText(RESULT_NOTE)).toBeTruthy();
+    // The core was out of reach; while the stream is down the view does not ask again.
+    act(() => source().onerror?.(new Event('error')));
+    expect(lookups(calls)).toHaveLength(1);
+
+    reachable = true;
+    act(() => source().open());
+    fireEvent.load(await findResult(panel));
+    expect(within(panel).getByRole('img', { name: outputLabel('image/png') }).getAttribute('src')).toBe(OUTPUT_URL);
+    expect(preview()).toBeNull();
+    expect(within(panel).getByRole('status').textContent).toBe('');
+    expect(lookups(calls)).toHaveLength(2);
+
+    // A result that is shown is not looked up again when the stream reopens.
+    act(() => source().onerror?.(new Event('error')));
+    act(() => source().open());
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 50)));
+    expect(lookups(calls)).toHaveLength(2);
+    expect(within(panel).getByRole('img', { name: outputLabel('image/png') })).toBeTruthy();
+  });
+
+  it('shows the first of several outputs and links each one into the Library', async () => {
+    const SECOND_OUTPUT = 'c'.repeat(64);
+    const { calls, source, panel } = await submitWithPreview({
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('image/png'),
+      [`GET /api/v1/assets/${SECOND_OUTPUT}`]: () => ({ ...output('image/png'), sha256: SECOND_OUTPUT }),
+    });
+
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA, SECOND_OUTPUT] })));
+    fireEvent.load(await findResult(panel));
+    expect(within(panel).getAllByRole('img').map((image) => image.getAttribute('src'))).toStrictEqual([OUTPUT_URL]);
+    expect(within(panel).getByRole('link', { name: 'Open output 1 in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    expect(within(panel).getByRole('link', { name: 'Open output 2 in Library' }).getAttribute('href')).toBe(`#/library/${SECOND_OUTPUT}`);
+    expect(lookups(calls)).toStrictEqual([`/api/v1/assets/${OUTPUT_SHA}`]);
+  });
+
+  it('shows no result for a cancelled job, even one that names an output', async () => {
+    const { calls, source, panel, preview } = await submitWithPreview({ [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('image/png') });
+
+    act(() => source().emit('state', event('state', 3, { state: 'cancelled', reason: 'Cancelled by the user.', outputs: [OUTPUT_SHA] })));
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Cancelled');
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(panel.querySelector(`[src="${OUTPUT_URL}"]`)).toBeNull();
+    expect(within(panel).queryByRole('link', { name: /Library/ })).toBeNull();
+    expect(lookups(calls)).toStrictEqual([]);
+  });
+
+  it('shows nothing of the result of the previous job while the next job runs', async () => {
+    const SECOND_JOB = '0193f2a4-7c1e-7b1a-9d3e-000000000002';
+    let submits = 0;
+    const { source, panel } = await submitWithPreview({
+      'POST /api/v1/jobs': (body) => ({ ...job(body as JobRequest), id: submits++ === 0 ? JOB_ID : SECOND_JOB }),
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('image/png'),
+    });
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    fireEvent.load(await findResult(panel));
+    expect(within(panel).getByRole('img', { name: outputLabel('image/png') })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
+    const next = await screen.findByTitle(SECOND_JOB);
+    const nextPanel = screen.getByRole('region', { name: 'Job' });
+    expect(nextPanel.contains(next)).toBe(true);
+    act(() => source().emit('state', event('state', 1, { state: 'running' }, SECOND_JOB)));
+    expect(within(nextPanel).getByRole('progressbar').getAttribute('aria-label')).toBe('Running');
+    expect(nextPanel.querySelector(`[src="${OUTPUT_URL}"]`)).toBeNull();
+    expect(within(nextPanel).getByText('Waiting for a preview frame')).toBeTruthy();
+    expect(within(nextPanel).queryByRole('link', { name: /Library/ })).toBeNull();
   });
 
   it('loads the job again when the stream reopens, as a new stream replays nothing', async () => {

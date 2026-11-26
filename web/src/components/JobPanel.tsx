@@ -225,28 +225,52 @@ export function jobAnnouncement(job: TrackedJob): string {
   }
 }
 
-type ResultLookup = { sha256: string; asset: Asset } | { sha256: string; failed: true };
+/**
+ * A succeeded job's result: its asset record arrived and the media loads out of sight (`loading`), the media can be
+ * shown (`shown`), or the record or the media did not load (`failed`).
+ */
+type Result =
+  | { sha256: string; status: 'loading' | 'shown'; asset: Asset }
+  | { sha256: string; status: 'failed' };
+
+/** Images and clips load out of sight and take the place of the last preview once they can be shown. */
+function loadsFirst(asset: Asset): boolean {
+  return asset.media_type.startsWith('image/') || asset.media_type.startsWith('video/');
+}
 
 /**
- * The asset record of a succeeded job's first output, for its media type: the asset, `failed` when the lookup failed,
- * or null while it loads and when there is no output. Keyed by the output, so a later job never shows an older result.
+ * The result of a succeeded job's first output, or null while its asset record loads and when there is no output. Keyed
+ * by the output, so a later job never shows an older result. A failed lookup or load is tried again when the event
+ * stream opens anew, since the core was likely out of reach. `settle` reports whether the media could be shown.
  */
-function useResult(sha256: string | null): ResultLookup | null {
-  const [lookup, setLookup] = useState<ResultLookup | null>(null);
+function useResult(sha256: string | null) {
+  const [stored, setStored] = useState<Result | null>(null);
+  const result = stored && stored.sha256 === sha256 ? stored : null;
+  const latest = useRef(result);
+  latest.current = result;
+  const connected = useEventsConnected();
   useEffect(() => {
-    if (!sha256) return;
+    const known = latest.current;
+    if (!sha256 || (known && (known.status !== 'failed' || !connected))) return;
     const controller = new AbortController();
     api
       .asset(sha256, controller.signal)
       .then((asset) => {
-        if (!controller.signal.aborted) setLookup({ sha256, asset });
+        if (!controller.signal.aborted) setStored({ sha256, status: loadsFirst(asset) ? 'loading' : 'shown', asset });
       })
       .catch((error: unknown) => {
-        if (!isAbort(error) && !controller.signal.aborted) setLookup({ sha256, failed: true });
+        if (!isAbort(error) && !controller.signal.aborted) setStored({ sha256, status: 'failed' });
       });
     return () => controller.abort();
-  }, [sha256]);
-  return lookup && lookup.sha256 === sha256 ? lookup : null;
+  }, [sha256, connected]);
+  const settle = useCallback((output: string, outcome: 'shown' | 'failed') => {
+    setStored((value) => {
+      if (!value || value.sha256 !== output || value.status === 'failed') return value;
+      if (outcome === 'failed') return { sha256: output, status: 'failed' };
+      return value.status === 'loading' ? { ...value, status: 'shown' } : value;
+    });
+  }, []);
+  return { result, settle };
 }
 
 export function JobPanel({ job }: { job: TrackedJob }) {
@@ -258,7 +282,9 @@ export function JobPanel({ job }: { job: TrackedJob }) {
   const outputs = job.state === 'succeeded' ? job.outputs : [];
   // Outputs of a loaded job arrive unchecked; only an asset id builds a path.
   const first = outputs[0];
-  const result = useResult(isSha256(first) ? first : null);
+  const { result, settle } = useResult(isSha256(first) ? first : null);
+  const asset = result && result.status !== 'failed' ? result.asset : null;
+  const shown = result?.status === 'shown';
   return (
     <section className="panel stack" aria-labelledby="job-title">
       <div className="panel__head">
@@ -269,17 +295,32 @@ export function JobPanel({ job }: { job: TrackedJob }) {
           {truncateMiddle(job.id)}
         </span>
       </div>
-      {/* The last preview stays while the result loads, and when it does not load. */}
-      <div className="asset__frame">
-        {result && 'asset' in result ? (
-          <AssetMedia asset={result.asset} controls />
-        ) : job.preview ? (
-          <img src={job.preview} alt="Latest preview frame" />
-        ) : (
-          <span className="text-caption">{terminal ? 'No preview frame' : 'Waiting for a preview frame'}</span>
-        )}
+      <div>
+        {/* The result loads out of sight under the last preview, which stays until the result can be shown, and when
+            it does not load. */}
+        <div className="asset__frame job__frame">
+          {asset ? (
+            <AssetMedia
+              key={asset.sha256}
+              asset={asset}
+              controls
+              eager
+              concealed={!shown}
+              onReady={() => settle(asset.sha256, 'shown')}
+              onFail={() => settle(asset.sha256, 'failed')}
+            />
+          ) : null}
+          {shown ? null : job.preview ? (
+            <img src={job.preview} alt="Latest preview frame" />
+          ) : (
+            <span className="text-caption">{terminal ? 'No preview frame' : 'Waiting for a preview frame'}</span>
+          )}
+        </div>
+        {/* Present from the start, so the note is read when it appears. */}
+        <p className="text-caption cw-muted job__note" role="status">
+          {result?.status === 'failed' ? 'The result could not be shown here; it is in the Library.' : ''}
+        </p>
       </div>
-      {result && 'failed' in result ? <p className="text-caption cw-muted">The result could not be shown here; it is in the Library.</p> : null}
       <div>
         <div
           className="cw-progress"
