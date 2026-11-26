@@ -198,11 +198,12 @@ def test_ltx_frame_grid_from_the_registry_applies_to_clips_only():
     assert ltx_run("i2v", 120).reasons == [
         "feasibility: ltx-2.3-distilled-22b renders 17 + a multiple of 8 frames, 120 requested (nearest: 113 or 121)"
     ]
-    for capability in ("t2i", "i2i"):
-        assert ltx_run(capability, 1).feasible and ltx_run(capability, 120).feasible
-        # Beyond max_frames (737), with an fps and a duration LTX-2.3 does not offer: image mode ignores all three.
-        still = request(capability=capability, model="ltx-2.3-distilled-22b", params={"frames": 2000, "fps": 30, "duration_s": 99.0})
-        assert run(still, workers=[worker(models=served)], installed=installed, models=models).feasible
+    assert ltx_run("t2i", 1).feasible and ltx_run("t2i", 120).feasible
+    # Beyond max_frames (737), with an fps and a duration LTX-2.3 does not offer: image mode ignores all three.
+    still = request(capability="t2i", model="ltx-2.3-distilled-22b", params={"frames": 2000, "fps": 30, "duration_s": 99.0})
+    assert run(still, workers=[worker(models=served)], installed=installed, models=models).feasible
+    # LTX-2.3 cannot edit an image, so it offers no i2i.
+    assert ltx_run("i2i", 1).reasons == ["feasibility: ltx-2.3-distilled-22b does not offer i2i"]
     assert ltx_run("t2v", 745).reasons == ["feasibility: ltx-2.3-distilled-22b renders at most 737 frames, 745 requested"]
 
 

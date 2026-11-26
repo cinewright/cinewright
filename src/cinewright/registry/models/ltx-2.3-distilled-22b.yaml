@@ -12,7 +12,9 @@ vendor: Lightricks
 family: LTX-2
 # Wan2GP capabilities: text_to_video, image_to_video, text_to_image, image_to_image, audio_output (soundtrack
 # generated with the video). Wan2GP also reports video_to_video / control video, not mapped yet.
-capabilities: [t2v, i2v, t2i, i2i, audio]
+# image_to_image is not offered: LTX-2.3 is a video model, not an instruction editor. Its image mode takes an image only
+# as the Control Image for an IC-LoRA, and a test on the reference PC returned a different person with the edit ignored.
+capabilities: [t2v, i2v, t2i, audio]
 limits:
   # Wan2GP resolution choices for a 1920x1088 pixel budget, aligned to VAE block size 64, 4K presets off.
   resolutions: [

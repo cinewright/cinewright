@@ -15,9 +15,10 @@ Each job runs the quantization the core routed it to: `submit` names it in the t
 Wan2GP's own `set_override` (a checkout without it is not started), because Wan2GP otherwise loads its global
 default (`transformer_quantization`, int8). For the same reason the adapter checks files per quantization itself,
 from the Wan2GP root as `shared.api` does, instead of asking `shared.api`'s availability, which checks only the
-global default. Image jobs (t2i, i2i) on a video model run in Wan2GP's image mode. Of `params.extra` the adapter
-passes on and reports only the keys Wan2GP's validation leaves unchanged, as far as the adapter mirrors that validation
-(`_validated`, for the registry's model types at the pinned commit).
+global default. t2i jobs on a video model run in Wan2GP's image mode. i2i jobs are refused: no model type the adapter
+runs takes an image to edit in image mode. Of `params.extra` the adapter passes on and reports only the keys Wan2GP's
+validation leaves unchanged, as far as the adapter mirrors that validation (`_validated`, for the registry's model types
+at the pinned commit).
 
 Engine provisioning (`cinewright.core.provisioning`) writes `PROVISIONING_RECORD` into
 `<data dir>/engines/wan2gp/` once the engine is installed. For the checkout it describes, the adapter
@@ -89,7 +90,7 @@ _TOKEN = re.compile(r"[A-Za-z0-9._:-]{0,32}")  # "1280x720", "4s", "auto", "eule
 _MAX_TEXT_CHARS = 4000
 # Image mode renders Wan2GP's minimum frame count at 1 fps and keeps the first frame, whatever these say.
 _VIDEO_SETTINGS = frozenset({"video_length", "force_fps", "duration_seconds"})
-IMAGE_CAPABILITIES = frozenset({"t2i", "i2i"})  # jobs that return one still image
+IMAGE_CAPABILITIES = frozenset({"t2i"})  # jobs that return one still image; i2i is refused (`_input_settings`)
 # Wan2GP's `transformer_quantization_choices` at the pinned commit; `submit` reads the live list from wgp.
 TRANSFORMER_QUANTIZATIONS = ("int8", "fp8", "bf16")
 # Wan2GP's writer of the task setting `overrides` (`set_override`), which the adapter needs to select a quantization.
@@ -213,29 +214,19 @@ def _job_settings(job: EngineJob) -> dict[str, Any]:
     return settings
 
 
-def control_image_settings(path: str) -> dict[str, Any]:
-    """The settings that hand an i2i job's input image to Wan2GP's image mode (LTX-2.3 at the pinned commit).
-
-    Image mode takes one input image as its Control Image: `image_guide`, enabled by "V" in `video_prompt_type`
-    ("G" applies `denoising_strength`). shared.api infers no flag from `image_guide`, so the adapter sets them.
-    Not `image_start`: image mode hides it, and at full strength it returns the input image. Not "PVG", "DVG" or
-    "EVG": they add union-control IC-LoRAs, which Wan2GP downloads on demand and the registry does not pin. Kept in
-    this one function, so that i2i can be taken out again in one change.
-    """
-    return {"image_guide": os.path.abspath(path), "video_prompt_type": "VG"}  # generation runs from the Wan2GP root
-
-
 def _input_settings(job: EngineJob) -> dict[str, Any]:
+    if job.capability == "i2i":
+        # Image mode of the registry's models offers no image to edit at the pinned commit. LTX-2.3's only image input
+        # there is the Control Image (`image_guide`, "VG"), a raw control input meant for an IC-LoRA: a video model,
+        # not an instruction editor, it returned a different picture when tried on the reference PC.
+        message = f"The Wan2GP adapter runs no i2i job: Wan2GP's image mode takes no image to edit for {job.engine_model}."
+        raise EngineError("unsupported_input", message)
     images = [path for path in job.input_paths if media_type_for(path).startswith("image/")]
     if len(images) != len(job.input_paths):
         raise EngineError("unsupported_input", "The Wan2GP adapter accepts image inputs only.")
-    if job.capability == "i2i":
-        if len(images) != 1:
-            raise EngineError("unsupported_input", "An i2i job takes exactly one input image.")
-        return control_image_settings(images[0])
     if _image_job(job):
         if images:
-            raise EngineError("unsupported_input", "A t2i job takes no input image; send an image to edit as an i2i job.")
+            raise EngineError("unsupported_input", "A t2i job takes no input image.")
         return {}
     if len(images) > 2:
         raise EngineError("unsupported_input", "The Wan2GP adapter accepts at most two images (start and end frame).")
