@@ -787,7 +787,7 @@ class Core:
                 return  # a failed or cancelled download removes nothing for the quota
             log.error("%s", exc.message)  # registered, but WanGP does not see the store until its config is fixed
             merged = "unchanged"
-        except OSError as exc:  # only the config merge raises it, after the files were registered
+        except Exception as exc:  # noqa: BLE001 - only the config merge raises anything else, after the files were registered
             log.error("Installed %s, but writing WanGP's configuration failed (%s), so WanGP does not see it yet.", install.label, exc)
             merged = "unchanged"
         else:

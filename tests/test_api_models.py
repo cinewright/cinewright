@@ -726,6 +726,22 @@ def test_an_install_whose_wgp_config_cannot_be_written_still_ends_installed_and_
     assert store.supervisor.restarts == 1
 
 
+def test_an_unexpected_error_from_the_wgp_config_merge_still_ends_the_install_and_its_quota_step(store, monkeypatch):
+    store.write_config(OTHER_KEYS)
+
+    def broken(path: Path, store_root: Path, variant: str) -> object:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr("cinewright.core.modelstore.merge_wgp_config", broken)
+
+    state = store.install("z-image-turbo", "int8")
+
+    assert state["install_state"] == "installed" and store.placed() == Z_IMAGE_INT8_FILES
+    assert not [event for event in store.events if event.install_state == "failed"]
+    assert not store.core.models._settling  # the quota step ran, so a text encoder switch is not refused
+    assert store.supervisor.restarts == 1
+
+
 def test_wgp_config_written_by_wan2gp_after_an_install_is_merged_when_the_worker_registers(store):
     store.install("z-image-turbo", "int8")  # WanGP has not started yet: no config to merge into
     assert not store.core.models.config_path.exists() and store.supervisor.restarts == 1
