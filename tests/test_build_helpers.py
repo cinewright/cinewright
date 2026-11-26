@@ -357,7 +357,7 @@ def stop_macro_command() -> tuple[str, str]:
     nsi = build.NSI.read_text(encoding="utf-8")
     start = nsi.index("!macro STOP_RUNNING_CINEWRIGHT")
     macro = nsi[start : nsi.index("!macroend", start)]
-    return macro, re.search(r"nsExec::ExecToLog `(.*)`", macro).group(1)
+    return macro, re.search(r"nsExec::ExecToLog /TIMEOUT=\d+ `(.*)`", macro).group(1)
 
 
 @pytest.mark.parametrize(
@@ -391,6 +391,7 @@ def test_stop_macro_stops_every_process_under_the_installation_folder_and_waits(
     assert "-Command \"$ErrorActionPreference='Stop'; try{$d=" in script
     assert script.endswith("}catch{'Could not list processes: '+$_; exit 4}\"")
     assert "${If} $0 == 3" in macro and "Abort" in macro
+    assert "nsExec::ExecToLog /TIMEOUT=" in macro  # a hanging process query must not hold setup for ever
     assert "${ElseIf} $0 != 0" in macro and "Could not check whether Cinewright is running" in macro
     assert '"' not in script[script.index('-Command "') + len('-Command "') : -1]  # one quoted argument for PowerShell
 
