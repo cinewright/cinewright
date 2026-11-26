@@ -84,7 +84,15 @@ export interface paths {
         get: operations["getAsset"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Asset
+         * @description Delete an asset for good: its record, its file and the job output records of it. There is no recycle bin.
+         *
+         *     Jobs that made or used it keep their state and events but no longer list it as an output; assets made from it keep
+         *     their provenance, whose `parents` still name it. Refused with 409 while a job that has not ended (awaiting approval,
+         *     queued, leased or running) uses it as an input, and while its file stays open elsewhere, for example in a player.
+         */
+        delete: operations["deleteAsset"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2273,6 +2281,56 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+        };
+    };
+    deleteAsset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                    "application/problem+json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

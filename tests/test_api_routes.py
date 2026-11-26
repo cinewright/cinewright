@@ -113,6 +113,7 @@ def test_every_route_returns_its_declared_model_or_a_problem(client):
     idle_auth = {"Authorization": f"Bearer {idle['token']}"}
     call("POST", "/worker/heartbeat", 200, schemas.HeartbeatAck, json={"health": {"state": "ready"}}, headers=auth)
     job = call("POST", "/jobs", 202, schemas.Job, json={**job_body, "capability": "i2i", "inputs": [sha]}).json()
+    call("DELETE", "/assets/{sha256}", 409, path=f"/assets/{sha}")  # the queued job's input
     call("GET", "/jobs", 200, schemas.JobList)
     call("GET", "/jobs/{job_id}", 200, schemas.Job, path=f"/jobs/{job['id']}")
     call("GET", "/jobs/{job_id}", 404, path="/jobs/unknown")
@@ -142,6 +143,8 @@ def test_every_route_returns_its_declared_model_or_a_problem(client):
     completion = {"lease_id": lease["lease_id"], "outputs": [{"sha256": output["sha256"], "media_type": "image/png", "name": "out.png"}]}
     call("POST", "/worker/jobs/{job_id}/complete", 204, path=f"/worker/jobs/{job['id']}/complete", json=completion, headers=auth)
     call("POST", "/jobs/{job_id}/cancel", 409, path=f"/jobs/{job['id']}/cancel")
+    call("DELETE", "/assets/{sha256}", 204, path=f"/assets/{sha}")  # its job ended
+    call("DELETE", "/assets/{sha256}", 404, path=f"/assets/{sha}")
 
     second = call("POST", "/jobs", 202, schemas.Job, json=job_body).json()
     call("POST", "/jobs/{job_id}/cancel", 200, schemas.Job, path=f"/jobs/{second['id']}/cancel")

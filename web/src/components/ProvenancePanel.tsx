@@ -1,6 +1,7 @@
 // An asset's provenance record with sidecar JSON export (design/components/ProvenancePanel).
 // The design's fields come first in the specification's order; the rows after Parents are additions of this app.
-// Missing values stay "–" so records remain comparable. Shortened hashes and ids have a copy button (CopyValue).
+// Missing values stay "–" so records remain comparable. Shortened hashes and ids have a copy button (CopyValue); a
+// parent asset that was deleted keeps its hash, marked as deleted.
 
 import { Download } from 'lucide-react';
 import { Fragment, type ReactElement, type ReactNode } from 'react';
@@ -8,6 +9,8 @@ import { Fragment, type ReactElement, type ReactNode } from 'react';
 import { assetProvenanceUrl, type Provenance } from '../api/client';
 import { DASH, formatTimestamp, fullHash, shortHash, truncateMiddle } from '../lib/format';
 import { CopyValue } from './CopyValue';
+
+const NONE: ReadonlySet<string> = new Set();
 
 interface Row {
   label: string;
@@ -26,13 +29,13 @@ function ModelHashes({ hashes }: { hashes: string[] }) {
   return <CopyValue text={`${shortHash(first)} +${hashes.length - 1}`} value={value} label={label} tooltip={`${label}, one per line`} />;
 }
 
-function Parents({ parents }: { parents: string[] }) {
+function Parents({ parents, deleted }: { parents: string[]; deleted: ReadonlySet<string> }) {
   return (
     <span className="copy-values">
       {parents.map((parent, index) => (
         <CopyValue
           key={index} // the same asset may be a parent twice
-          text={shortHash(parent)}
+          text={shortHash(parent) + (deleted.has(parent) ? ' (deleted)' : '')}
           value={fullHash(parent)}
           label={parents.length > 1 ? `Copy parent hash ${index + 1} of ${parents.length}` : 'Copy parent hash'}
         />
@@ -54,7 +57,7 @@ function parameters(params: Provenance['params']): string {
   return parts.filter(Boolean).join(' · ') || DASH;
 }
 
-function rows(p: Provenance): Row[] {
+function rows(p: Provenance, deletedParents: ReadonlySet<string>): Row[] {
   const model = p.model;
   const modelHashes = model?.file_sha256 ?? [];
   const parents = p.parents ?? [];
@@ -76,7 +79,7 @@ function rows(p: Provenance): Row[] {
     { label: 'Timestamp', value: formatTimestamp(p.created_at) },
     {
       label: 'Parents',
-      value: parents.length > 0 ? <Parents parents={parents} /> : DASH,
+      value: parents.length > 0 ? <Parents parents={parents} deleted={deletedParents} /> : DASH,
       hash: parents.length > 0,
     },
     { label: 'Parameters', value: parameters(p.params) },
@@ -86,7 +89,16 @@ function rows(p: Provenance): Row[] {
   ];
 }
 
-export function ProvenancePanel({ provenance, children }: { provenance: Provenance; children?: ReactNode }) {
+export function ProvenancePanel({
+  provenance,
+  deletedParents = NONE,
+  children,
+}: {
+  provenance: Provenance;
+  /** Parent assets known to be deleted; their hashes stay in the Parents row, marked as deleted. */
+  deletedParents?: ReadonlySet<string>;
+  children?: ReactNode;
+}) {
   return (
     <section className="cw-prov" aria-label="Provenance">
       <div className="cw-prov__head">
@@ -98,7 +110,7 @@ export function ProvenancePanel({ provenance, children }: { provenance: Provenan
       </div>
       {children}
       <dl className="cw-prov__body">
-        {rows(provenance).map((row) => {
+        {rows(provenance, deletedParents).map((row) => {
           const text = typeof row.value === 'string' ? row.value : null;
           const classes = [row.hash ? 'is-hash' : null, text === null ? 'has-copy' : null].filter(Boolean).join(' ');
           return (
