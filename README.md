@@ -13,7 +13,7 @@ Cinewright is a platform for generating images, video and audio on your own comp
 - **Core and internal API.** The core serves the API under `/api/v1` on `127.0.0.1:8737`. Its contract is [`openapi.json`](openapi.json). The core keeps jobs, events, asset records and settings in SQLite, and stores asset files by their SHA-256.
 - **Hardware detection.** At start, and on request from the Setup view, the core reads the NVIDIA GPUs (through `nvidia-smi`), the driver, RAM and free disk space.
 - **Web UI shell.** It has Setup, Generate, Queue, Library, Hosts, Models and Settings views, plus placeholders for Cast, Recipes and Presets. Fonts and icons ship with the UI, so it makes no third-party requests.
-- **Generate view.** It uploads a start image for image-to-video jobs and offers the resolutions, frame counts and frame rates of the pinned model or of the model the router picks. After you submit, it shows the job's progress and preview frames, then the finished image or clip, and opens the result in the Library with its provenance record. The owner has run it with LTX-2 on the reference PC; the finished image or clip in the Job panel has not been checked there yet.
+- **Generate view.** It uploads a start image for image-to-video jobs and offers the resolutions, frame counts and frame rates of the pinned model or of the model the router picks. After you submit, it shows the job's progress and preview frames, then the finished image or clip, and opens the result in the Library with its provenance record, where you can also delete images and clips you do not want. The owner has run it with LTX-2 on the reference PC; the finished image or clip in the Job panel has not been checked there yet.
 - **MCP server.** It runs over streamable HTTP at `/mcp` and offers seven tools.
 - **Model registry.** It has descriptors for Z-Image Turbo 6B, LTX-2 2.3 Distilled 22B, and Wan 2.2 Image-to-Video and Text-to-Video 14B. Every model file is pinned by SHA-256, including the text encoders, VAEs, upscalers, tokenizer and config files WanGP needs next to the model.
 - **Windows installer.** `scripts/build.py` builds it.
@@ -220,6 +220,23 @@ While Cinewright runs, with at least one model installed:
 7. The Job panel shows the progress and the latest preview frame. Preview frames are small, so when the job is done the panel shows the finished image, or the clip in a player, as soon as it has loaded. The panel scales it down to fit; the Library shows it larger. The clip does not start by itself and plays muted until you turn the sound on. If the result cannot be loaded, the panel keeps the last preview frame and says that the result is in the Library. It tries again when the connection to the core comes back. If the job fails, the panel shows the full cause. When the job is done, choose **Open in Library**. The Library opens with the result selected and shows its provenance: model, seed and parameters (resolution, frames, fps, steps, guidance). A still image shows no frames or fps.
 
 If a change makes the router pick another model, for example a different data class, the fields switch to that model's choices. A resolution or frame rate it does not offer goes back to the model default, and the frame count moves to its grid. Any link of the form `http://127.0.0.1:8737/#/library/<sha256>` opens the Library with that asset selected. Selecting another asset changes the address to that asset's link, so you can copy it.
+
+### Delete an image or clip from the Library
+
+While Cinewright runs:
+
+1. Open **Library** and select the image or clip.
+2. Choose **Delete**. A dialog says how large the file is and what stays.
+3. Confirm with **Delete image** (or **Delete clip**). The asset leaves the Library, nothing is selected any more, and its file is deleted from the disk. **Cancel** keeps it.
+
+Deleting cannot be undone; there is no recycle bin. Jobs that made or used the asset keep their history but no longer list it as an output. An asset made from it keeps its provenance, and its **Parents** row marks the deleted asset as `(deleted)`.
+
+Deleting is refused with a message, and nothing is deleted, in two cases:
+
+- A job that has not ended yet (waiting for approval, queued, starting or running) uses the asset as its input image. Delete it once that job has ended or after you cancel it.
+- Its file is still open, for example as a clip playing in another browser tab. Close it and try again.
+
+Through the API, `curl -X DELETE http://127.0.0.1:8737/api/v1/assets/<sha256>` deletes an asset. The answer is `204`, `404` for an unknown asset, or `409` with a message that says why it was not deleted and what to do. AI agents cannot delete assets: the MCP server has no tool for it.
 
 ### Switch the text encoder variant
 

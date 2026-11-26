@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -72,7 +72,8 @@ JOB_COLUMNS = frozenset(
 class Tx:
     """A write transaction: the connection, its timestamp and the events to publish after commit.
 
-    `emit` stores an event in `job_events`; `broadcast` publishes one to live subscribers only.
+    `emit` stores an event in `job_events`; `broadcast` publishes one to live subscribers only. `unsuccessful` lists the
+    jobs that failed or were cancelled in it, whose uploads the core drops before commit.
     """
 
     conn: sqlite3.Connection
@@ -80,6 +81,7 @@ class Tx:
     emit: Emit
     broadcast: Emit
     wake_workers: bool = False
+    unsuccessful: list[str] = field(default_factory=list)
 
 
 def transition(tx: Tx, job_id: str, state: JobState, data: dict[str, Any] | None = None, **columns: Any) -> None:
@@ -96,6 +98,8 @@ def transition(tx: Tx, job_id: str, state: JobState, data: dict[str, Any] | None
     tx.emit(job_id, EventKind.STATE, {"state": state.value, **(data or {})})
     if state == JobState.QUEUED:
         tx.wake_workers = True
+    if state in (JobState.FAILED, JobState.CANCELLED):
+        tx.unsuccessful.append(job_id)
 
 
 class Scheduler:
