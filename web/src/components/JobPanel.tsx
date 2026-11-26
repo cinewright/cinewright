@@ -1,12 +1,15 @@
-// The job Generate submitted: progress and preview frames from the app's event stream, and a link that
-// opens each output in the Library (#/library/<sha256>) once the job succeeded.
+// The job Generate submitted: progress and preview frames from the app's event stream, then the finished result in
+// place of the last preview, and a link that opens each output in the Library (#/library/<sha256>) once the job
+// succeeded.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   UPLOAD_IMAGE_TYPES,
   api,
+  isAbort,
   isSha256,
+  type Asset,
   type Job,
   type JobError,
   type JobEvent,
@@ -15,6 +18,7 @@ import {
 } from '../api/client';
 import { useEventsConnected, useJobEvents } from '../api/events';
 import { truncateMiddle } from '../lib/format';
+import { AssetMedia } from './AssetMedia';
 import { ErrorBanner } from './Feedback';
 
 const JOB_STATES = {
@@ -221,6 +225,30 @@ export function jobAnnouncement(job: TrackedJob): string {
   }
 }
 
+type ResultLookup = { sha256: string; asset: Asset } | { sha256: string; failed: true };
+
+/**
+ * The asset record of a succeeded job's first output, for its media type: the asset, `failed` when the lookup failed,
+ * or null while it loads and when there is no output. Keyed by the output, so a later job never shows an older result.
+ */
+function useResult(sha256: string | null): ResultLookup | null {
+  const [lookup, setLookup] = useState<ResultLookup | null>(null);
+  useEffect(() => {
+    if (!sha256) return;
+    const controller = new AbortController();
+    api
+      .asset(sha256, controller.signal)
+      .then((asset) => {
+        if (!controller.signal.aborted) setLookup({ sha256, asset });
+      })
+      .catch((error: unknown) => {
+        if (!isAbort(error) && !controller.signal.aborted) setLookup({ sha256, failed: true });
+      });
+    return () => controller.abort();
+  }, [sha256]);
+  return lookup && lookup.sha256 === sha256 ? lookup : null;
+}
+
 export function JobPanel({ job }: { job: TrackedJob }) {
   const terminal = TERMINAL.has(job.state);
   const value = job.state === 'succeeded' ? 100 : Math.round(job.progress?.percent ?? 0);
@@ -228,6 +256,9 @@ export function JobPanel({ job }: { job: TrackedJob }) {
   const waiting = job.state === 'queued' || job.state === 'awaiting_approval';
   const failed = job.state === 'failed' || job.state === 'cancelled';
   const outputs = job.state === 'succeeded' ? job.outputs : [];
+  // Outputs of a loaded job arrive unchecked; only an asset id builds a path.
+  const first = outputs[0];
+  const result = useResult(isSha256(first) ? first : null);
   return (
     <section className="panel stack" aria-labelledby="job-title">
       <div className="panel__head">
@@ -238,13 +269,17 @@ export function JobPanel({ job }: { job: TrackedJob }) {
           {truncateMiddle(job.id)}
         </span>
       </div>
+      {/* The last preview stays while the result loads, and when it does not load. */}
       <div className="asset__frame">
-        {job.preview ? (
+        {result && 'asset' in result ? (
+          <AssetMedia asset={result.asset} controls />
+        ) : job.preview ? (
           <img src={job.preview} alt="Latest preview frame" />
         ) : (
           <span className="text-caption">{terminal ? 'No preview frame' : 'Waiting for a preview frame'}</span>
         )}
       </div>
+      {result && 'failed' in result ? <p className="text-caption cw-muted">The result could not be shown here; it is in the Library.</p> : null}
       <div>
         <div
           className="cw-progress"

@@ -131,6 +131,22 @@ const INPUT: Asset = {
   provenance: { schema: 'cinewright.provenance/1', asset: { sha256: INPUT_SHA, media_type: 'image/png', size_bytes: 2048 }, created_at: CREATED },
 };
 
+/** The job's output as GET /assets/{sha256} answers it. */
+function output(mediaType: string): Asset {
+  return {
+    sha256: OUTPUT_SHA,
+    media_type: mediaType,
+    size_bytes: 4096,
+    data_class: 'private',
+    job_id: JOB_ID,
+    created_at: CREATED,
+    provenance: { schema: 'cinewright.provenance/1', asset: { sha256: OUTPUT_SHA, media_type: mediaType, size_bytes: 4096 }, created_at: CREATED },
+  };
+}
+const OUTPUT_URL = `/api/v1/assets/${OUTPUT_SHA}/content`;
+/** The accessible name the Library and the Job panel give an asset's media. */
+const outputLabel = (mediaType: string) => `${mediaType} ${OUTPUT_SHA.slice(0, 8)}`;
+
 function job(request: JobRequest): Job {
   return { id: JOB_ID, state: 'queued', request, client: 'ui', created_at: CREATED, outputs: [] };
 }
@@ -207,13 +223,14 @@ async function settled(calls: ApiCall[], quietMs = 600): Promise<number> {
 }
 
 describe('GenerateView', () => {
-  it('uploads a start image, submits the job, shows its progress and preview frames, and links the output into the Library', async () => {
+  it('uploads a start image, submits the job, shows its progress, preview frames and result, and links the output into the Library', async () => {
     const holder: { source?: () => FakeEventSource } = {};
     const { calls, source } = renderView({
       'GET /api/v1/capabilities': () => ({ items: [entry('i2v', LTX, LTX_NAME, LTX_LIMITS)] }),
       'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['i2v'])] }),
       'POST /api/v1/estimate': () => feasible(LTX),
       'POST /api/v1/assets': () => INPUT,
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('image/jpeg'),
       'POST /api/v1/jobs': (body) => {
         // The worker reports before the submit answer arrives; the view must not lose this event.
         holder.source?.().emit('state', event('state', 2, { state: 'leased', worker_id: 'worker-1' }));
@@ -285,6 +302,15 @@ describe('GenerateView', () => {
     expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
     expect(statusTexts()).toContain('Job done');
+
+    // The finished image, as the Library shows it, takes the place of the last low-resolution preview frame.
+    const result = await within(panel).findByRole('img', { name: outputLabel('image/jpeg') });
+    expect(result.getAttribute('src')).toBe(OUTPUT_URL);
+    expect(within(panel).queryByRole('img', { name: 'Latest preview frame' })).toBeNull();
+    expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    expect(calls.filter((call) => call.method === 'GET' && call.path.startsWith('/api/v1/assets/')).map((call) => call.path)).toStrictEqual([
+      `/api/v1/assets/${OUTPUT_SHA}`,
+    ]);
   });
 
   it('uploads the input image again when a stricter data class is chosen, also while its first upload runs', async () => {
@@ -365,22 +391,27 @@ describe('GenerateView', () => {
     expect(screen.getByRole('button', { name: 'Add a start image' })).toBeTruthy();
   });
 
-  it('shows the full cause of a failed job and offers no Library link', async () => {
-    const { source } = renderView({
+  it('shows the full cause of a failed job and offers neither a result nor a Library link', async () => {
+    const { calls, source } = renderView({
       'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
       'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
       'POST /api/v1/estimate': () => feasible(LTX),
       'POST /api/v1/jobs': (body) => job(body as JobRequest),
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('image/png'),
     });
     await screen.findByRole('option', { name: LTX_NAME });
     enterPrompt();
     fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
     const panel = await screen.findByRole('region', { name: 'Job' });
     expect(statusTexts()).toContain('Job queued');
+    act(() => source().emit('preview', event('preview', 1, { media_type: 'image/jpeg', data_base64: '/9j/4AAQ' })));
 
     const message =
       'Out of memory at step 3 of 8 (denoise). Wan2GP: torch.OutOfMemoryError: CUDA out of memory, unsufficient VRAM for 1280x704 at 241 frames.';
-    act(() => source().emit('state', event('state', 2, { state: 'failed', error: { code: 'out_of_memory', message, retryable: false } })));
+    // Even with an output named, a failed job shows no result: the last preview frame stays and no asset is looked up.
+    act(() =>
+      source().emit('state', event('state', 2, { state: 'failed', error: { code: 'out_of_memory', message, retryable: false }, outputs: [OUTPUT_SHA] })),
+    );
     const alert = within(panel).getByRole('alert');
     expect(within(alert).getByText('The job failed')).toBeTruthy();
     expect(within(alert).getByText(message)).toBeTruthy();
@@ -388,6 +419,67 @@ describe('GenerateView', () => {
     expect(bar.getAttribute('aria-label')).toBe('Failed');
     expect(bar.getAttribute('data-state')).toBe('fail');
     expect(within(panel).queryByRole('link', { name: /Library/ })).toBeNull();
+    expect(within(panel).getByRole('img', { name: 'Latest preview frame' }).getAttribute('src')).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(within(panel).queryByRole('img', { name: outputLabel('image/png') })).toBeNull();
+    expect(calls.some((call) => call.path.startsWith('/api/v1/assets/'))).toBe(false);
+  });
+
+  /** Submit a t2v job that runs and sends a preview frame; `routes` join the routes the form needs. */
+  async function submitWithPreview(routes: Routes) {
+    const { calls, source } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [entry('t2v', LTX, LTX_NAME, LTX_LIMITS)] }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+      'POST /api/v1/jobs': (body) => job(body as JobRequest),
+      ...routes,
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    enterPrompt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }));
+    const panel = await screen.findByRole('region', { name: 'Job' });
+    act(() => source().emit('state', event('state', 2, { state: 'running' })));
+    act(() => source().emit('preview', event('preview', 2, { media_type: 'image/jpeg', data_base64: '/9j/4AAQ' })));
+    const preview = () => within(panel).queryByRole('img', { name: 'Latest preview frame' })?.getAttribute('src') ?? null;
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    return { calls, source, panel, preview };
+  }
+
+  it('shows a finished clip as a muted player with controls that does not start by itself, once its asset has loaded', async () => {
+    let answer: ((asset: Asset) => void) | undefined;
+    const { source, panel, preview } = await submitWithPreview({
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => new Promise<Asset>((resolve) => (answer = resolve)),
+    });
+
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    await waitFor(() => expect(answer).toBeDefined());
+    // The media type comes from the asset record; until it arrives the last preview frame stays.
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+
+    act(() => answer?.(output('video/mp4')));
+    const clip = await within(panel).findByLabelText(outputLabel('video/mp4'));
+    if (!(clip instanceof HTMLVideoElement)) throw new Error(`The result is a ${clip.tagName}, not a video`);
+    expect(clip.getAttribute('src')).toBe(OUTPUT_URL);
+    expect(clip.controls).toBe(true);
+    expect(clip.muted).toBe(true);
+    expect(clip.autoplay).toBe(false);
+    expect(preview()).toBeNull();
+    expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+  });
+
+  it('keeps the last preview frame and points to the Library when the result does not load', async () => {
+    const { calls, source, panel, preview } = await submitWithPreview({
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => new ProblemAnswer(500, 'Internal Server Error', 'The asset store could not be read.'),
+    });
+
+    act(() => source().emit('state', event('state', 3, { state: 'succeeded', outputs: [OUTPUT_SHA] })));
+    expect(await within(panel).findByText('The result could not be shown here; it is in the Library.')).toBeTruthy();
+    expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/assets/${OUTPUT_SHA}`)).toHaveLength(1);
+    expect(preview()).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(panel.querySelector('video')).toBeNull();
+    expect(within(panel).getByRole('link', { name: 'Open in Library' }).getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
+    // The job itself succeeded, so nothing reads as a failure.
+    expect(within(panel).queryByRole('alert')).toBeNull();
+    expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
   });
 
   it('loads the job again when the stream reopens, as a new stream replays nothing', async () => {
@@ -398,6 +490,7 @@ describe('GenerateView', () => {
       'POST /api/v1/estimate': () => feasible(LTX),
       'POST /api/v1/jobs': (body) => (submitted = job(body as JobRequest)),
       [`GET /api/v1/jobs/${JOB_ID}`]: () => ({ ...submitted, state: 'succeeded', outputs: [OUTPUT_SHA] }),
+      [`GET /api/v1/assets/${OUTPUT_SHA}`]: () => output('video/mp4'),
     });
     await screen.findByRole('option', { name: LTX_NAME });
     enterPrompt();
@@ -412,6 +505,8 @@ describe('GenerateView', () => {
     expect(link.getAttribute('href')).toBe(`#/library/${OUTPUT_SHA}`);
     expect(within(panel).getByRole('progressbar').getAttribute('aria-label')).toBe('Done');
     expect(calls.filter((call) => call.method === 'GET' && call.path === `/api/v1/jobs/${JOB_ID}`)).toHaveLength(1);
+    // A job that finished while the stream was down shows its result too.
+    expect((await within(panel).findByLabelText(outputLabel('video/mp4'))).getAttribute('src')).toBe(OUTPUT_URL);
   });
 
   /** Submit a t2v job; the stream then drops and opens again while the reload of the job waits for `reload`. */
