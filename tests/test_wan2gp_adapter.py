@@ -1,14 +1,14 @@
 """Wan2GP adapter against a fake `shared.api` session and a fake `wgp` module (no Wan2GP, no GPU), plus an optional
 live probe.
 
-The fakes follow the pinned commit where the adapter depends on it: Wan2GP's default settings carry the keys only the
-adapter sets (`overrides`, `image_mode`, `image_guide`, `video_prompt_type`) and every key of the `params.extra`
-allowlist, with the values of models/_settings.json and the handlers; a submitted task is validated as validate_task does
-for what the adapter depends on (`validate`); `shared.utils.generation_overrides` writes and reads `overrides` as Wan2GP's
-does; `wgp` picks file names per quantization and dtype policy as `get_model_filename` does and finds files only
-relative to the working directory, through the checkpoint roots `ckpts` and `.`, so a lookup outside the Wan2GP root
-finds nothing; its global quantization is int8, and the session's own availability (`get_model_availability`) checks
-only that one.
+The fakes follow the pinned commit where the adapter depends on it: Wan2GP's default settings carry the keys
+`params.extra` must not set (`overrides`, `image_mode`, `image_guide`, `video_prompt_type`, `image_prompt_type`) and
+every key of the `params.extra` allowlist, with the values of models/_settings.json and the handlers; a submitted task
+is validated as validate_task does for what the adapter depends on (`validate`); `shared.utils.generation_overrides`
+writes and reads `overrides` as Wan2GP's does; `wgp` picks file names per quantization and dtype policy as
+`get_model_filename` does and finds files only relative to the working directory, through the checkpoint roots `ckpts`
+and `.`, so a lookup outside the Wan2GP root finds nothing; its global quantization is int8, and the session's own
+availability (`get_model_availability`) checks only that one.
 
 The live probe runs only when CINEWRIGHT_WAN2GP_ROOT (a Wan2GP checkout) and CINEWRIGHT_WAN2GP_PYTHON
 (its Python) are set and CINEWRIGHT_GPU_TESTS=1 (marker `gpu`). It imports the adapter in that interpreter and calls capabilities() and
@@ -85,7 +85,7 @@ DEFAULTS = {
     "output_filename": "",
     "image_start": None,
     "image_end": None,
-    # Settings only the adapter sets, with the values of models/_settings.json at the pinned commit.
+    # Settings params.extra must not set, with the values of models/_settings.json at the pinned commit.
     "overrides": "",
     "image_mode": 0,
     "image_prompt_type": "",
@@ -1044,24 +1044,27 @@ def test_image_mode_is_set_only_where_wan2gp_defaults_to_video(tmp_path, default
     assert build_settings({**DEFAULTS, "image_mode": default}, make_job(tmp_path))["image_mode"] == default  # i2v
 
 
-def test_an_i2i_job_hands_its_image_to_wan2gp_as_the_control_image(fake_api, tmp_path, monkeypatch):
+@pytest.mark.parametrize("inputs", [(), ("in.png",), ("in.png", "end.png")])
+def test_an_i2i_job_is_refused_before_it_reaches_wan2gp(fake_api, tmp_path, inputs):
+    # LTX-2.3's image mode takes an image only as an IC-LoRA's Control Image, which does not edit it; without an image,
+    # the job must not run as t2i either.
     adapter = checkout(tmp_path, ("ltx2_22B_distilled", "bf16"))
-    (tmp_path / "in.png").write_bytes(render_png(5, 4, 4))
-    monkeypatch.chdir(tmp_path)  # a relative input path; Wan2GP generates from its own root
-    job = make_job(tmp_path / "job", "ltx2_22B_distilled", ("in.png",), capability="i2i", extra={"denoising_strength": 0.6})
+    for name in inputs:
+        (tmp_path / name).write_bytes(render_png(5, 4, 4))
+    job = make_job(tmp_path / "job", "ltx2_22B_distilled", tuple(str(tmp_path / name) for name in inputs), capability="i2i")
 
-    engine_job_id = adapter.submit(job)
+    with pytest.raises(EngineError) as raised:
+        adapter.submit(job)
 
-    settings, _ = fake_api[0].submitted[0]  # the fake drops image_guide unless "V" enables it, as Wan2GP does
-    assert (settings["image_mode"], settings["image_guide"], settings["video_prompt_type"]) == (1, str(tmp_path / "in.png"), "VG")
-    assert settings["image_start"] is None and "S" not in settings["image_prompt_type"]
-    assert settings["denoising_strength"] == 0.6
-    assert adapter.status(engine_job_id).accepted_extra == ("denoising_strength",)
+    assert raised.value.code == "unsupported_input"
+    assert "no i2i job" in str(raised.value) and "ltx2_22B_distilled" in str(raised.value)
+    assert fake_api[0].submitted == []
+    with pytest.raises(EngineError):
+        accepted_extra(dict(DEFAULTS), job)
 
 
-@pytest.mark.parametrize(("capability", "inputs"), [("i2i", ()), ("i2i", ("a.png", "b.png")), ("t2i", ("a.png",))])
-def test_image_jobs_take_the_inputs_their_capability_names(tmp_path, capability, inputs):
-    job = make_job(tmp_path, "ltx2_22B_distilled", tuple(str(tmp_path / name) for name in inputs), capability=capability)
+def test_a_t2i_job_takes_no_input_image(tmp_path):
+    job = make_job(tmp_path, "ltx2_22B_distilled", (str(tmp_path / "a.png"),), capability="t2i")
     with pytest.raises(EngineError) as raised:
         build_settings(dict(DEFAULTS), job)
     assert raised.value.code == "unsupported_input"
@@ -1091,7 +1094,7 @@ ADAPTER_SETTINGS = {
 }
 
 
-def test_extra_cannot_set_the_settings_only_the_adapter_sets(tmp_path, caplog):
+def test_extra_cannot_set_the_settings_the_adapter_or_wan2gp_decides(tmp_path, caplog):
     caplog.set_level(logging.WARNING, logger="cinewright_worker")
     image_job = make_job(tmp_path, "ltx2_22B_distilled", capability="t2i", quant="int8", extra={**ADAPTER_SETTINGS, "flow_shift": 3.0})
     settings = build_settings(dict(DEFAULTS), image_job)

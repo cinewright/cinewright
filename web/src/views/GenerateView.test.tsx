@@ -913,4 +913,37 @@ describe('GenerateView', () => {
     await waitFor(() => expect(estimates(calls).at(-1)?.params).toStrictEqual({ seed: null, resolution: '832x448' }));
     expect(await screen.findByRole('button', { name: 'Generate' })).toBeTruthy();
   });
+
+  it('offers only the capabilities a model offers, so no i2i while LTX-2 makes clips and stills only', async () => {
+    renderView({
+      'GET /api/v1/capabilities': () => ({
+        items: [entry('t2i', LTX, LTX_NAME, LTX_LIMITS), entry('t2v', LTX, LTX_NAME, LTX_LIMITS), entry('i2v', LTX, LTX_NAME, LTX_LIMITS)],
+      }),
+      'GET /api/v1/models': () => ({ items: [model(LTX, LTX_NAME, ['t2v', 'i2v', 't2i'])] }),
+      'POST /api/v1/estimate': () => feasible(LTX),
+    });
+    await screen.findByRole('option', { name: LTX_NAME });
+    expect(optionTexts('Capability')).toStrictEqual(['t2i', 't2v', 'i2v']);
+  });
+
+  it('answers an i2i request no model offers with the usual reason, not an error', async () => {
+    // With no capability listed the view offers every capability, i2i included; the core finds no model for it.
+    const NO_MODEL: Estimate = { feasible: false, requires_approval: false, cost_eur: 0, reasons: ['feasibility: no registry model offers i2i'] };
+    const { calls } = renderView({
+      'GET /api/v1/capabilities': () => ({ items: [] }),
+      'GET /api/v1/models': () => ({ items: [] }),
+      'POST /api/v1/estimate': () => NO_MODEL,
+      'POST /api/v1/assets': () => INPUT,
+    });
+    await waitFor(() => expect(optionTexts('Capability')).toContain('i2i'));
+    fireEvent.change(select('Capability'), { target: { value: 'i2i' } });
+    enterPrompt();
+    await screen.findByRole('button', { name: 'Add an input image' });
+    fireEvent.change(screen.getByLabelText('Input image file'), { target: { files: [new File([new Uint8Array([137, 80, 78, 71])], 'in.png', { type: 'image/png' })] } });
+
+    expect(await screen.findByRole('button', { name: 'No model can run this request' })).toBeTruthy();
+    expect(estimates(calls).at(-1)).toMatchObject({ capability: 'i2i', model: null, inputs: [INPUT_SHA] });
+    expect(screen.getByText('feasibility: no registry model offers i2i')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 });
