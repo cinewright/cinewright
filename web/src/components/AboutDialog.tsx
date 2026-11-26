@@ -7,6 +7,7 @@ import { api } from '../api/client';
 import { CINEWRIGHT_LICENSE, WANGP_LICENSE_URL, WANGP_NOTICE } from '../lib/notices';
 import { DASH, truncateMiddle } from '../lib/format';
 import { useApi } from '../lib/useApi';
+import { CopyValue } from './CopyValue';
 import { ErrorBanner } from './Feedback';
 
 const ENGINE_STATE = {
@@ -70,7 +71,15 @@ function EngineRow({ name, version, state }: { name: string; version: string | n
   return (
     <>
       <dt>{name}</dt>
-      <dd title={version ?? undefined}>{[version ? truncateMiddle(version) : null, state].filter(Boolean).join(' · ')}</dd>
+      <dd className={version ? 'has-copy' : undefined}>
+        {version ? (
+          <>
+            <CopyValue text={truncateMiddle(version)} value={version} label={`Copy ${name} version`} />
+            {' · '}
+          </>
+        ) : null}
+        {state}
+      </dd>
     </>
   );
 }

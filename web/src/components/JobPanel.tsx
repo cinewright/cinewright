@@ -19,6 +19,7 @@ import {
 import { useEventsConnected, useJobEvents } from '../api/events';
 import { truncateMiddle } from '../lib/format';
 import { AssetMedia } from './AssetMedia';
+import { CopyValue } from './CopyValue';
 import { ErrorBanner } from './Feedback';
 
 const JOB_STATES = {
@@ -291,9 +292,7 @@ export function JobPanel({ job }: { job: TrackedJob }) {
         <h2 id="job-title" className="panel__title">
           Job
         </h2>
-        <span className="text-caption cw-muted cw-mono" title={job.id}>
-          {truncateMiddle(job.id)}
-        </span>
+        <CopyValue text={truncateMiddle(job.id)} value={job.id} label="Copy job id" className="text-caption cw-muted cw-mono" />
       </div>
       <div>
         {/* The result loads out of sight under the last preview, which stays until the result can be shown, and when

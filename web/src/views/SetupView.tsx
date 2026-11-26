@@ -6,6 +6,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 
 import { api, type CalibrationResult, type EngineInfo, type HardwareProfile } from '../api/client';
 import { useEventsConnected, useSystemEvents } from '../api/events';
+import { CopyValue } from '../components/CopyValue';
 import { CapabilityChip } from '../components/DataClassTag';
 import { ErrorBanner, RetryButton } from '../components/Feedback';
 import { bestResult } from '../components/ModelCard';
@@ -25,8 +26,8 @@ function EngineStatus({ engine, onRetry, retrying }: { engine: EngineInfo; onRet
           <Light state="ok" word="Ready" />
         </dd>
         <dt>Version</dt>
-        <dd className="cw-mono" title={engine.version ?? undefined}>
-          {engine.version ? truncateMiddle(engine.version) : DASH}
+        <dd className={engine.version ? 'cw-mono has-copy' : 'cw-mono'}>
+          {engine.version ? <CopyValue text={truncateMiddle(engine.version)} value={engine.version} label={`Copy ${engine.name} version`} /> : DASH}
         </dd>
       </dl>
     );

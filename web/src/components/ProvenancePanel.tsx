@@ -1,20 +1,47 @@
 // An asset's provenance record with sidecar JSON export (design/components/ProvenancePanel).
 // The design's fields come first in the specification's order; the rows after Parents are additions of this app.
-// Missing values stay "–" so records remain comparable. A parent asset that was deleted keeps its hash, marked as deleted.
+// Missing values stay "–" so records remain comparable. Shortened hashes and ids have a copy button (CopyValue); a
+// parent asset that was deleted keeps its hash, marked as deleted.
 
 import { Download } from 'lucide-react';
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, type ReactElement, type ReactNode } from 'react';
 
 import { assetProvenanceUrl, type Provenance } from '../api/client';
 import { DASH, formatTimestamp, fullHash, shortHash, truncateMiddle } from '../lib/format';
+import { CopyValue } from './CopyValue';
 
 const NONE: ReadonlySet<string> = new Set();
 
 interface Row {
   label: string;
-  value: string;
+  /** Text with itself (or `title`) as tooltip, or shortened values that bring their own tooltip and copy button. */
+  value: string | ReactElement;
   title?: string;
   hash?: boolean;
+}
+
+/** All model files' hashes behind one button, one per line, so the files after the first are copied too. */
+function ModelHashes({ hashes }: { hashes: string[] }) {
+  const first = hashes[0] as string;
+  const value = hashes.map(fullHash).join('\n');
+  if (hashes.length === 1) return <CopyValue text={shortHash(first)} value={value} label="Copy model hash" />;
+  const label = `Copy all ${hashes.length} model hashes`;
+  return <CopyValue text={`${shortHash(first)} +${hashes.length - 1}`} value={value} label={label} tooltip={`${label}, one per line`} />;
+}
+
+function Parents({ parents, deleted }: { parents: string[]; deleted: ReadonlySet<string> }) {
+  return (
+    <span className="copy-values">
+      {parents.map((parent, index) => (
+        <CopyValue
+          key={index} // the same asset may be a parent twice
+          text={shortHash(parent) + (deleted.has(parent) ? ' (deleted)' : '')}
+          value={fullHash(parent)}
+          label={parents.length > 1 ? `Copy parent hash ${index + 1} of ${parents.length}` : 'Copy parent hash'}
+        />
+      ))}
+    </span>
+  );
 }
 
 /** Resolution, frames, fps, steps and guidance the job requested (registry defaults filled in); null for inputs. */
@@ -35,8 +62,6 @@ function rows(p: Provenance, deletedParents: ReadonlySet<string>): Row[] {
   const modelHashes = model?.file_sha256 ?? [];
   const parents = p.parents ?? [];
   const loras = p.loras ?? [];
-  const first = modelHashes[0];
-  const parent = (hash: string, format: (hex: string) => string) => format(hash) + (deletedParents.has(hash) ? ' (deleted)' : '');
   return [
     {
       label: 'Model',
@@ -44,9 +69,8 @@ function rows(p: Provenance, deletedParents: ReadonlySet<string>): Row[] {
     },
     {
       label: 'Model hash',
-      value: first ? shortHash(first) + (modelHashes.length > 1 ? ` +${modelHashes.length - 1}` : '') : DASH,
-      title: modelHashes.map(fullHash).join('\n') || undefined,
-      hash: Boolean(first),
+      value: modelHashes.length > 0 ? <ModelHashes hashes={modelHashes} /> : DASH,
+      hash: modelHashes.length > 0,
     },
     { label: 'Recipe', value: p.recipe ? `${p.recipe.id}@${p.recipe.version}` : DASH },
     { label: 'Seed', value: p.seed != null ? String(p.seed) : DASH },
@@ -55,13 +79,12 @@ function rows(p: Provenance, deletedParents: ReadonlySet<string>): Row[] {
     { label: 'Timestamp', value: formatTimestamp(p.created_at) },
     {
       label: 'Parents',
-      value: parents.map((hash) => parent(hash, shortHash)).join(' · ') || DASH,
-      title: parents.map((hash) => parent(hash, fullHash)).join('\n') || undefined,
+      value: parents.length > 0 ? <Parents parents={parents} deleted={deletedParents} /> : DASH,
       hash: parents.length > 0,
     },
     { label: 'Parameters', value: parameters(p.params) },
     { label: 'Prompt', value: p.prompt ?? DASH, title: p.prompt ?? undefined },
-    { label: 'Job', value: p.job_id ? truncateMiddle(p.job_id) : DASH, title: p.job_id ?? undefined },
+    { label: 'Job', value: p.job_id ? <CopyValue text={truncateMiddle(p.job_id)} value={p.job_id} label="Copy job id" /> : DASH },
     { label: 'Client', value: p.client ? [p.client.kind, p.client.agent].filter(Boolean).join(' · ') : DASH },
   ];
 }
@@ -87,14 +110,18 @@ export function ProvenancePanel({
       </div>
       {children}
       <dl className="cw-prov__body">
-        {rows(provenance, deletedParents).map((row) => (
-          <Fragment key={row.label}>
-            <dt>{row.label}</dt>
-            <dd className={row.hash ? 'is-hash' : undefined} title={row.title ?? row.value}>
-              {row.value}
-            </dd>
-          </Fragment>
-        ))}
+        {rows(provenance, deletedParents).map((row) => {
+          const text = typeof row.value === 'string' ? row.value : null;
+          const classes = [row.hash ? 'is-hash' : null, text === null ? 'has-copy' : null].filter(Boolean).join(' ');
+          return (
+            <Fragment key={row.label}>
+              <dt>{row.label}</dt>
+              <dd className={classes || undefined} title={text === null ? undefined : (row.title ?? text)}>
+                {row.value}
+              </dd>
+            </Fragment>
+          );
+        })}
       </dl>
     </section>
   );

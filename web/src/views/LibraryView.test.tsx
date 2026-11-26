@@ -5,6 +5,7 @@ import type { Asset } from '../api/client';
 import { EventsProvider } from '../api/events';
 import { shortHash } from '../lib/format';
 import { callSummary, ProblemAnswer, StatusAnswer, stubApi, type ApiCall, type Routes } from '../test/api';
+import { stubClipboard } from '../test/clipboard';
 import { stubEventSource } from '../test/events';
 import { LibraryView } from './LibraryView';
 
@@ -60,10 +61,20 @@ function renderAt(hash: string, routes: Routes = {}): ApiCall[] {
   return calls;
 }
 
-/** The value of `term` in the provenance panel of the selected asset. */
+/** The value of `term` in the provenance panel of the selected asset; shortened values with copy buttons joined by " · ". */
 function provenance(term: string): string | null {
   const detail = screen.getByRole('complementary', { name: 'Selected asset' });
-  return within(detail).getByText(term, { selector: 'dt' }).nextElementSibling?.textContent ?? null;
+  const value = within(detail).getByText(term, { selector: 'dt' }).nextElementSibling;
+  const copied = value ? [...value.querySelectorAll('.copy-value__text')] : [];
+  if (copied.length > 0) return copied.map((element) => element.textContent).join(' · ');
+  return value?.textContent ?? null;
+}
+
+/** The Library's own live region (each copy button has one of its own). */
+function libraryStatus(): HTMLElement {
+  const element = document.querySelector<HTMLElement>('p.sr-only[role="status"]');
+  if (!element) throw new Error('The Library has no live region');
+  return element;
 }
 
 /** The asset card that shows `timestamp` (the provenance panel may show it too). */
@@ -122,6 +133,19 @@ describe('LibraryView', () => {
     const pressed = screen.getAllByRole('button', { pressed: true });
     expect(pressed).toHaveLength(1);
     expect(within(pressed[0] as HTMLElement).getByText('2026-11-01T08:00:00Z')).toBeTruthy();
+  });
+
+  it("copies the selected asset's full hash with the icon beside it", async () => {
+    const writes = stubClipboard();
+    renderAt(`#/library/${LINKED_SHA}`);
+
+    const detail = await screen.findByRole('complementary', { name: 'Selected asset' });
+    const button = await within(detail).findByRole('button', { name: 'Copy asset hash' });
+    expect(button.textContent).toBe(''); // the icon replaced the "Copy hash" text
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(writes).toEqual([`sha256:${LINKED_SHA}`]);
   });
 
   it('selects a linked asset from the first page without loading it again', async () => {
@@ -255,7 +279,7 @@ describe('LibraryView', () => {
     expect(() => card('2026-11-25T12:00:00Z')).not.toThrow();
     expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
     expect(window.location.hash).toBe('#/library');
-    expect(screen.getByRole('status').textContent).toBe('The clip was deleted.');
+    expect(libraryStatus().textContent).toBe('The clip was deleted.');
     expect(screen.queryByRole('alert')).toBeNull();
     // Both players of the clip, the card's and the panel's, dropped their source, which stops their downloads.
     expect(load).toHaveBeenCalledTimes(2);
@@ -329,7 +353,7 @@ describe('LibraryView', () => {
     expect(deletes(calls)).toHaveLength(1);
     expect(() => card('2026-11-24T12:00:00Z')).toThrow();
     expect(window.location.hash).toBe('#/library');
-    expect(screen.getByRole('status').textContent).toBe('The clip was deleted.');
+    expect(libraryStatus().textContent).toBe('The clip was deleted.');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
@@ -348,7 +372,7 @@ describe('LibraryView', () => {
 
     await screen.findByText('Select an asset to see its provenance.');
     expect(() => card('2026-11-26T09:00:00Z')).toThrow();
-    expect(screen.getByRole('status').textContent).toBe('The image was deleted.');
+    expect(libraryStatus().textContent).toBe('The image was deleted.');
   });
 
   it('announces each deletion, and keeps Load more once every loaded asset is deleted', async () => {
@@ -357,7 +381,7 @@ describe('LibraryView', () => {
       [`DELETE /api/v1/assets/${NEW_SHA}`]: () => new StatusAnswer(204),
     });
     await waitFor(() => expect(pressedTimestamps()).toStrictEqual(['2026-11-24T12:00:00Z']));
-    const status = screen.getByRole('status');
+    const status = libraryStatus();
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete this clip?' })).getByRole('button', { name: 'Delete clip' }));
