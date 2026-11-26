@@ -337,6 +337,66 @@ def test_uninstaller_checks_the_registered_install_location_before_any_delete():
     assert guard < min(section.index("RMDir"), section.index("Delete "), section.index("Rename"), section.index("RMDIR_TREE"))
 
 
+# A running Cinewright is closed first (#106)
+
+FILE_OPERATION = re.compile(
+    r"^\s*(File|Delete|RMDir|Rename|SetOutPath|WriteUninstaller|CopyFiles|CreateDirectory|!insertmacro RMDIR_TREE)\b"
+)
+
+
+def nsi_section_lines(name: str) -> list[str]:
+    """The lines of `Section "<name>"` up to its SectionEnd, without comments and blank lines."""
+    nsi = build.NSI.read_text(encoding="utf-8")
+    start = nsi.index(f'Section "{name}"')
+    lines = nsi[start : nsi.index("SectionEnd", start)].splitlines()
+    return [line for line in lines if line.strip() and not line.lstrip().startswith((";", "#"))]
+
+
+def stop_macro_command() -> tuple[str, str]:
+    """The STOP_RUNNING_CINEWRIGHT macro and the command line its nsExec call runs, as NSIS writes it."""
+    nsi = build.NSI.read_text(encoding="utf-8")
+    start = nsi.index("!macro STOP_RUNNING_CINEWRIGHT")
+    macro = nsi[start : nsi.index("!macroend", start)]
+    return macro, re.search(r"nsExec::ExecToLog `(.*)`", macro).group(1)
+
+
+@pytest.mark.parametrize(
+    ("section", "guard"),
+    [("Cinewright", "Call ValidateInstallDir"), ("Uninstall", 'ReadRegStr $R0 HKCU "${UNINST_KEY}"')],
+)
+def test_installer_closes_a_running_cinewright_after_its_guard_and_before_the_first_file_operation(section, guard):
+    lines = nsi_section_lines(section)
+    guard_at = next(i for i, line in enumerate(lines) if guard in line)
+    stop_at = next(i for i, line in enumerate(lines) if line.strip().startswith("!insertmacro STOP_RUNNING_CINEWRIGHT "))
+    first_file_operation = next(i for i, line in enumerate(lines) if FILE_OPERATION.match(line))
+    assert guard_at < stop_at < first_file_operation, lines[first_file_operation]
+
+
+def test_stop_macro_stops_every_process_under_the_installation_folder_and_waits():
+    macro, command = stop_macro_command()
+    script = command.replace("$$", "$")
+    assert command.startswith('"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -Command "')
+    # The folder arrives through the environment, set from a register: no path is ever quoted into a command.
+    assert "System::Call 'kernel32::SetEnvironmentVariable(t \"CINEWRIGHT_STOP_DIR\", t r1)'" in macro
+    assert "$INSTDIR" not in command
+    assert "$d=([string]$env:CINEWRIGHT_STOP_DIR).TrimEnd('\\'); if($d.Length -lt 3){exit 2}; $d+='\\';" in script
+    assert "Get-CimInstance Win32_Process" in script
+    assert "$_.ExecutablePath.StartsWith($d,[StringComparison]::OrdinalIgnoreCase)" in script  # -like would read [ ] as wildcards
+    assert "$_.ProcessId -ne $me" in script  # an uninstaller run in place lies in the folder itself
+    assert "Stop-Process -Id $p.ProcessId -Force" in script
+    assert "if(-not (Find-Mine)){exit 0}" in script and script.endswith('exit 3"')
+    assert "${If} $0 == 3" in macro and "Abort" in macro
+    assert '"' not in script[script.index('-Command "') + len('-Command "') : -1]  # one quoted argument for PowerShell
+
+
+def test_stop_macro_command_is_valid_nsis_and_fits_its_string_limit():
+    _, command = stop_macro_command()
+    assert "`" not in command  # the NSIS string is quoted with backticks
+    assert re.sub(r"\$\$|\$SYSDIR", "", command).count("$") == 0  # every PowerShell $ is escaped, or makensis -WX fails
+    expanded = command.replace("$$", "$").replace("$SYSDIR", "C:\\Windows\\SysWOW64")
+    assert len(expanded) < 1024  # NSIS_MAX_STRLEN of a standard NSIS build
+
+
 def test_installer_notices_list_everything_the_installer_ships():
     flat = " ".join(build.NOTICES.read_text(encoding="utf-8").split())
     for needle in (
