@@ -93,6 +93,18 @@ def answers(monkeypatch, version: str | None) -> None:
     monkeypatch.setattr(launcher, "running_version", lambda config: version)
 
 
+def answers_in_turn(monkeypatch, *versions: str | None) -> list[str | None]:
+    """The core answers each probe with the next of `versions`; returns those not asked for yet."""
+    left = list(versions)
+
+    def probe(config):
+        assert left, "probed more often than expected"
+        return left.pop(0)
+
+    monkeypatch.setattr(launcher, "running_version", probe)
+    return left
+
+
 def log_text(home: Path) -> str:
     return (home / "logs" / "cinewright.log").read_text(encoding="utf-8")
 
@@ -204,7 +216,8 @@ def test_a_core_that_does_not_stop_is_reported_and_nothing_starts(monkeypatch, i
     assert "Could not stop" in log_text(home)
 
 
-def test_a_port_that_stays_busy_is_reported_and_nothing_starts(installation, caplog):
+def test_a_port_that_stays_busy_is_reported_and_nothing_starts(monkeypatch, installation, caplog):
+    answers(monkeypatch, OLD)
     processes = FakeProcesses([old_core(installation)], port_stays_busy=True)
     with caplog.at_level(logging.INFO, logger="cinewright.launcher"):
         assert launcher.stop_other_version(load_config(), OLD, processes, installation, free_timeout=0) is Replacement.FAILED
@@ -212,7 +225,8 @@ def test_a_port_that_stays_busy_is_reported_and_nothing_starts(installation, cap
     assert "Port 8737 is still in use" in caplog.text
 
 
-def test_this_process_and_its_parent_are_never_stopped(installation):
+def test_this_process_and_its_parent_are_never_stopped(monkeypatch, installation):
+    answers(monkeypatch, OLD)
     shim = ProcessInfo(os.getppid(), str(installation / "runtime" / "Scripts" / "pythonw.exe"))
     core = ProcessInfo(4002, str(installation / "python" / "pythonw.exe"), shim)
     processes = FakeProcesses([core])
@@ -230,6 +244,79 @@ def test_a_port_shared_with_a_foreign_listener_is_left_alone(installation, tmp_p
     processes = FakeProcesses([old_core(installation), foreign])
     assert launcher.stop_other_version(load_config(), OLD, processes, installation) is Replacement.LEFT_RUNNING
     assert processes.stopped == []
+
+
+def test_a_core_that_ended_before_the_lookup_is_followed_by_a_start(monkeypatch, installation, home):
+    started, opened = [], []
+    left = answers_in_turn(monkeypatch, OLD, None)
+    monkeypatch.setattr(launcher, "installation_dir", lambda: installation)
+    monkeypatch.setattr(launcher, "serve", lambda config: started.append(config) or True)
+    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
+    processes = FakeProcesses([])
+    assert launcher.main([], processes=processes) == 0
+    assert left == []
+    assert processes.stopped == []
+    assert len(started) == 1 and opened == []
+    assert "It no longer answers, so the launcher starts." in log_text(home)
+
+
+def test_a_core_whose_process_cannot_be_found_keeps_running(monkeypatch, installation, home):
+    opened = []
+    left = answers_in_turn(monkeypatch, OLD, OLD)
+    monkeypatch.setattr(launcher, "installation_dir", lambda: installation)
+    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
+    processes = FakeProcesses([])
+    assert launcher.main([], processes=processes) == 0
+    assert left == []
+    assert processes.stopped == []
+    assert opened == ["http://127.0.0.1:8737/"]
+    assert "No process listening on port 8737 was found, so it keeps running" in log_text(home)
+
+
+def test_a_core_of_this_version_started_meanwhile_is_not_stopped(monkeypatch, installation, home):
+    """Two launchers of the new version start together: the other one has already replaced the old core."""
+    opened = []
+    left = answers_in_turn(monkeypatch, OLD, __version__)
+    monkeypatch.setattr(launcher, "installation_dir", lambda: installation)
+    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
+    processes = FakeProcesses([old_core(installation)])
+    assert launcher.main([], processes=processes) == 0
+    assert left == []
+    assert processes.stopped == []
+    assert opened == ["http://127.0.0.1:8737/"]
+    assert f"Cinewright {__version__} answers now, started meanwhile, so nothing is stopped" in log_text(home)
+
+
+def test_a_core_that_misses_the_second_probe_is_still_stopped(monkeypatch, installation, home):
+    """A busy old core may not answer within the probe's timeout; its process still holds the port."""
+    started = []
+    left = answers_in_turn(monkeypatch, OLD, None)
+    monkeypatch.setattr(launcher, "installation_dir", lambda: installation)
+    monkeypatch.setattr(launcher, "serve", lambda config: started.append(config) or True)
+    core = old_core(installation)
+    processes = FakeProcesses([core])
+    assert launcher.main([], processes=processes) == 0
+    assert left == []
+    assert processes.stopped == [[core, core.parent]]
+    assert len(started) == 1
+    assert f"Stopped Cinewright {OLD}; port 8737 is free." in log_text(home)
+
+
+def test_an_error_while_replacing_is_logged_and_nothing_starts(monkeypatch, installation, home):
+    class BrokenProcesses(FakeProcesses):
+        def listening(self, port: int) -> list[ProcessInfo]:
+            raise OSError("the process table cannot be read")
+
+    opened = []
+    answers(monkeypatch, OLD)
+    monkeypatch.setattr(launcher, "installation_dir", lambda: installation)
+    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
+    processes = BrokenProcesses([])
+    assert launcher.main([], processes=processes) == 1
+    assert processes.stopped == [] and opened == []
+    text = log_text(home)
+    assert f"Could not replace Cinewright {OLD}, so Cinewright {__version__} does not start" in text
+    assert "OSError: the process table cannot be read" in text
 
 
 # Where the installation is

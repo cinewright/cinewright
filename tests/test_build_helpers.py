@@ -377,15 +377,21 @@ def test_stop_macro_stops_every_process_under_the_installation_folder_and_waits(
     script = command.replace("$$", "$")
     assert command.startswith('"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -Command "')
     # The folder arrives through the environment, set from a register: no path is ever quoted into a command.
-    assert "System::Call 'kernel32::SetEnvironmentVariable(t \"CINEWRIGHT_STOP_DIR\", t r1)'" in macro
+    set_folder = macro.index('StrCpy $1 "$INSTDIR"')
+    assert set_folder < macro.index("System::Call 'kernel32::SetEnvironmentVariable(t \"CINEWRIGHT_STOP_DIR\", t r1)'")
     assert "$INSTDIR" not in command
     assert "$d=([string]$env:CINEWRIGHT_STOP_DIR).TrimEnd('\\'); if($d.Length -lt 3){exit 2}; $d+='\\';" in script
     assert "Get-CimInstance Win32_Process" in script
     assert "$_.ExecutablePath.StartsWith($d,[StringComparison]::OrdinalIgnoreCase)" in script  # -like would read [ ] as wildcards
     assert "$_.ProcessId -ne $me" in script  # an uninstaller run in place lies in the folder itself
-    assert "Stop-Process -Id $p.ProcessId -Force" in script
-    assert "if(-not (Find-Mine)){exit 0}" in script and script.endswith('exit 3"')
+    assert "Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue" in script
+    assert "if(-not (Find-Mine)){exit 0}" in script and "exit 3}" in script
+    # A process list that cannot be read must not pass for "nothing runs": Get-CimInstance's errors do not stop a
+    # script by themselves, so Find-Mine would return nothing and the loop would exit 0.
+    assert "-Command \"$ErrorActionPreference='Stop'; try{$d=" in script
+    assert script.endswith("}catch{'Could not list processes: '+$_; exit 4}\"")
     assert "${If} $0 == 3" in macro and "Abort" in macro
+    assert "${ElseIf} $0 != 0" in macro and "Could not check whether Cinewright is running" in macro
     assert '"' not in script[script.index('-Command "') + len('-Command "') : -1]  # one quoted argument for PowerShell
 
 

@@ -90,12 +90,14 @@ BrandingText "Cinewright ${VERSION}"
 ; then checks every half second, at most 80 times, until none is left. The worker runs from the data folder and
 ; ends with the core.
 ; The folder reaches PowerShell in an environment variable set from a register, so no path is quoted or parsed.
-; PowerShell exits with 3 when a process is still running; MESSAGE then explains why setup stops. Uses $0 and $1.
+; PowerShell exits with 3 when a process is still running; MESSAGE then explains why setup stops. Any other failure,
+; such as a process list that cannot be read (exit 4), is logged and setup continues; after an update, the new
+; launcher then replaces a core of another version from this folder on its first start. Uses $0 and $1.
 !macro STOP_RUNNING_CINEWRIGHT MESSAGE
   DetailPrint "Closing Cinewright if it is running"
   StrCpy $1 "$INSTDIR"
   System::Call 'kernel32::SetEnvironmentVariable(t "CINEWRIGHT_STOP_DIR", t r1)'
-  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$$d=([string]$$env:CINEWRIGHT_STOP_DIR).TrimEnd('\'); if($$d.Length -lt 3){exit 2}; $$d+='\'; $$me=(Get-CimInstance Win32_Process -Filter ('ProcessId='+$$PID)).ParentProcessId; function Find-Mine{Get-CimInstance Win32_Process | Where-Object {$$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d,[StringComparison]::OrdinalIgnoreCase) -and $$_.ProcessId -ne $$me}}; foreach($$p in Find-Mine){'Stopping '+$$p.ExecutablePath+' (process '+$$p.ProcessId+')'; Stop-Process -Id $$p.ProcessId -Force -ErrorAction SilentlyContinue}; for($$i=0;$$i -lt 80;$$i++){if(-not (Find-Mine)){exit 0}; Start-Sleep -Milliseconds 500}; 'Still running: '+((Find-Mine).ExecutablePath -join ', '); exit 3"`
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$$ErrorActionPreference='Stop'; try{$$d=([string]$$env:CINEWRIGHT_STOP_DIR).TrimEnd('\'); if($$d.Length -lt 3){exit 2}; $$d+='\'; $$me=(Get-CimInstance Win32_Process -Filter ('ProcessId='+$$PID)).ParentProcessId; function Find-Mine{Get-CimInstance Win32_Process | Where-Object {$$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d,[StringComparison]::OrdinalIgnoreCase) -and $$_.ProcessId -ne $$me}}; foreach($$p in Find-Mine){'Stopping '+$$p.ExecutablePath+' (process '+$$p.ProcessId+')'; Stop-Process -Id $$p.ProcessId -Force -ErrorAction SilentlyContinue}; for($$i=0;$$i -lt 80;$$i++){if(-not (Find-Mine)){exit 0}; Start-Sleep -Milliseconds 500}; 'Still running: '+((Find-Mine).ExecutablePath -join ', '); exit 3}catch{'Could not list processes: '+$$_; exit 4}"`
   Pop $0
   !insertmacro CLEAR_ENV "CINEWRIGHT_STOP_DIR"
   ${If} $0 == 3
@@ -187,14 +189,14 @@ Section "Cinewright" SecMain
 
   SetOutPath "$INSTDIR"
 
-  ; An upgrade sets the previous runtime aside first: the rename fails while a program still uses it,
-  ; and a failed upgrade can put the old runtime back.
+  ; An upgrade sets the previous runtime aside first, so a failed upgrade can put it back. The rename does not
+  ; reliably fail while Cinewright runs (#106); closing it is the step above.
   !insertmacro RMDIR_TREE "$INSTDIR\runtime.old"
   ${If} ${FileExists} "$INSTDIR\runtime\*.*"
     ClearErrors
     Rename "$INSTDIR\runtime" "$INSTDIR\runtime.old"
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so setup cannot replace it. Quit Cinewright and run setup again." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so setup cannot replace it. Restart the computer, then run setup again." /SD IDOK
       Abort "Cinewright is running."
     ${EndIf}
   ${EndIf}
@@ -277,7 +279,7 @@ Section "Uninstall"
     ClearErrors
     Rename "$INSTDIR\runtime" "$INSTDIR\runtime.old"
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so it cannot be removed. Quit Cinewright and run the uninstaller again." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Cinewright is running, so it cannot be removed. Restart the computer, then run the uninstaller again." /SD IDOK
       Abort "Cinewright is running."
     ${EndIf}
   ${EndIf}

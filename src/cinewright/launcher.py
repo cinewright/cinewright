@@ -195,8 +195,8 @@ def _describe(processes: Iterable[ProcessInfo]) -> str:
 
 
 class Replacement(enum.Enum):
-    STOPPED = "stopped"  # the other core is gone and its port is free: start
-    LEFT_RUNNING = "left running"  # not from this installation: open the browser on it
+    STOPPED = "stopped"  # the other core is gone: start
+    LEFT_RUNNING = "left running"  # not from this installation, or now of this version: open the browser on it
     FAILED = "failed"  # it is from this installation but did not stop or did not free the port
 
 
@@ -212,7 +212,9 @@ def stop_other_version(
     """Stop the core of another `version` that answers on the port, if its process runs from the installation `folder`.
 
     Its parent goes too when it runs from there as well: the runtime's launcher shim, which started the interpreter.
-    Never this process or its parent. Once they ended, waits until nothing listens on the port any more.
+    Never this process or its parent. Once they ended, waits until nothing listens on the port any more. The core is
+    probed again when no process holds the port and just before the stop, which narrows, but does not close, the
+    window in which two launchers of this version start together.
     """
     mismatch = f"Cinewright {version or '(no version)'} answers on {config.bind}, but this is Cinewright {__version__}"
     if folder is None:
@@ -220,7 +222,14 @@ def stop_other_version(
         return Replacement.LEFT_RUNNING
     own = {os.getpid(), os.getppid()}
     listeners = processes.listening(config.port)
-    if not listeners or any(p.pid in own or not lies_in(p.exe, folder) for p in listeners):
+    if not listeners:
+        # It may have ended since it answered; then the port is free and this launcher starts.
+        if running_version(config) is None:
+            log.info("%s. It no longer answers, so the launcher starts.", mismatch)
+            return Replacement.STOPPED
+        log.warning("%s. No process listening on port %d was found, so it keeps running; opening the browser.", mismatch, config.port)
+        return Replacement.LEFT_RUNNING
+    if any(p.pid in own or not lies_in(p.exe, folder) for p in listeners):
         log.warning(
             "%s. Its process, %s, is not from this installation in %s, so it keeps running; opening the browser.",
             mismatch,
@@ -233,6 +242,11 @@ def stop_other_version(
         parent = listener.parent
         if parent is not None and parent.pid not in own and lies_in(parent.exe, folder) and parent not in targets:
             targets.append(parent)
+    # Another launcher of this version may have replaced it meanwhile. A core that misses this probe, for example
+    # because it is busy, is still stopped: only an answer naming this version cancels the stop.
+    if running_version(config) == __version__:
+        log.info("%s. Cinewright %s answers now, started meanwhile, so nothing is stopped; opening the browser.", mismatch, __version__)
+        return Replacement.LEFT_RUNNING
     log.info("%s. It runs from this installation, so the launcher stops it: %s.", mismatch, _describe(targets))
     left = processes.stop(targets, stop_timeout)
     if left:
@@ -292,7 +306,11 @@ def main(argv: list[str] | None = None, processes: Processes | None = None) -> i
         webbrowser.open(f"{config.base_url}/")
         return 0
     if version is not None:
-        replacement = stop_other_version(config, version, processes or SystemProcesses(), installation_dir())
+        try:
+            replacement = stop_other_version(config, version, processes or SystemProcesses(), installation_dir())
+        except Exception:
+            log.exception("Could not replace Cinewright %s, so Cinewright %s does not start", version or "(no version)", __version__)
+            return 1
         if replacement is Replacement.FAILED:
             return 1
         if replacement is Replacement.LEFT_RUNNING:
