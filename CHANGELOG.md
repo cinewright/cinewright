@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0](https://github.com/cinewright/cinewright/compare/v0.1.0...v0.2.0) (2026-11-26)
+
+
+### Features
+
+* add a copy icon next to every shortened hash and id ([#114](https://github.com/cinewright/cinewright/issues/114)) ([78ef6a5](https://github.com/cinewright/cinewright/commit/78ef6a5651a3176b60b3656ced0593f635ee83ac))
+* complete the Wan2GP generation path for installed quantizations and still images ([#88](https://github.com/cinewright/cinewright/issues/88)) ([dee9791](https://github.com/cinewright/cinewright/commit/dee979132ae09466d1f4ac092eb6b97c5c6759a9))
+* create images and clips in the Generate view and open them in the Library ([#89](https://github.com/cinewright/cinewright/issues/89)) ([f219e0a](https://github.com/cinewright/cinewright/commit/f219e0a80cdc0f4885d52ffcf2147c2c962704e8))
+* delete images and clips from the Library ([#115](https://github.com/cinewright/cinewright/issues/115)) ([b3e082e](https://github.com/cinewright/cinewright/commit/b3e082e87327a9098a2f5884f603593d434e7351))
+* install and remove models from the Models view with hash-checked downloads ([#86](https://github.com/cinewright/cinewright/issues/86)) ([35458d7](https://github.com/cinewright/cinewright/commit/35458d7dca4b7e75887cfef3fa2e9c37c2271907))
+
+
+### Bug Fixes
+
+* remove models for the quota only after the new install registered ([#105](https://github.com/cinewright/cinewright/issues/105)) ([67bcb30](https://github.com/cinewright/cinewright/commit/67bcb3038acbe1f28fdcd7b092fae38d936e7b9e))
+* show the finished result in the Job panel instead of the last preview frame ([#113](https://github.com/cinewright/cinewright/issues/113)) ([ad3cc2e](https://github.com/cinewright/cinewright/commit/ad3cc2e2e646297a9c2a03f1c391a8aadfbf779d))
+* stop a running Cinewright from the installation folder before installing or starting another version ([#112](https://github.com/cinewright/cinewright/issues/112)) ([8215575](https://github.com/cinewright/cinewright/commit/8215575f9c1d24430ed169dd23d0ae1c2bd13092))
+* stop offering image-to-image on LTX-2 2.3, which cannot edit images ([#111](https://github.com/cinewright/cinewright/issues/111)) ([38c3aa9](https://github.com/cinewright/cinewright/commit/38c3aa9adfa06fbedc6c47ee5baf94d6cb5793b9))
+
 ## [0.1.0](https://github.com/cinewright/cinewright/compare/v0.0.4...v0.1.0) (2026-11-25)
 
 
